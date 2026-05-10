@@ -115,15 +115,12 @@ services:
       dockerfile: Dockerfile
     image: long-exposure-prod-worker:latest
     container_name: long-exposure-prod-worker
+    env_file: .env
     environment:
+      APP_ENV: production
       TEMPORAL_HOST: long-exposure-prod-temporal:7233
       POSTGRES_HOST: long-exposure-prod-postgres
       POSTGRES_PORT: "5432"
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      LLAMA_URL: ${LLAMA_URL}
-      IEX_HIST_BASE_URL: ${IEX_HIST_BASE_URL}
     depends_on:
       postgres:
         condition: service_healthy
@@ -141,13 +138,11 @@ services:
       dockerfile: Dockerfile
     image: long-exposure-prod-api:latest
     container_name: long-exposure-prod-api
+    env_file: .env
     environment:
       APP_ENV: production
       POSTGRES_HOST: long-exposure-prod-postgres
       POSTGRES_PORT: "5432"
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     depends_on:
       postgres:
         condition: service_healthy

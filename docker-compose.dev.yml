@@ -107,15 +107,12 @@ services:
       dockerfile: Dockerfile.dev
     image: long-exposure-dev-worker:latest
     container_name: long-exposure-dev-worker
+    env_file: .env
     environment:
+      APP_ENV: development
       TEMPORAL_HOST: long-exposure-dev-temporal:7233
       POSTGRES_HOST: long-exposure-dev-postgres
       POSTGRES_PORT: "5432"
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      LLAMA_URL: ${LLAMA_URL}
-      IEX_HIST_BASE_URL: ${IEX_HIST_BASE_URL}
     volumes:
       - ./parser:/app
       - long-exposure-dev-gradle-cache:/root/.gradle
@@ -135,13 +132,11 @@ services:
       dockerfile: Dockerfile.dev
     image: long-exposure-dev-api:latest
     container_name: long-exposure-dev-api
+    env_file: .env
     environment:
       APP_ENV: development
       POSTGRES_HOST: long-exposure-dev-postgres
       POSTGRES_PORT: "5432"
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - ./api:/app
     command: uvicorn long_exposure_api.main:app --host 0.0.0.0 --port 3001 --reload
