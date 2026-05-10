@@ -61,12 +61,13 @@ It's open source from day one — MIT licensed — positioned as a reference imp
 
 ### Service layout
 
-Every service runs in Docker. No host ports published for HTTP services — the workspace's shared `proxy` (Caddy) handles routing by hostname, and a single Cloudflare tunnel terminates `longexposure.vedanta.systems` at Caddy. Logs auto-flow to Loki via Promtail, container metrics via cAdvisor — no per-service instrumentation needed for v1.
+Every service runs in Docker. No host ports published for HTTP services — the workspace's shared `proxy` (Caddy) handles routing by hostname on the tailnet. Logs auto-flow to Loki via Promtail, container metrics via cAdvisor — no per-service instrumentation needed for v1.
+
+Long Exposure does not host its own frontend. The UI surfaces inside the unified portal at `vedanta.systems` (served by `~/workspace/dev/vedanta-systems/`), which proxies `/api/long-exposure/*` to this project's API container over the shared `proxy` docker network. See [Frontend integration](#frontend-integration) below.
 
 | Service | Container | URL (tailnet) | Internal port | Node |
 |---|---|---|---|---|
-| Frontend (Svelte SPA) | `long-exposure-prod-frontend` | `long-exposure-prod-frontend.luv` *(public: longexposure.vedanta.systems via Cloudflare → Caddy)* | 3000 | luv |
-| API (FastAPI) | `long-exposure-prod-api` | `long-exposure-prod-api.luv` | 3001 | luv |
+| API (FastAPI) | `long-exposure-prod-api` | `long-exposure-prod-api.luv` *(also reachable as `vedanta.systems/api/long-exposure/*` via vedanta-systems' nginx)* | 3001 | luv |
 | Worker (Java + Temporal SDK) | `long-exposure-prod-worker` | — (no HTTP) | — | luv |
 | Temporal server | `long-exposure-prod-temporal` | — (gRPC only, internal) | 7233 | luv |
 | Temporal UI | `long-exposure-prod-temporal-ui` | `long-exposure-prod-temporal-ui.luv` | 8080 | luv |
@@ -379,11 +380,17 @@ Structured JSON logging via `structlog`; auto-shipped to Loki by the workspace p
 
 ---
 
-## Frontend
+## Frontend integration
 
-Svelte SPA. Served by Caddy on the workspace `proxy` network. Public ingress via Cloudflare Tunnel → cloudflared sidecar → Caddy → frontend container.
+Long Exposure does **not** ship its own frontend. The unified portal at [vedanta.systems](https://vedanta.systems) (sources in `~/workspace/dev/vedanta-systems/`, React + TypeScript + shadcn/ui) hosts a per-project browser component that consumes this project's API.
 
-Design principles: clean, minimal, timeline-first, mobile-friendly, dark mode by default. Each event card exposes the score breakdown ("why this event made the cut") on hover/tap.
+The integration contract:
+
+- This repo exposes the API container on the workspace `proxy` network as `long-exposure-prod-api.luv` (and `long-exposure-dev-api.luv` for the dev stack).
+- `vedanta-systems` adds an nginx location for `/api/long-exposure/*` that proxies to the API container, mirroring the existing `/api/found-footy/*` and `/api/spin-cycle/*` blocks.
+- A new `src/components/long-exposure-browser.tsx` in `vedanta-systems` consumes `/api/long-exposure/v1/*` and renders the timeline UI.
+
+Design principles for the browser component (lives in `vedanta-systems`): clean, minimal, timeline-first, mobile-friendly, dark mode by default. Each event card exposes the score breakdown ("why this event made the cut") on hover/tap.
 
 ---
 
@@ -393,12 +400,13 @@ The repository is MIT-licensed from day one. The README frames the project as a 
 
 Repo layout:
 
-- `parser/` — the Java module
-- `pipeline/` — Temporal worker definitions
+- `parser/` — the Java module (also hosts the Temporal worker registration)
 - `api/` — FastAPI service
-- `frontend/` — Svelte
-- `docker-compose.yml` — full stack reproducible by anyone
-- `docs/protocol-notes.md` — extracted notes from reading IEX's TOPS spec, with errata or gotchas
+- `deploy/` — host-level integration notes (Caddy, vedanta-systems wiring)
+- `docs/` — agent + contributor docs (architecture, plan, todo, decisions, protocol-notes, operations)
+- `docker-compose.yml` / `docker-compose.dev.yml` — full stack reproducible by anyone
+
+Frontend is not part of this repo; see [Frontend integration](#frontend-integration).
 
 ---
 
@@ -427,8 +435,8 @@ Prompt engineering for `llama-large.joi`. Implement the narration pipeline with 
 **Days 20–21 — Temporal + API**
 Wire pipeline stages into Temporal workflow with proper retry policies and heartbeating. Implement FastAPI endpoints. Full end-to-end pipeline test: download → parse → validate → score → narrate → store → publish.
 
-**Day 22 — Frontend + deploy**
-Build Svelte timeline UI. Wire to API. Deploy via Cloudflare tunnel + workspace Caddy proxy. Public launch with backfilled 30 days already narrated and live.
+**Day 22 — vedanta-systems integration + deploy**
+In `~/workspace/dev/vedanta-systems/`: add the `/api/long-exposure/*` nginx proxy, build `src/components/long-exposure-browser.tsx` consuming the API, register the project in `src/App.tsx`. Bring up the production stack on luv. Public launch with 30 backfilled days already narrated and live at `vedanta.systems`.
 
 ---
 

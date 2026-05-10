@@ -1,8 +1,7 @@
 # Production Docker Compose — Long Exposure
 #
 # HTTP services reachable via the workspace `proxy` network at:
-#   long-exposure-prod-frontend.luv     (also: longexposure.vedanta.systems via Cloudflare)
-#   long-exposure-prod-api.luv
+#   long-exposure-prod-api.luv          consumed by vedanta-systems' nginx as /api/long-exposure/*
 #   long-exposure-prod-temporal-ui.luv
 #   long-exposure-prod-adminer.luv
 #
@@ -12,8 +11,12 @@
 #   long-exposure-prod-temporal:7233           temporal gRPC
 #   long-exposure-prod-worker                  Java + Temporal SDK
 #
-# See deploy/INFRA-NOTES.md for the Caddyfile + cloudflared changes needed
-# on luv before this stack is publicly reachable.
+# No frontend service — Long Exposure surfaces inside vedanta-systems
+# (~/workspace/dev/vedanta-systems/) as a `long-exposure-browser` component.
+# vedanta-systems' nginx proxies /api/long-exposure/* to long-exposure-prod-api
+# over the shared `proxy` docker network.
+#
+# See deploy/INFRA-NOTES.md for the Caddyfile entries needed on luv.
 
 name: long-exposure-prod
 
@@ -146,20 +149,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - long-exposure-prod
-      - proxy
-
-  # ─── Svelte SPA served via nginx ──────────────────────────────────────────
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-      args:
-        VITE_API_BASE_URL: ${VITE_API_BASE_URL}
-    image: long-exposure-prod-frontend:latest
-    container_name: long-exposure-prod-frontend
     restart: unless-stopped
     networks:
       - long-exposure-prod

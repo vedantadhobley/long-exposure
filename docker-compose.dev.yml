@@ -2,15 +2,15 @@
 #
 # Dev variant of docker-compose.yml. Differences:
 #   - container_name suffix is `-dev` (so URLs become long-exposure-dev-*.luv)
-#   - source code bind-mounted into worker/api/frontend for hot reload
-#   - frontend runs Vite dev server (not nginx) for HMR
+#   - source code bind-mounted into worker/api for hot reload
 #   - separate volumes for dev DB so dev/prod don't share state
 #
 # HTTP services reachable via the workspace `proxy` network at:
-#   long-exposure-dev-frontend.luv      (Vite dev server with HMR)
-#   long-exposure-dev-api.luv
+#   long-exposure-dev-api.luv           consumed by vedanta-systems-dev's nginx
 #   long-exposure-dev-temporal-ui.luv
 #   long-exposure-dev-adminer.luv
+#
+# No frontend service — see docker-compose.yml header.
 
 name: long-exposure-dev
 
@@ -148,21 +148,6 @@ services:
       - long-exposure-dev
       - proxy
 
-  frontend:
-    image: node:20-alpine
-    container_name: long-exposure-dev-frontend
-    working_dir: /app
-    environment:
-      VITE_API_BASE_URL: ${VITE_API_BASE_URL}
-    volumes:
-      - ./frontend:/app
-      - long-exposure-dev-frontend-node-modules:/app/node_modules
-    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 3000"
-    restart: unless-stopped
-    networks:
-      - long-exposure-dev
-      - proxy
-
 volumes:
   long-exposure-dev-postgres-data:
     name: long-exposure-dev-postgres-data
@@ -170,8 +155,6 @@ volumes:
     name: long-exposure-dev-temporal-postgres-data
   long-exposure-dev-gradle-cache:
     name: long-exposure-dev-gradle-cache
-  long-exposure-dev-frontend-node-modules:
-    name: long-exposure-dev-frontend-node-modules
 
 networks:
   long-exposure-dev:
