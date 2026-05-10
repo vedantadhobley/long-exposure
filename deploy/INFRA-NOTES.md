@@ -12,35 +12,23 @@ proxies `/api/long-exposure/*` to this project's API container.
 
 ## 1. Caddy routes (luv)
 
-The Caddy config on luv is split per-project. This project's routes live in:
+The Caddy config on luv is split per-project. This project's routes — three
+prod hostnames (`api`, `temporal-ui`, `adminer`) and three dev counterparts —
+live in:
 
 ```
 ~/workspace/proxy/caddy/caddy.d/long-exposure.caddy
 ```
 
-Reference content (current source of truth is the file above):
-
-```caddy
-# ─── prod ──────────────────────────────────────────────────────────────────
-http://long-exposure-prod-api.{$BASE_DOMAIN}         { reverse_proxy long-exposure-prod-api:3001 }
-http://long-exposure-prod-temporal-ui.{$BASE_DOMAIN} { reverse_proxy long-exposure-prod-temporal-ui:8080 }
-http://long-exposure-prod-adminer.{$BASE_DOMAIN}     { reverse_proxy long-exposure-prod-adminer:8080 }
-
-# ─── dev ───────────────────────────────────────────────────────────────────
-http://long-exposure-dev-api.{$BASE_DOMAIN}          { reverse_proxy long-exposure-dev-api:3001 }
-http://long-exposure-dev-temporal-ui.{$BASE_DOMAIN}  { reverse_proxy long-exposure-dev-temporal-ui:8080 }
-http://long-exposure-dev-adminer.{$BASE_DOMAIN}      { reverse_proxy long-exposure-dev-adminer:8080 }
-```
-
-After editing the file, reload Caddy without restarting the container:
+That file is the source of truth. After editing it, reload Caddy in place:
 
 ```bash
 docker exec proxy-caddy caddy reload --config /etc/caddy/Caddyfile
 ```
 
-(The proxy stack uses a directory bind mount, so atomic-write edits to
-files inside `caddy/` flow through and `caddy reload` picks them up.
-See `~/workspace/proxy/README.md` for the gotcha mechanics.)
+(The proxy stack uses a directory bind mount, so atomic-write edits flow
+through and `caddy reload` picks them up. See `~/workspace/proxy/README.md`
+for the gotcha mechanics.)
 
 ## 2. vedanta-systems integration (separate repo)
 
