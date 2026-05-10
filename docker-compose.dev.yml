@@ -1,0 +1,190 @@
+# Development Docker Compose — Long Exposure
+#
+# Dev variant of docker-compose.yml. Differences:
+#   - container_name suffix is `-dev` (so URLs become long-exposure-dev-*.luv)
+#   - source code bind-mounted into worker/api/frontend for hot reload
+#   - frontend runs Vite dev server (not nginx) for HMR
+#   - separate volumes for dev DB so dev/prod don't share state
+#
+# HTTP services reachable via the workspace `proxy` network at:
+#   long-exposure-dev-frontend.luv      (Vite dev server with HMR)
+#   long-exposure-dev-api.luv
+#   long-exposure-dev-temporal-ui.luv
+#   long-exposure-dev-adminer.luv
+
+name: long-exposure-dev
+
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: long-exposure-dev-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - long-exposure-dev-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - long-exposure-dev
+
+  adminer:
+    image: adminer:latest
+    container_name: long-exposure-dev-adminer
+    environment:
+      ADMINER_DEFAULT_SERVER: long-exposure-dev-postgres
+      ADMINER_DESIGN: dracula
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - long-exposure-dev
+      - proxy
+
+  temporal-postgres:
+    image: postgres:16-alpine
+    container_name: long-exposure-dev-temporal-postgres
+    environment:
+      POSTGRES_USER: ${TEMPORAL_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${TEMPORAL_POSTGRES_PASSWORD}
+      POSTGRES_DB: temporal
+    volumes:
+      - long-exposure-dev-temporal-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - long-exposure-dev
+
+  temporal:
+    image: temporalio/auto-setup:latest
+    container_name: long-exposure-dev-temporal
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=${TEMPORAL_POSTGRES_USER}
+      - POSTGRES_PWD=${TEMPORAL_POSTGRES_PASSWORD}
+      - POSTGRES_SEEDS=long-exposure-dev-temporal-postgres
+      - BIND_ON_IP=0.0.0.0
+    depends_on:
+      temporal-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - long-exposure-dev
+
+  temporal-ui:
+    image: temporalio/ui:latest
+    container_name: long-exposure-dev-temporal-ui
+    environment:
+      - TEMPORAL_ADDRESS=long-exposure-dev-temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://long-exposure-dev-temporal-ui.${BASE_DOMAIN:-luv}
+    depends_on:
+      - temporal
+    restart: unless-stopped
+    networks:
+      - long-exposure-dev
+      - proxy
+
+  worker:
+    build:
+      context: ./parser
+      dockerfile: Dockerfile.dev
+    image: long-exposure-dev-worker:latest
+    container_name: long-exposure-dev-worker
+    environment:
+      TEMPORAL_HOST: long-exposure-dev-temporal:7233
+      POSTGRES_HOST: long-exposure-dev-postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      LLAMA_URL: ${LLAMA_URL}
+      IEX_HIST_BASE_URL: ${IEX_HIST_BASE_URL}
+    volumes:
+      - ./parser:/app
+      - long-exposure-dev-gradle-cache:/root/.gradle
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - long-exposure-dev
+      - luv-dev
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile.dev
+    image: long-exposure-dev-api:latest
+    container_name: long-exposure-dev-api
+    environment:
+      APP_ENV: development
+      POSTGRES_HOST: long-exposure-dev-postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./api:/app
+    command: uvicorn long_exposure_api.main:app --host 0.0.0.0 --port 3001 --reload
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - long-exposure-dev
+      - proxy
+
+  frontend:
+    image: node:20-alpine
+    container_name: long-exposure-dev-frontend
+    working_dir: /app
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+    volumes:
+      - ./frontend:/app
+      - long-exposure-dev-frontend-node-modules:/app/node_modules
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 3000"
+    restart: unless-stopped
+    networks:
+      - long-exposure-dev
+      - proxy
+
+volumes:
+  long-exposure-dev-postgres-data:
+    name: long-exposure-dev-postgres-data
+  long-exposure-dev-temporal-postgres-data:
+    name: long-exposure-dev-temporal-postgres-data
+  long-exposure-dev-gradle-cache:
+    name: long-exposure-dev-gradle-cache
+  long-exposure-dev-frontend-node-modules:
+    name: long-exposure-dev-frontend-node-modules
+
+networks:
+  long-exposure-dev:
+    name: long-exposure-dev
+    driver: bridge
+  proxy:
+    name: proxy
+    external: true
+  luv-dev:
+    name: luv-dev
+    external: true

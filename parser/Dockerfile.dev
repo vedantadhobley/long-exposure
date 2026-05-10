@@ -1,0 +1,8 @@
+# Dev Dockerfile — keeps Gradle inside the container and bind-mounts source.
+# Caller is expected to mount ./parser at /app and run `./gradlew run` (or
+# `gradle run`) inside the container during development.
+
+FROM gradle:8.10-jdk21-alpine
+RUN apk add --no-cache libpcap
+WORKDIR /app
+ENTRYPOINT ["gradle", "--no-daemon", "run"]

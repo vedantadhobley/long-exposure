@@ -1,0 +1,53 @@
+plugins {
+    application
+    java
+}
+
+group = "com.longexposure"
+version = "0.1.0"
+
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(21))
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // pcap parsing — the central dependency
+    implementation("org.pcap4j:pcap4j-core:1.8.2")
+    implementation("org.pcap4j:pcap4j-packetfactory-static:1.8.2")
+
+    // Postgres driver (TimescaleDB speaks PG wire)
+    implementation("org.postgresql:postgresql:42.7.4")
+
+    // Temporal Java SDK
+    implementation("io.temporal:temporal-sdk:1.25.0")
+
+    // HTTP client for IEX HIST + LLM
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // JSON
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.18.1")
+
+    // Logging — JSON encoder so promtail picks up structured logs cleanly
+    implementation("ch.qos.logback:logback-classic:1.5.12")
+    implementation("net.logstash.logback:logstash-logback-encoder:8.0")
+
+    testImplementation("org.junit.jupiter:junit-jupiter:5.11.3")
+}
+
+application {
+    mainClass.set("com.longexposure.Main")
+}
+
+tasks.withType<JavaCompile> {
+    options.encoding = "UTF-8"
+}
+
+tasks.test {
+    useJUnitPlatform()
+}

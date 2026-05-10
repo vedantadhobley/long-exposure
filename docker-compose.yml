@@ -1,0 +1,190 @@
+# Production Docker Compose — Long Exposure
+#
+# HTTP services reachable via the workspace `proxy` network at:
+#   long-exposure-prod-frontend.luv     (also: longexposure.vedanta.systems via Cloudflare)
+#   long-exposure-prod-api.luv
+#   long-exposure-prod-temporal-ui.luv
+#   long-exposure-prod-adminer.luv
+#
+# Internal-only (no host ports, no proxy):
+#   long-exposure-prod-postgres:5432           events DB (TimescaleDB)
+#   long-exposure-prod-temporal-postgres:5432  temporal metadata
+#   long-exposure-prod-temporal:7233           temporal gRPC
+#   long-exposure-prod-worker                  Java + Temporal SDK
+#
+# See deploy/INFRA-NOTES.md for the Caddyfile + cloudflared changes needed
+# on luv before this stack is publicly reachable.
+
+name: long-exposure-prod
+
+services:
+  # ─── Events DB ─────────────────────────────────────────────────────────────
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: long-exposure-prod-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - long-exposure-prod-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - long-exposure-prod
+
+  # ─── Adminer for ad-hoc SQL ────────────────────────────────────────────────
+  adminer:
+    image: adminer:latest
+    container_name: long-exposure-prod-adminer
+    environment:
+      ADMINER_DEFAULT_SERVER: long-exposure-prod-postgres
+      ADMINER_DESIGN: dracula
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - long-exposure-prod
+      - proxy
+
+  # ─── Temporal: separate Postgres for temporal metadata ─────────────────────
+  temporal-postgres:
+    image: postgres:16-alpine
+    container_name: long-exposure-prod-temporal-postgres
+    environment:
+      POSTGRES_USER: ${TEMPORAL_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${TEMPORAL_POSTGRES_PASSWORD}
+      POSTGRES_DB: temporal
+    volumes:
+      - long-exposure-prod-temporal-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - long-exposure-prod
+
+  temporal:
+    image: temporalio/auto-setup:latest
+    container_name: long-exposure-prod-temporal
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=${TEMPORAL_POSTGRES_USER}
+      - POSTGRES_PWD=${TEMPORAL_POSTGRES_PASSWORD}
+      - POSTGRES_SEEDS=long-exposure-prod-temporal-postgres
+      - BIND_ON_IP=0.0.0.0
+      - LOG_LEVEL=warn
+    depends_on:
+      temporal-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - long-exposure-prod
+
+  temporal-ui:
+    image: temporalio/ui:latest
+    container_name: long-exposure-prod-temporal-ui
+    environment:
+      - TEMPORAL_ADDRESS=long-exposure-prod-temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://long-exposure-prod-temporal-ui.${BASE_DOMAIN:-luv}
+    depends_on:
+      - temporal
+    restart: unless-stopped
+    networks:
+      - long-exposure-prod
+      - proxy
+
+  # ─── Java worker: pcap parsing + Temporal activities + DB writes ───────────
+  worker:
+    build:
+      context: ./parser
+      dockerfile: Dockerfile
+    image: long-exposure-prod-worker:latest
+    container_name: long-exposure-prod-worker
+    environment:
+      TEMPORAL_HOST: long-exposure-prod-temporal:7233
+      POSTGRES_HOST: long-exposure-prod-postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      LLAMA_URL: ${LLAMA_URL}
+      IEX_HIST_BASE_URL: ${IEX_HIST_BASE_URL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - long-exposure-prod
+      - luv-prod        # to reach llama-large.joi via tailnet split-DNS
+
+  # ─── FastAPI: read-only API serving the frontend ──────────────────────────
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    image: long-exposure-prod-api:latest
+    container_name: long-exposure-prod-api
+    environment:
+      APP_ENV: production
+      POSTGRES_HOST: long-exposure-prod-postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - long-exposure-prod
+      - proxy
+
+  # ─── Svelte SPA served via nginx ──────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+    image: long-exposure-prod-frontend:latest
+    container_name: long-exposure-prod-frontend
+    restart: unless-stopped
+    networks:
+      - long-exposure-prod
+      - proxy
+
+volumes:
+  long-exposure-prod-postgres-data:
+    name: long-exposure-prod-postgres-data
+  long-exposure-prod-temporal-postgres-data:
+    name: long-exposure-prod-temporal-postgres-data
+
+networks:
+  long-exposure-prod:
+    name: long-exposure-prod
+    driver: bridge
+
+  # Workspace-shared networks (created externally; see ~/workspace/proxy/README.md).
+  proxy:
+    name: proxy
+    external: true
+  luv-prod:
+    name: luv-prod
+    external: true
