@@ -1,6 +1,7 @@
 package com.longexposure.validation;
 
-import com.longexposure.deepplus.DeepPlusMessageRouter;
+import com.longexposure.deep.DeepMessageRouter;
+import com.longexposure.dpls.DplsMessageRouter;
 import com.longexposure.pcap.PcapReader;
 import com.longexposure.tops.TopsMessageRouter;
 import com.longexposure.transport.IexTpDecoder;
@@ -9,21 +10,36 @@ import com.longexposure.wire.IexMessage;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Comparator;
+import java.util.PriorityQueue;
 
 /**
- * Peekable, time-ordered stream of decoded {@link IexMessage}s from a single
- * .pcap.gz HIST file. Wraps a {@link PcapReader} plus a feed-specific
- * decoder (TOPS or DEEP+).
+ * Peekable, <strong>timestamp-ordered</strong> stream of decoded
+ * {@link IexMessage}s from a single .pcap.gz HIST file.
  *
- * <p>Used to merge two feeds' message streams in
- * {@link BboCrossValidator} — peek both, advance the earlier-timestamp one,
- * compare on TOPS QuoteUpdate.
+ * <p><b>Why timestamp-ordered, not file-ordered.</b> The IEX-TP file order
+ * is by <i>Send Time</i> (when the multicast packet was published).
+ * Message {@code Timestamp} fields reflect when the matching engine made
+ * the decision — which can be earlier than Send Time, and earlier than
+ * messages that appear later in the file. The spec only guarantees
+ * per-(type, symbol) timestamp monotonicity, not global. A naive
+ * file-order read produces out-of-order timestamps that break any merge
+ * algorithm that assumes monotonicity.
  *
- * <p>Heartbeat packets (IEX-TP {@code payloadLength == 0}) are silently
- * skipped. Decode failures on individual messages are also skipped — they're
- * logged to stderr but don't stop the stream.
+ * <p>Concretely observed on 2026-05-08 TOPS: a {@code QuoteUpdate} at
+ * timestamp {@code .025137749} appeared in the file <em>after</em>
+ * messages with timestamps up to {@code .026229032} — a 1.1 ms gap.
  *
- * <p>Not thread-safe.
+ * <p><b>How.</b> Read messages into a sliding-window
+ * {@link PriorityQueue} keyed by timestamp. Only yield a message when
+ * its timestamp is older than {@code maxObservedTs - reorderWindowNs} —
+ * at that point we're guaranteed no later-read message can have a smaller
+ * timestamp. Default window: 1 second, which dominates any plausible
+ * publish-vs-event lag.
+ *
+ * <p>Memory cost is bounded by {@code reorderWindow × peakMsgRate} ≈
+ * 1s × ~4 M msg/sec = 4 M buffered messages = ~400 MB. With smaller
+ * windows (100 ms ≈ 40 MB) we'd be tighter; 1s is safe headroom.
  */
 public final class MessageStream implements AutoCloseable {
 
@@ -36,40 +52,82 @@ public final class MessageStream implements AutoCloseable {
     /** Sentinel value returned by {@link #peekTs()} once the stream is drained. */
     public static final long EXHAUSTED = Long.MAX_VALUE;
 
+    /** Default reorder window (1 second). Dominates any plausible publish-vs-event lag. */
+    public static final long DEFAULT_REORDER_WINDOW_NS = 1_000_000_000L;
+
     private final PcapReader reader;
     private final Decoder decoder;
     private final String label;
+    private final long reorderWindowNs;
 
+    // Underlying file walker state
     private byte[] payload;
     private IexTpDecoder.Header header;
-    private int messageIndex;        // next message index within current packet
-    private int posInBlock;          // byte offset in payload for the next msg's length prefix
+    private int messageIndex;
+    private int posInBlock;
     private int endOfBlock;
+    private boolean readerExhausted = false;
 
-    private IexMessage next;         // decoded next message, ready to consume
+    // Reorder buffer. Ties on timestamp broken by file-read sequence so
+    // same-ns messages are yielded in their original engine-publication
+    // order (e.g., an AddOrder at ts T followed by OrderExecuted at ts T
+    // for the same orderId — applying them in reverse would throw).
+    private final PriorityQueue<TimedMessage> buffer =
+            new PriorityQueue<>(
+                    Comparator.comparingLong(TimedMessage::ts)
+                              .thenComparingLong(TimedMessage::seq));
+    private long readSequence = 0L;
+    private long maxObservedTs = Long.MIN_VALUE;
+
+    // Cached head, ready to yield
+    private IexMessage next;
     private long nextTs;
+
+    // Diagnostics
     private long messagesYielded;
-    private long heartbeatPacketsSkipped;
     private long packetsRead;
+    private long heartbeatPacketsSkipped;
     private long decodeFailures;
 
-    private MessageStream(final PcapReader reader, final Decoder decoder, final String label) {
+    private MessageStream(final PcapReader reader, final Decoder decoder,
+                          final String label, final long reorderWindowNs) {
         this.reader = reader;
         this.decoder = decoder;
         this.label = label;
+        this.reorderWindowNs = reorderWindowNs;
         this.nextTs = EXHAUSTED;
         advance();
     }
 
     public static MessageStream tops(final Path file) throws IOException {
-        return new MessageStream(PcapReader.open(file), TopsMessageRouter::decode, "TOPS");
+        return new MessageStream(PcapReader.open(file), TopsMessageRouter::decode, "TOPS",
+                DEFAULT_REORDER_WINDOW_NS);
     }
 
-    public static MessageStream deepPlus(final Path file) throws IOException {
-        return new MessageStream(PcapReader.open(file), DeepPlusMessageRouter::decode, "DEEP+");
+    public static MessageStream dpls(final Path file) throws IOException {
+        return new MessageStream(PcapReader.open(file), DplsMessageRouter::decode, "DPLS",
+                DEFAULT_REORDER_WINDOW_NS);
     }
 
-    /** Next message's timestamp, or {@link #EXHAUSTED} if drained. */
+    public static MessageStream deep(final Path file) throws IOException {
+        return new MessageStream(PcapReader.open(file), DeepMessageRouter::decode, "DEEP",
+                DEFAULT_REORDER_WINDOW_NS);
+    }
+
+    public static MessageStream tops(final Path file, final long reorderWindowNs) throws IOException {
+        return new MessageStream(PcapReader.open(file), TopsMessageRouter::decode, "TOPS", reorderWindowNs);
+    }
+
+    public static MessageStream dpls(final Path file, final long reorderWindowNs) throws IOException {
+        return new MessageStream(PcapReader.open(file), DplsMessageRouter::decode, "DPLS", reorderWindowNs);
+    }
+
+    public static MessageStream deep(final Path file, final long reorderWindowNs) throws IOException {
+        return new MessageStream(PcapReader.open(file), DeepMessageRouter::decode, "DEEP", reorderWindowNs);
+    }
+
+    // ─── public API ──────────────────────────────────────────────────────────
+
     public long peekTs() {
         return nextTs;
     }
@@ -102,11 +160,6 @@ public final class MessageStream implements AutoCloseable {
         return decodeFailures;
     }
 
-    /**
-     * Consume and return the current head. Advances the stream. Caller must
-     * check {@link #isExhausted()} or {@link #peekTs()} before calling
-     * if there might be no more messages.
-     */
     public IexMessage consume() {
         IexMessage m = next;
         messagesYielded++;
@@ -114,24 +167,68 @@ public final class MessageStream implements AutoCloseable {
         return m;
     }
 
+    // ─── advance: fill buffer then yield oldest safely-past message ──────────
+
     private void advance() {
+        fillBufferUntilSafe();
+        if (buffer.isEmpty()) {
+            next = null;
+            nextTs = EXHAUSTED;
+            return;
+        }
+        TimedMessage tm = buffer.poll();
+        next = tm.message;
+        nextTs = tm.ts;
+    }
+
+    /**
+     * Read messages into the buffer until either (a) the buffer's head is
+     * older than {@code maxObservedTs - reorderWindowNs} (safely past, no
+     * future message can have a smaller ts), or (b) the underlying reader
+     * is exhausted (in which case we drain whatever's left).
+     */
+    private void fillBufferUntilSafe() {
+        while (!readerExhausted) {
+            if (!buffer.isEmpty()) {
+                long headTs = buffer.peek().ts;
+                if (headTs + reorderWindowNs <= maxObservedTs) {
+                    // Head is safely past the window; nothing future can undercut it.
+                    return;
+                }
+            }
+            IexMessage m = readOneFromUnderlying();
+            if (m == null) {
+                readerExhausted = true;
+                break;
+            }
+            long ts = m.timestampNanos();
+            buffer.add(new TimedMessage(ts, readSequence++, m));
+            if (ts > maxObservedTs) maxObservedTs = ts;
+        }
+        // Reader is done; subsequent calls drain the buffer to empty.
+    }
+
+    /**
+     * Advance the underlying packet walker by one message; return the
+     * decoded message or {@code null} at EOF. Heartbeats and decode failures
+     * are skipped internally.
+     */
+    private IexMessage readOneFromUnderlying() {
         while (true) {
             // Try to pull the next message from the current packet.
             if (header != null && messageIndex < header.messageCount() && posInBlock + 2 <= endOfBlock) {
                 int msgLen = Bytes.readShortLE(payload, posInBlock);
                 posInBlock += 2;
                 if (msgLen == 0 || posInBlock + msgLen > endOfBlock) {
-                    // Bad framing — give up on the rest of this packet.
                     header = null;
                     continue;
                 }
                 byte typeByte = payload[posInBlock];
                 try {
-                    next = decoder.decode(typeByte, payload, posInBlock);
-                    nextTs = next.timestampNanos();
+                    IexMessage m = decoder.decode(typeByte, payload, posInBlock);
                     posInBlock += msgLen;
                     messageIndex++;
-                    return;
+                    return m;
                 } catch (IllegalArgumentException e) {
                     decodeFailures++;
                     posInBlock += msgLen;
@@ -141,31 +238,27 @@ public final class MessageStream implements AutoCloseable {
             }
 
             // Need a fresh packet.
-            byte[] payload;
+            byte[] freshPayload;
             try {
-                payload = reader.nextUdpPayload();
+                freshPayload = reader.nextUdpPayload();
             } catch (IOException e) {
                 throw new RuntimeException("[" + label + "] pcap read failed", e);
             }
-            if (payload == null) {
-                // End of file.
-                next = null;
-                nextTs = EXHAUSTED;
-                return;
+            if (freshPayload == null) {
+                return null;
             }
             packetsRead++;
-            if (payload.length < IexTpDecoder.HEADER_BYTES) continue;
-            IexTpDecoder.Header h = IexTpDecoder.decode(payload);
+            if (freshPayload.length < IexTpDecoder.HEADER_BYTES) continue;
+            IexTpDecoder.Header h = IexTpDecoder.decode(freshPayload);
             if (h.messageCount() == 0 || h.payloadLength() == 0) {
                 heartbeatPacketsSkipped++;
                 continue;
             }
-            this.payload = payload;
+            this.payload = freshPayload;
             this.header = h;
             this.messageIndex = 0;
             this.posInBlock = IexTpDecoder.HEADER_BYTES;
             this.endOfBlock = IexTpDecoder.HEADER_BYTES + h.payloadLength();
-            // loop around to decode the first message of this packet
         }
     }
 
@@ -173,4 +266,6 @@ public final class MessageStream implements AutoCloseable {
     public void close() throws IOException {
         reader.close();
     }
+
+    private record TimedMessage(long ts, long seq, IexMessage message) {}
 }
