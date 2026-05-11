@@ -1,29 +1,34 @@
-package com.longexposure.admin;
+package com.longexposure.wire;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Little-endian + IEX-string decode helpers. Package-private; admin records
- * call these from their static {@code decode} methods.
+ * Wire-format decode helpers shared by every IEX message decoder.
+ * IEX-TP and all message bodies are little-endian; strings are fixed-length
+ * ASCII space-padded on the right.
  */
-final class Bytes {
+public final class Bytes {
     private Bytes() {}
 
-    static long readLongLE(final byte[] buf, final int offset) {
+    public static long readLongLE(final byte[] buf, final int offset) {
         return ByteBuffer.wrap(buf, offset, 8).order(ByteOrder.LITTLE_ENDIAN).getLong();
     }
 
-    static int readIntLE(final byte[] buf, final int offset) {
+    public static int readIntLE(final byte[] buf, final int offset) {
         return ByteBuffer.wrap(buf, offset, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+    }
+
+    public static int readShortLE(final byte[] buf, final int offset) {
+        return ByteBuffer.wrap(buf, offset, 2).order(ByteOrder.LITTLE_ENDIAN).getShort() & 0xffff;
     }
 
     /**
      * Decode an IEX-style fixed-length ASCII string: space-padded on the right.
-     * Trailing 0x20 bytes are stripped from the returned String.
+     * Trailing 0x20 bytes are stripped.
      */
-    static String decodeFixedAscii(final byte[] buf, final int offset, final int length) {
+    public static String decodeFixedAscii(final byte[] buf, final int offset, final int length) {
         int end = offset + length;
         while (end > offset && buf[end - 1] == 0x20) {
             end--;
@@ -32,11 +37,11 @@ final class Bytes {
     }
 
     /** Convenience for the IEX 8-byte Symbol field. */
-    static String decodeSymbol(final byte[] buf, final int offset) {
+    public static String decodeSymbol(final byte[] buf, final int offset) {
         return decodeFixedAscii(buf, offset, 8);
     }
 
-    static void requireLength(final byte[] buf, final int offset, final int required, final String what) {
+    public static void requireLength(final byte[] buf, final int offset, final int required, final String what) {
         if (buf.length - offset < required) {
             throw new IllegalArgumentException(what + " requires " + required
                     + " bytes, only " + (buf.length - offset) + " available");

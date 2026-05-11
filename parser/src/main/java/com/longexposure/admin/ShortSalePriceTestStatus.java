@@ -1,5 +1,7 @@
 package com.longexposure.admin;
 
+import com.longexposure.wire.Bytes;
+
 /**
  * Short Sale Price Test Status Message — {@code P} (0x50), 19 bytes.
  *

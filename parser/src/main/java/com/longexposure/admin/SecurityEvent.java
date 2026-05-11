@@ -1,5 +1,7 @@
 package com.longexposure.admin;
 
+import com.longexposure.wire.Bytes;
+
 /**
  * Security Event Message — {@code E} (0x45), 18 bytes.
  *

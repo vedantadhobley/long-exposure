@@ -1,5 +1,7 @@
 package com.longexposure.admin;
 
+import com.longexposure.wire.Bytes;
+
 /**
  * Security Directory Message — {@code D} (0x44), 31 bytes.
  *

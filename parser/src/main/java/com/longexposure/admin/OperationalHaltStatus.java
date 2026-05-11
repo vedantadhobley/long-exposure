@@ -1,5 +1,7 @@
 package com.longexposure.admin;
 
+import com.longexposure.wire.Bytes;
+
 /**
  * Operational Halt Status Message — {@code O} (0x4f), 18 bytes.
  *

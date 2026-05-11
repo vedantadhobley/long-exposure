@@ -17,25 +17,29 @@ This plan is the agent-editable source of truth. The README has a condensed pros
 
 ## Days 4–7 — TOPS parser + validation harness (in parallel)
 
-- [ ] Implement `tops.TopsMessageRouter` — dispatch on the 1-byte message type after the 2-byte length prefix
-- [ ] Decoder + value object for each TOPS message type (see @protocol-notes.md for byte-level layouts):
-  - [ ] System Event (`S`)
-  - [ ] Security Directory (`D`)
-  - [ ] Trading Status (`H`)
-  - [ ] Retail Liquidity Indicator (`I`)
-  - [ ] Operational Halt Status (`O`)
-  - [ ] Short Sale Price Test Status (`P`)
-  - [ ] Quote Update (`Q`)
-  - [ ] Trade Report (`T`)
-  - [ ] Trade Break (`B`)
-  - [ ] Official Price (`X`)
-  - [ ] Auction Information (pages 21–23 of TOPS 1.66 spec — TBR after first read of those pages)
-- [ ] Validate price decoding (8-byte signed int with 4 implied decimals, little-endian)
-- [ ] Unit tests for each decoder (junit-jupiter is already in deps)
-- [ ] **`validation.DailyTotalsValidator`** — cross-checks against IEX's published per-symbol summaries. Don't wait until the end; every new decoder gets a paired check.
+- [x] Implement `tops.TopsMessageRouter` — dispatches admin first, then TOPS-specific
+- [x] Admin decoders in `com.longexposure.admin.*` (shared across all feeds for phase 2):
+  - [x] System Event (`S`, 10 B)
+  - [x] Security Directory (`D`, 31 B)
+  - [x] Trading Status (`H`, 22 B)
+  - [x] Retail Liquidity Indicator (`I`, 18 B)
+  - [x] Operational Halt Status (`O`, 18 B)
+  - [x] Short Sale Price Test Status (`P`, 19 B)
+  - [x] Security Event (`E`, 18 B — DEEP/DEEP+ only, byte-identical)
+- [x] TOPS-specific trading decoders in `com.longexposure.tops.*`:
+  - [x] Quote Update (`Q`, 42 B) — with halted/off-hours flag helpers
+  - [x] Trade Report (`T`, 38 B) — with Sale Condition Flags helper (5 bits, eligibility derived)
+  - [x] Trade Break (`B`, 38 B) — same shape as Trade Report
+  - [x] Official Price (`X`, 26 B) — Opening / Closing enum
+  - [x] Auction Information (`A`, 80 B) — 5 auction types, imbalance side, collars, scheduled match
+- [x] Shared wire helpers in `com.longexposure.wire.Bytes` (LE reads + symbol/ASCII decoding)
+- [x] Common `IexMessage` marker (non-sealed) so router can return one type; `AdminMessage` + `TopsMessage` sealed sub-hierarchies
+- [x] 48 JUnit tests against spec worked-example bytes, all passing
+- [x] **End-to-end smoke test**: 9.5 GB real HIST file from 2026-05-08 → 294,790,405 messages decoded in 1m39s. Histogram: 97% Quote Updates, 7.7M Trade Reports, 2K Auction Information, 6 System Events. Round-trip works.
+- [ ] **`validation.DailyTotalsValidator`** — cross-checks against IEX's published per-symbol summaries. Don't wait until the end; every new decoder gets a paired check. Still pending — needs the `/stats` endpoint figured out.
 - [ ] **Reference-implementation cross-check**: integrate `WojciechZankowski/iextrading4j-hist` as a test dependency (Java, same JVM); for each sample TOPS .pcap.gz, run both parsers and diff message streams. Any divergence = bug (usually ours). See @protocol-notes.md "Reference implementations" section.
 
-**Shared decoder note**: 7 of these messages (`S`, `D`, `H`, `I`, `O`, `P`, plus `E` Security Event which is DEEP/DEEP+ only) are byte-identical across all three feeds. Structure the package so admin decoders live in `com.longexposure.admin.*` and per-feed trading decoders live in `com.longexposure.tops.*` (and later `com.longexposure.deepplus.*`). This is the main forward-compat investment for phase 2.
+**Shared decoder note delivered**: 7 of these messages (`S`, `D`, `H`, `I`, `O`, `P`, plus `E` Security Event which is DEEP/DEEP+ only) are byte-identical across all three feeds. Package layout matches: `com.longexposure.admin.*` for shared, `com.longexposure.tops.*` for TOPS trading, `com.longexposure.deepplus.*` to come in phase 2. ~60% of the decoder LOC is in the admin package, all reusable as-is.
 
 ## Days 8–10 — Postgres + TimescaleDB + storage
 

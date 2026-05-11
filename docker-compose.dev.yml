@@ -116,7 +116,7 @@ services:
       # Day 1-3 smoke test — set on the host or override here to point Main.java
       # at a real HIST file. /storage is the workspace convention bind mount.
       IEX_PCAP_FILE: ${IEX_PCAP_FILE:-/storage/raw/20260508_IEXTP1_TOPS1.6.pcap.gz}
-      IEX_HEADER_LIMIT: ${IEX_HEADER_LIMIT:-10}
+      IEX_PRINT_LIMIT: ${IEX_PRINT_LIMIT:-20}
     volumes:
       - ./parser:/app
       - long-exposure-dev-gradle-cache:/root/.gradle

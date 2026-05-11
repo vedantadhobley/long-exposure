@@ -1,5 +1,7 @@
 package com.longexposure.admin;
 
+import com.longexposure.wire.IexMessage;
+
 /**
  * Marker interface for the seven IEX administrative messages that are
  * byte-identical across TOPS, DEEP, and DEEP+ feeds. Decoders for these
@@ -25,7 +27,7 @@ package com.longexposure.admin;
  * };
  * }</pre>
  */
-public sealed interface AdminMessage permits
+public sealed interface AdminMessage extends IexMessage permits
         SystemEvent,
         SecurityDirectory,
         TradingStatus,
@@ -33,10 +35,4 @@ public sealed interface AdminMessage permits
         OperationalHaltStatus,
         ShortSalePriceTestStatus,
         SecurityEvent {
-
-    /** Spec-defined 1-byte type identifier (e.g. 0x53 for {@code S} SystemEvent). */
-    byte messageType();
-
-    /** Nanoseconds since POSIX epoch UTC, decoded from the spec's Timestamp field. */
-    long timestampNanos();
 }

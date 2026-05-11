@@ -1,5 +1,7 @@
 package com.longexposure.admin;
 
+import com.longexposure.wire.Bytes;
+
 /**
  * Retail Liquidity Indicator Message — {@code I} (0x49), 18 bytes.
  *

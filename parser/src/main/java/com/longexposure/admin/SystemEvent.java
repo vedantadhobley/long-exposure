@@ -1,5 +1,7 @@
 package com.longexposure.admin;
 
+import com.longexposure.wire.Bytes;
+
 /**
  * System Event Message — {@code S} (0x53), 10 bytes.
  *

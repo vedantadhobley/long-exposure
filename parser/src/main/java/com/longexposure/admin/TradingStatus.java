@@ -1,5 +1,7 @@
 package com.longexposure.admin;
 
+import com.longexposure.wire.Bytes;
+
 /**
  * Trading Status Message — {@code H} (0x48), 22 bytes.
  *
