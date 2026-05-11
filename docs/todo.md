@@ -2,60 +2,65 @@
 
 Project scratchpad, agent + human editable. Cross-references @plan.md for full context and @decisions.md for the reasoning behind structural choices.
 
-Last refresh: 2026-05-11 end-of-day. Pivot recorded: v1 is now DEEP+, not TOPS. See `docs/decisions.md` 2026-05-11 entry.
+Last refresh: 2026-05-11 late session. Sprint A and trade-level cross-validation done; Sprint B is next.
 
 ---
 
 ## ⏯ Start of next session — paste-ready checklist
 
-1. **Download the 2026-05-08 DPLS file** (same date as the TOPS data already in DB, so cross-validation is symbol-for-symbol on the same day):
+Both data files (TOPS + DPLS) are already at `~/workspace/data/long-exposure/raw/`. TOPS is fully loaded into Postgres for 2026-05-08; DEEP+ trade aggregates have been cross-validated against it (0 mismatches across all 9,134 symbols).
 
-   ```bash
-   curl -s 'https://iextrading.com/api/1.0/hist?date=20260508' \
-     | jq '.[] | select(.feed == "DPLS")'
-   # → copy the link, then:
-   curl -L -o ~/workspace/data/long-exposure/raw/20260508_IEXTP1_DPLS1.0.pcap.gz '<link>'
-   ```
+Next thing to build: **Sprint B — order book state machine**.
 
-   Expected size: ~7–9 GB compressed.
-
-2. **Verify the dev stack is still up** (postgres + temporal + worker containers):
+1. **Verify the dev stack is still up**:
 
    ```bash
    docker compose -f docker-compose.dev.yml ps
    ```
 
-3. **Tell me the file is ready** and I'll start on Sprint A (DEEP+ parser).
+2. **Re-confirm latest commits** to know where we resume:
+
+   ```bash
+   git log --oneline -10
+   ```
+
+3. **Tell me "go" and I'll start on Sprint B** — `com.longexposure.deepplus.OrderBook` class, `OrderBookManager`, JUnit tests with synthetic message streams. After it lands, the second half of Sprint D unblocks (BBO-level cross-validation vs the loaded TOPS QuoteUpdate stream).
 
 ---
 
-## DEEP+ v1 sprint work (top of priority)
+## DEEP+ v1 sprint work
 
-Full layout in @plan.md "DEEP+ v1 sprints" section. Quick checklist:
+Full layout in @plan.md. Quick status:
 
-### Sprint A — parser
-- [ ] `com.longexposure.deepplus` package
-- [ ] Sealed `DeepPlusMessage` interface (mirrors `TopsMessage`)
-- [ ] 7 trading-message records: AddOrder (a, 0x61), OrderModify (M, 0x4D), OrderDelete (R, 0x52), OrderExecuted (L, 0x4C), Trade (T, 0x54), TradeBreak (B, 0x42), ClearBook (C, 0x43)
-- [ ] `DeepPlusMessageRouter` (admin first, then DEEP+ trading)
-- [ ] JUnit tests using spec worked examples — `deep-plus-1.02.pdf` at `~/workspace/data/long-exposure/specs/`, pages 16–22
+### Sprint A — parser ✅ done 2026-05-11
 
-### Sprint B — order book state machine
+- [x] `com.longexposure.deepplus` package
+- [x] Sealed `DeepPlusMessage` interface
+- [x] 7 trading-message records: AddOrder (a), OrderModify (M), OrderDelete (R), OrderExecuted (L), Trade (T), TradeBreak (B), ClearBook (C)
+- [x] `DeepPlusMessageRouter`
+- [x] `SaleConditionFlags` promoted from `tops/` to `wire/`
+- [x] 14 JUnit tests (45 total in the suite)
+
+### Sprint B — order book state machine 🔜 next
+
 - [ ] `OrderBook` class: `Map<Long orderId, OrderState>` per symbol
 - [ ] Updates on Add/Modify/Delete/Execute
 - [ ] ClearBook drops all entries
-- [ ] BBO derivation method
-- [ ] Aggregate depth metrics
+- [ ] BBO derivation method (`bestBid()`, `bestAsk()`)
+- [ ] Aggregate depth metrics (size-at-best, depth at level N)
+- [ ] `OrderBookManager` — `Map<symbol, OrderBook>` + dispatch
+- [ ] JUnit tests with synthetic 5–10-event message streams
 
 ### Sprint C — storage extensions
+
 - [ ] New `orders` hypertable in `schema.sql` (or extend events — design decision after seeing data shape)
 - [ ] `TimescaleWriter` extensions for the new message types
-- [ ] End-to-end DEEP+ run
+- [ ] End-to-end DEEP+ run with DB write enabled
 
 ### Sprint D — cross-validation against existing TOPS data
-- [ ] Per-second BBO derived from DEEP+ book == TOPS Quote Update BBO (same symbol/second)
-- [ ] Per-symbol DEEP+ Order Executed size sum == TOPS Trade Report size sum
-- [ ] Investigate any divergence
+
+- [x] **Trade-level done 2026-05-11**: SUM(OrderExecuted.size + Trade.size) per symbol from DEEP+ == SUM(TradeReport.size) per symbol from TOPS. 9,134/9,134 symbols matched exactly, 0 share delta across 770M total shares.
+- [ ] **BBO-level**: per-second BBO derived from DEEP+ book == TOPS Quote Update BBO. Blocked on Sprint B.
 
 ---
 

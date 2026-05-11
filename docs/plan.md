@@ -8,57 +8,33 @@ This plan is the agent-editable source of truth. The README has a condensed pros
 
 ---
 
-## ⏯ Next session — start here
+## ⏯ Where we are right now (2026-05-11 late session)
 
-**Pivot recorded 2026-05-11**: v1 is now **DEEP+ / DPLS**, not TOPS. TOPS code is repurposed as the validation oracle. Full rationale in `docs/decisions.md` (2026-05-11 entry).
+**Pivot recorded 2026-05-11 (morning)**: v1 is DEEP+/DPLS, not TOPS. TOPS code repurposed as validation oracle. Full rationale in `docs/decisions.md`.
 
-Concrete actions to start the next session, in order:
+**Session progress (late 2026-05-11)**:
 
-1. **Download a 2026-05-08 DPLS .pcap.gz** (same trading date as the TOPS file we already have, so cross-validation is symbol-for-symbol on the same day):
+- ✅ **Sprint A done** — DEEP+ parser: 7 trading-message records, `DeepPlusMessage` sealed interface, `DeepPlusMessageRouter`, `SaleConditionFlags` promoted to shared `wire/` package. 14 new JUnit tests; 45 total passing across the suite.
+- ✅ **Trade-level cross-validation done** (Sprint D, first half) — Main.java auto-detects feed from IEX-TP protocol id; aggregates per-symbol volume; queries Postgres for TOPS aggregates and diffs. Full 10.4 GB DPLS file decoded in 97 s (~3.75M msg/sec, 364,098,518 messages). **9,134 / 9,134 symbols match exactly, 0 mismatches, 0 share delta** vs the existing TOPS data already loaded for 2026-05-08. Every shared admin message type also matches count-for-count between feeds.
+- 🔜 **Sprint B next** — Order book state machine. `Map<orderId, OrderState>` per symbol, updated on Add/Modify/Delete/Execute, dropped on ClearBook. Derives top-of-book at arbitrary timestamps. Then Sprint D's second half: diff that derived BBO against the loaded TOPS QuoteUpdate stream.
 
-   ```bash
-   curl -s 'https://iextrading.com/api/1.0/hist?date=20260508' \
-     | jq '.[] | select(.feed == "DPLS")'
-   # copy the link, then:
-   curl -L -o ~/workspace/data/long-exposure/raw/20260508_IEXTP1_DPLS1.0.pcap.gz '<link>'
-   ```
+Concrete next actions in order:
 
-2. **Create the `com.longexposure.deepplus` package** mirroring `com.longexposure.tops`:
-   - Sealed `DeepPlusMessage extends IexMessage` permitting the 7 trading-message records
-   - `DeepPlusMessageRouter` (tries `AdminMessages` first, falls back to DEEP+ trading)
-   - Records (with spec page numbers; see `deep-plus-1.02.pdf` at `~/workspace/data/long-exposure/specs/`):
-     - `AddOrder` (`a`, 0x61, 38 B — Side / OrderID / Size / Price)
-     - `OrderModify` (`M`, 0x4D, 38 B — Modify Flags bit 0 = priority maintained)
-     - `OrderDelete` (`R`, 0x52, 26 B — references OrderID)
-     - `OrderExecuted` (`L`, 0x4C, 46 B — references OrderID, carries TradeID)
-     - `Trade` (`T`, 0x54, 38 B — non-displayed × non-displayed; doesn't modify book)
-     - `TradeBreak` (`B`, 0x42, TBD bytes — same shape as TOPS TradeBreak)
-     - `ClearBook` (`C`, 0x43, TBD bytes — drop all orders for symbol)
+1. **`com.longexposure.deepplus.OrderBook` class** — instance per symbol, internal `Map<Long, OrderState>`. Methods: `add(AddOrder)`, `modify(OrderModify)`, `execute(OrderExecuted)`, `delete(OrderDelete)`, `clear()`. Plus derivation: `bestBid()`, `bestAsk()`, `depthAtLevel(int)`, `orderCount()`.
+2. **`OrderBookManager` (or similar)** — holds `Map<String symbol, OrderBook>`, routes incoming DEEP+ trading messages to the right book. Handles ClearBook by dropping the symbol's entry.
+3. **JUnit tests** — small synthetic message streams (5–10 events per test) covering: simple add+execute, partial fills, modify with priority maintained vs reset, delete, clear-book, add-after-delete-with-same-id.
+4. **BBO cross-validation against loaded TOPS data** — run DPLS through the parser + book manager; at each timestamp where a TOPS QuoteUpdate exists in DB for the same symbol, derive BBO from book state and diff. Tolerance considerations: order events and quote events in DEEP+ vs TOPS may arrive in different packets, so exact-microsecond comparison may need a small alignment window (~100 ns).
 
-3. **JUnit tests** for each decoder using spec worked examples (pages 16–22 of `deep-plus-1.02.pdf`).
+**Expected pace for Sprint B**: ~150–250 LOC + tests. Comparable to one of yesterday's TOPS sub-sprints.
 
-4. **Order book state machine** — `Map<OrderID, OrderState>` per session. Update on Add/Modify/Delete/Execute. Drop on ClearBook. The hardest single piece in the project until LLM integration.
-
-5. **Schema extensions** — add `orders` hypertable (Add Order rows) + extend writer.
-
-6. **End-to-end run** + cross-validate against the existing TOPS data:
-   - Derive per-second BBO from DEEP+ book state, compare to actual TOPS Quote Updates → must match
-   - Sum DEEP+ Order Executed sizes per symbol, compare to TOPS Trade Report totals → must match
-
-7. **Then**: scoring (`com.longexposure.scoring.EventScorer`) against DEEP+ event types, designed from day 1 for order-lifecycle narratives.
-
-**Expected pace**: comparable to today's TOPS sprint. ~60% of the parser stack is feed-agnostic and already done. Net-new work is 7 decoders + book state machine + writer extensions + cross-validation.
-
-**Hardest part of the project is still ahead**: not the parser (this is mechanical), but the **LLM narration prompt engineering + scoring algorithm tuning**. Days 14–19 in the original plan are where the real product-design uncertainty lives.
-
-## Days 1–3 — Foundation
+## Days 1–3 — Foundation ✅ done
 
 - [x] Set up Gradle Kotlin DSL project (`build.gradle.kts`, `settings.gradle.kts`)
-- [x] Multi-stage Dockerfile (gradle JDK21 builder → JRE alpine + libpcap)
+- [x] Multi-stage Dockerfile (gradle JDK21 builder → JRE alpine; no libpcap — pcap reader is pure Java)
 - [x] Open the GitHub repo public on Day 1 (MIT licensed)
-- [ ] Implement `pcap.PcapReader` using pcap4j — open a `.pcap.gz` and stream packets
-- [ ] Implement `transport.IexTpDecoder` — parse the 40-byte IEX-TP header
-- [ ] Get raw TOPS message bytes printing to stdout from a real HIST file
+- [x] Implement `pcap.PcapReader` — pure Java pcap-ng + libpcap reader streaming from .pcap.gz, no pcap4j dep
+- [x] Implement `transport.IexTpDecoder` — 40-byte IEX-TP header, all fields, protocol-name lookup for TOPS/DEEP/DEEP+
+- [x] Get raw IEX-TP headers + message bodies printing to stdout from a real HIST file (verified end-to-end on TOPS and DEEP+)
 
 ## Days 4–7 — TOPS parser + validation harness (in parallel)
 
@@ -153,21 +129,23 @@ In this repo:
 
 Reframed 2026-05-11 — see `docs/decisions.md`. The TOPS work done today is repurposed as the validation oracle, not deferred to v2.
 
-### Sprint A — DEEP+ parser
+### Sprint A — DEEP+ parser ✅ done 2026-05-11
 
-- [ ] Download 2026-05-08 DPLS file (same date as TOPS data already loaded)
-- [ ] `com.longexposure.deepplus.DeepPlusMessage` sealed interface (mirrors TopsMessage)
-- [ ] DEEP+ trading-message records (`a` Add, `M` Modify, `R` Delete, `L` Order Executed, `T` Trade, `B` Trade Break, `C` Clear Book)
-- [ ] `DeepPlusMessageRouter` (admin dispatch first, then DEEP+ trading)
-- [ ] JUnit tests against spec worked examples (`deep-plus-1.02.pdf` pages 16–22)
+- [x] Download 2026-05-08 DPLS file (10.4 GB at `~/workspace/data/long-exposure/raw/20260508_IEXTP1_DPLS1.0.pcap.gz`)
+- [x] `com.longexposure.deepplus.DeepPlusMessage` sealed interface (mirrors TopsMessage)
+- [x] DEEP+ trading-message records (all 7: `a` Add, `M` Modify, `R` Delete, `L` Order Executed, `T` Trade, `B` Trade Break, `C` Clear Book)
+- [x] `DeepPlusMessageRouter` (admin dispatch first, then DEEP+ trading)
+- [x] `SaleConditionFlags` promoted from `tops/` to `wire/` (shared across feeds per Appendix A)
+- [x] 14 JUnit tests against spec worked examples; 45 total passing
 
-### Sprint B — Order book state machine
+### Sprint B — Order book state machine 🔜 next
 
 - [ ] `OrderBook` class — `Map<Long orderId, OrderState>` per symbol
 - [ ] Update on Add/Modify/Delete/Execute messages
 - [ ] Drop entries on ClearBook
 - [ ] Derive top-of-book (BBO) at arbitrary timestamps
 - [ ] Compute aggregate book metrics (best-price size, depth at level)
+- [ ] `OrderBookManager` per symbol; route messages from the parser stream
 
 ### Sprint C — Storage extensions
 
@@ -177,9 +155,8 @@ Reframed 2026-05-11 — see `docs/decisions.md`. The TOPS work done today is rep
 
 ### Sprint D — Cross-validation against TOPS
 
-- [ ] Per-second BBO derived from DEEP+ book state == TOPS Quote Update BBO for the same symbol/second
-- [ ] Sum of DEEP+ Order Executed sizes per symbol == sum of TOPS Trade Report sizes per symbol
-- [ ] Any divergence is a DEEP+ decoder bug (TOPS is the reference, since we've already validated TOPS against spec example bytes + the parser's per-type histogram)
+- [x] **Trade-level**: SUM(OrderExecuted.size + Trade.size) per symbol from DEEP+ == SUM(TradeReport.size) per symbol from TOPS. **Verified 2026-05-11 on the 2026-05-08 pair: 9,134/9,134 symbols match exactly, 0 mismatches, 0 share delta.** Throughput ~3.75M msg/sec across 364M DEEP+ messages.
+- [ ] **BBO-level**: per-second BBO derived from DEEP+ book state == TOPS Quote Update BBO for the same symbol/second. Blocked on Sprint B.
 
 ### What's reused unchanged from today
 

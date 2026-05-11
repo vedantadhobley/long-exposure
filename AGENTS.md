@@ -70,15 +70,18 @@ Mirror this pattern for any future personal-project work: per-project repos ship
 
 ## Active state
 
-- **Phase**: post-TOPS-parser, **pivoting to DEEP+ as v1** (decision recorded 2026-05-11 in @docs/decisions.md). TOPS work stays as the validation oracle. Next session starts on the DEEP+ parser; see @docs/todo.md for the paste-ready startup checklist.
-- **Implementation status** (as of 2026-05-11):
-  - Parser stack done end-to-end for TOPS: pcap-ng reader, IEX-TP decoder, 7 admin decoders + sealed `AdminMessage`, 5 TOPS trading decoders + `TopsMessageRouter`, 48 passing JUnit tests
-  - Storage: `schema.sql` with 8 hypertables + continuous aggregate; `SchemaManager` + `TimescaleWriter` with COPY-based bulk insert
-  - End-to-end verified: 9.5 GB 2026-05-08 TOPS HIST → 294,790,405 messages → Postgres in 22:27 min
-  - Continuous aggregate `daily_volume_by_symbol` populated for 2026-05-08 (9,134 symbols, 770M shares, 7.75M trades)
-- **Bring-up status**: dev stack running on luv; prod stack on luv compose not yet started, Caddyfile entries for `*.luv` already applied earlier this week.
-- **DEEP+ status**: spec PDF at `~/workspace/data/long-exposure/specs/deep-plus-1.02.pdf` fully read. No data downloaded yet. No code written yet — that's tomorrow's first sprint.
-- **Frontend cleanup (2026-05-10)**: Removed an erroneous Svelte SPA scaffold; vedanta-systems is the unified portal. See @docs/decisions.md.
+- **Phase**: DEEP+ parser done, trade-level cross-validation done, **order book state machine (Sprint B) is next**. See @docs/todo.md for the paste-ready startup checklist.
+- **Implementation status** (as of 2026-05-11 late session):
+  - Pcap-ng reader, IEX-TP decoder, 7 admin decoders + sealed `AdminMessage`, common `IexMessage` marker, shared `wire/` package
+  - **TOPS parser**: 5 trading decoders + `TopsMessageRouter`, 295M messages loaded to Postgres in 22:27 min, continuous aggregate populated (9,134 symbols, 770M shares, 7.75M trades for 2026-05-08)
+  - **DEEP+ parser**: 7 trading decoders + `DeepPlusMessageRouter`, 364M messages decoded in 97 s, full file pass at ~3.75M msg/sec
+  - **Cross-feed validation (trade-level)**: 9,134 / 9,134 symbols match exactly between DEEP+ and TOPS for 2026-05-08, 0 mismatches, 0 share delta. Strong evidence the DEEP+ decoder is correct for trade-affecting messages.
+  - **Tests**: 45 passing across the suite (`IexTpDecoder` + admin + TOPS + DEEP+)
+  - **Storage**: 8 TOPS-side hypertables populated; DEEP+ tables not yet added to schema (Sprint C work)
+  - **Order book state machine**: not yet built (Sprint B)
+- **Bring-up status**: dev stack running on luv; prod stack on luv compose not yet started, Caddyfile entries for `*.luv` applied last week.
+- **Data on disk**: both 2026-05-08 .pcap.gz files at `~/workspace/data/long-exposure/raw/` (TOPS 10.2 GB, DPLS 10.4 GB). All 7 IEX spec PDFs at `~/workspace/data/long-exposure/specs/`.
+- **Frontend cleanup (2026-05-10)**: removed Svelte SPA scaffold; vedanta-systems is the unified portal. See @docs/decisions.md.
 
 ## Memory model (for me, the agent)
 
