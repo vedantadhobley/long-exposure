@@ -22,6 +22,7 @@ import com.longexposure.tops.QuoteUpdate;
 import com.longexposure.tops.TopsMessageRouter;
 import com.longexposure.tops.TradeReport;
 import com.longexposure.transport.IexTpDecoder;
+import com.longexposure.validation.BboCrossValidator;
 import com.longexposure.wire.Bytes;
 import com.longexposure.wire.IexMessage;
 
@@ -93,7 +94,67 @@ public final class Main {
         long maxPackets = parseLongOrDefault(System.getenv("IEX_MAX_PACKETS"), Long.MAX_VALUE);
         boolean writeDb = "true".equalsIgnoreCase(System.getenv("IEX_WRITE_DB"));
         boolean crossValidate = "true".equalsIgnoreCase(System.getenv("IEX_CROSS_VALIDATE"));
+
+        String bboAgainst = System.getenv("IEX_BBO_VALIDATE_AGAINST");
+        if (bboAgainst != null && !bboAgainst.isBlank()) {
+            bboCrossValidate(Path.of(filePath), Path.of(bboAgainst));
+            return;
+        }
+
         smokeTest(Path.of(filePath), printLimit, maxPackets, writeDb, crossValidate);
+    }
+
+    /**
+     * Stream a DEEP+ pcap and a TOPS pcap from the same day, merge by timestamp,
+     * reconstruct the order book from DEEP+, compare derived BBO to every
+     * TOPS QuoteUpdate. Reports overall match rate + worst symbols + a sample
+     * of mismatched cases.
+     */
+    private static void bboCrossValidate(final Path deepPlusFile, final Path topsFile) throws Exception {
+        System.out.println("== DEEP+ → TOPS BBO cross-validation ==");
+        System.out.println("deep+ file:  " + deepPlusFile);
+        System.out.println("tops  file:  " + topsFile);
+        System.out.println();
+
+        BboCrossValidator validator = new BboCrossValidator();
+        BboCrossValidator.Result r = validator.run(deepPlusFile, topsFile);
+
+        System.out.println();
+        System.out.println("== summary ==");
+        System.out.printf("elapsed:               %s%n", r.elapsed());
+        System.out.printf("DEEP+ events applied:  %,d%n", r.deepEventsApplied());
+        System.out.printf("TOPS non-quote msgs:   %,d (skipped)%n", r.topsNonQuoteEventsSkipped());
+        System.out.printf("heartbeats skipped:    %,d%n", r.heartbeatsSkipped());
+        System.out.printf("decode failures:       %,d%n", r.decodeFailures());
+        System.out.printf("symbols tracked:       %,d (DEEP+ side)%n", r.symbolsTracked());
+        System.out.println();
+        System.out.printf("QuoteUpdates compared: %,d%n", r.totalQuotesCompared());
+        System.out.printf("  matched:             %,d (%.4f%%)%n", r.matched(), r.matchRate() * 100);
+        System.out.printf("  mismatched:          %,d%n", r.mismatched());
+
+        if (r.mismatched() > 0) {
+            System.out.println();
+            System.out.println("worst 10 symbols by mismatch count:");
+            for (BboCrossValidator.SymbolStats s : r.worstSymbols(10)) {
+                System.out.printf("  %-10s matched=%,d  mismatched=%,d  rate=%.4f%%%n",
+                        s.symbol(), s.matched(), s.mismatched(), s.matchRate() * 100);
+            }
+            System.out.println();
+            System.out.println("first " + r.mismatchSamples().size() + " mismatches:");
+            for (BboCrossValidator.MismatchSample sample : r.mismatchSamples()) {
+                System.out.printf(
+                        "  %-8s @%s  derived: %dx%d / %dx%d  TOPS: %dx%d / %dx%d%n",
+                        sample.symbol(),
+                        formatNanos(sample.timestampNanos()),
+                        sample.derivedBidSize(), sample.derivedBidPriceRaw(),
+                        sample.derivedAskPriceRaw(), sample.derivedAskSize(),
+                        sample.topsBidSize(), sample.topsBidPriceRaw(),
+                        sample.topsAskPriceRaw(), sample.topsAskSize());
+            }
+        } else {
+            System.out.println();
+            System.out.println("✓ every TOPS QuoteUpdate matched the derived DEEP+ BBO exactly.");
+        }
     }
 
     private static void smokeTest(final Path path, final int printLimit, final long maxPackets,
