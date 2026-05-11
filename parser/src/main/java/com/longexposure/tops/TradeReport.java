@@ -1,6 +1,7 @@
 package com.longexposure.tops;
 
 import com.longexposure.wire.Bytes;
+import com.longexposure.wire.SaleConditionFlags;
 
 /**
  * Trade Report Message — {@code T} (0x54), 38 bytes.

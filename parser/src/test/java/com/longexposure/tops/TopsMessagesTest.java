@@ -3,6 +3,7 @@ package com.longexposure.tops;
 import com.longexposure.admin.SystemEvent;
 import com.longexposure.admin.TradingStatus;
 import com.longexposure.wire.IexMessage;
+import com.longexposure.wire.SaleConditionFlags;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;

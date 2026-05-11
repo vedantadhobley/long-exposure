@@ -1,4 +1,4 @@
-package com.longexposure.tops;
+package com.longexposure.deepplus;
 
 import com.longexposure.wire.Bytes;
 import com.longexposure.wire.SaleConditionFlags;
@@ -6,10 +6,10 @@ import com.longexposure.wire.SaleConditionFlags;
 /**
  * Trade Break Message — {@code B} (0x42), 38 bytes.
  *
- * <p>Sent when an execution on IEX is broken on the same trading day.
- * Trade Breaks are rare and only relevant to consumers that maintain
- * execution-based state. Wire format is identical to {@link TradeReport};
- * the {@code tradeId} references the original Trade Report's {@code tradeId}.
+ * <p>An execution on IEX was broken on the same trading day. The
+ * {@code brokenTradeId} references the original
+ * {@link OrderExecuted#tradeId()} or {@link Trade#tradeId()}.
+ * Wire format is identical to {@link Trade}.
  *
  * <pre>
  * Offset  Size  Field
@@ -19,7 +19,7 @@ import com.longexposure.wire.SaleConditionFlags;
  *    10     8   Symbol
  *    18     4   Size
  *    22     8   Price
- *    30     8   Trade ID (refers to the broken trade)
+ *    30     8   Trade ID (refers to broken trade)
  * </pre>
  */
 public record TradeBreak(
@@ -28,7 +28,7 @@ public record TradeBreak(
         String symbol,
         int size,
         long priceRaw,
-        long brokenTradeId) implements TopsMessage {
+        long brokenTradeId) implements DeepPlusMessage {
 
     public static final byte MESSAGE_TYPE = (byte) 0x42;
     public static final int BYTE_LENGTH = 38;
@@ -40,13 +40,13 @@ public record TradeBreak(
 
     public static TradeBreak decode(final byte[] buf, final int offset) {
         Bytes.requireLength(buf, offset, BYTE_LENGTH, "TradeBreak");
-        byte flags    = buf[offset + 1];
-        long ts       = Bytes.readLongLE(buf, offset + 2);
-        String symbol = Bytes.decodeSymbol(buf, offset + 10);
-        int size      = Bytes.readIntLE(buf, offset + 18);
-        long price    = Bytes.readLongLE(buf, offset + 22);
-        long tradeId  = Bytes.readLongLE(buf, offset + 30);
-        return new TradeBreak(flags, ts, symbol, size, price, tradeId);
+        byte flags   = buf[offset + 1];
+        long ts      = Bytes.readLongLE(buf, offset + 2);
+        String sym   = Bytes.decodeSymbol(buf, offset + 10);
+        int size     = Bytes.readIntLE(buf, offset + 18);
+        long price   = Bytes.readLongLE(buf, offset + 22);
+        long tradeId = Bytes.readLongLE(buf, offset + 30);
+        return new TradeBreak(flags, ts, sym, size, price, tradeId);
     }
 
     public SaleConditionFlags conditions() {

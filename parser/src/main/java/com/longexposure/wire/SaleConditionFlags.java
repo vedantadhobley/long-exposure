@@ -1,9 +1,9 @@
-package com.longexposure.tops;
+package com.longexposure.wire;
 
 /**
- * Sale Condition Flags decoder for {@code T} Trade Report and {@code B}
- * Trade Break messages (TOPS 1.66 Appendix A — same bitfield in both
- * messages).
+ * Sale Condition Flags bitfield — shared across TOPS Trade Report,
+ * TOPS Trade Break, DEEP+ Order Executed, DEEP+ Trade, DEEP+ Trade Break.
+ * TOPS 1.66 Appendix A and DEEP+ 1.02 Appendix A define the same layout.
  *
  * <pre>
  *  Bit  Mask  Name                            Set means...
