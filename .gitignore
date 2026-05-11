@@ -33,3 +33,4 @@ data/
 hist/
 *.pcap
 *.pcap.gz
+*.pdf

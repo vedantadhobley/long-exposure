@@ -86,7 +86,7 @@ This is the pragmatic choice over a pure time-series DB:
 - **Familiar mental model.** Debugging time stays in the project, not in learning a new query engine.
 - **Future flexibility.** If Long Exposure grows orthogonal features (user accounts, saved searches, full-text search on narratives), Postgres absorbs them without adding a second database.
 
-What we give up vs a purpose-built TSDB: ~10–20% raw scan throughput on time-range queries, and roughly 2–5× slower bulk ingest. Both are completely irrelevant at our data scale (a few hundred MB/day, ingested once nightly, served to a personal-site-scale read load).
+What we give up vs a purpose-built TSDB: ~10–20% raw scan throughput on time-range queries, and roughly 2–5× slower bulk ingest. Both are completely irrelevant at our data scale (~7–9 GB compressed per day for TOPS, ingested once nightly, served to a personal-site-scale read load — a few hundred GB of parsed events across the 30-day rolling window, well within Postgres' comfort zone).
 
 The full alternatives analysis is in [Alternatives considered (database)](#alternatives-considered-database) below so the rationale survives future "why not X" questions.
 
@@ -176,17 +176,23 @@ Postgres 16 + TimescaleDB. Standard JDBC for ingest from the Java parser. Contin
 
 ---
 
-## Data feed selection — TOPS vs DEEP
+## Data feed selection — TOPS, DEEP, DPLS
 
-IEX publishes two historical data feeds via HIST: TOPS and DEEP. Long Exposure uses TOPS only.
+IEX publishes three historical data feeds via HIST, all listed at `https://iextrading.com/api/1.0/hist`:
 
-**TOPS — top of book.** Best bid, best ask, aggregated sizes at the top of the book, last trade information. Contains all the event types Long Exposure needs: halts, trade reports, quote updates, trading status changes, system events. A single trading day is typically a few hundred MB compressed.
+| Feed | What it carries | History available | Compressed size/day |
+|---|---|---|---|
+| **TOPS 1.6** | Top of book — best bid/ask + last trade + status/halt events | 2017→ | ~7–9 GB |
+| **DEEP 1.08** | Full depth of book — every displayed price level + aggregated sizes | 2017→ | ~7–9 GB |
+| **DPLS 1.0** (DEEP+) | Order-by-order — every individual displayed order's add/modify/cancel/execute | Jan 2025→ | ~7–9 GB |
 
-**DEEP — depth of book.** Every price level with aggregated resting order sizes. Significantly larger than TOPS and contains information Long Exposure doesn't need. The full DEEP dataset across all available history exceeds 13 TB.
+Sizes are roughly equivalent across feeds. `DPLS` is the filename token for what IEX's spec calls "DEEP+" — same product, the filename uses `DPLS` because `+` is awkward in filenames.
 
-**DPLS (DEEP+) — order-by-order.** The most granular feed IEX publishes. ~10 GB compressed per day. Not relevant for this project.
+Information-theoretically, **DPLS ⊃ DEEP ⊃ TOPS**: DEEP's price-level book can be derived from DPLS by aggregating order sizes; TOPS's BBO can be derived from DEEP's best price level on each side. So storing more than one feed for the same date is pure duplication.
 
-**Decision: TOPS for v1. DEEP as a potential phase-2 if deeper liquidity analysis is added.**
+**Decision: TOPS 1.6 for v1. DPLS / DEEP+ for phase 2 (skipping DEEP entirely).** The reasoning, including why we skip DEEP, lives in `docs/decisions.md`. The short version: DEEP is a stopping point we'd throw away — once we invest in book reconstruction for phase 2, marginal cost to track individual orders (going all the way to DPLS) is small, and the order-by-order narratives are dramatically more on-brand for IEX's transparency mission than depth-only narratives.
+
+**Out of scope.** TOPS / DEEP / DEEP+ all have companion **SNAP** specifications. SNAP is a TCP request-response service for live consumers joining the multicast mid-day to recover the current book state. It does not appear in HIST and is irrelevant to a T+1 batch pipeline.
 
 ---
 
@@ -442,7 +448,7 @@ In `~/workspace/dev/vedanta-systems/`: add the `/api/long-exposure/*` nginx prox
 
 ## What's not in the v1
 
-- DEEP feed (depth-of-book) — phase 2 if deeper liquidity analysis is added
+- DEEP+ / DPLS (order-by-order) — phase 2 (skipping DEEP entirely; see [Data feed selection](#data-feed-selection--tops-deep-dpls) and `docs/decisions.md`)
 - Real-time streaming (HIST is T+1 only; real-time requires the IEX SIP feed which is a different licensing model)
 - Multi-exchange comparison — IEX only for v1
 - User accounts / saved searches / alerts — purely read-only public for v1

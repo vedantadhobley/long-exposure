@@ -4,6 +4,112 @@ Append-only record of architectural and operational decisions, ordered by date. 
 
 ---
 
+## 2026-05-10 — TOPS for v1, DEEP+ (not DEEP) for phase 2; SNAP feeds out of scope
+
+**Context.** The README originally specified TOPS-only for v1 with DEEP earmarked for phase 2, citing file sizes (TOPS "few hundred MB", DEEP "13 TB across full history"). Pulling real numbers from the HIST API for recent dates showed all three feeds (TOPS, DEEP, DEEP+/DPLS) are within 5% of each other in compressed size — ~7 GB/day in 2025, ~2.9 GB/day in 2024. The original size-based argument for TOPS doesn't hold; the choice has to rest on parser complexity, validation difficulty, and ship risk instead.
+
+After pulling all 7 spec PDFs from `~/workspace/data/long-exposure/specs/` and reading the trading-message sections of TOPS 1.66, DEEP 1.08, and DEEP+ 1.02:
+
+**Decided.**
+
+- **v1: TOPS 1.6 only.** Single feed, single parser path, validate against IEX's published daily totals.
+- **Phase 2: DEEP+ (skip DEEP entirely).** Order-by-order book, every individual displayed order tracked through its Add/Modify/Delete/Execute lifecycle.
+- **SNAP feeds: permanently out of scope.** TOPS SNAP / DEEP SNAP / DEEP+ SNAP are request-response TCP services for live consumers joining mid-day; they don't appear in HIST (which is what we read). Not relevant to a T+1 pipeline.
+- **Phase 2 is not a multi-month delay.** Target it as a 2–3 week follow-up sprint after v1 ships — day ~22 ships TOPS publicly, day ~40 ships DEEP+ alongside it.
+
+**Why TOPS for v1 (and not jumping straight to DEEP+).**
+
+1. *Validation difficulty differs qualitatively.* TOPS validates trivially: sum trade volumes per symbol, compare to IEX's daily totals. A decoder bug fails loudly. DEEP+ validation requires book-state reconstruction at sampled timestamps and per-order lifecycle correctness — and there is no analogous "compare to a published authoritative number" check. A subtly broken DEEP+ decoder silently produces wrong book state, and narratives confidently lie. This is the scariest bug class in market data parsing.
+
+2. *TOPS is a stepping stone, not throwaway.* ~60% of the parser code (transport, admin decoders, framing, gap handling, Postgres writer skeleton, Temporal pipeline, LLM narration loop, Caddy/deploy/UI wiring) is shared across all three feeds. v1 = build the shared layer + TOPS trading decoders. Phase 2 = add DEEP+ trading decoders + order book state machine + order-narrative templates. No throwaway work.
+
+3. *Ship risk.* TOPS-at-day-22 gives a near-certain shippable product. DEEP+-by-day-22 carries meaningful probability of "half-shipped" or "didn't ship." For a public, reputation-attached project, variance dominates expected value.
+
+4. *LLM prompt iteration needs working parsed events.* Days 18–19 are prompt tuning. If the parser isn't producing real events by then, prompts don't get tuned. TOPS-running-by-day-7 leaves weeks for prompt iteration.
+
+5. *Spec maturity.* TOPS 1.66 dated Oct 2021, stable, multiple reference implementations exist (open-source IEX parsers in Python/Go/Rust). DEEP+ 1.02 dated Jan 2025; thin ecosystem, fewer references to cross-check decoders against.
+
+6. *Reputation narrative.* "Shipped v1 in 22 days, shipped order-by-order v2 three weeks later" reads as judgment + execution. "Attempted DEEP+ and got 80% of the way" reads as ambition without execution. The former is a strictly better story even if total code written is similar.
+
+**Why DEEP+ (not DEEP) for phase 2.**
+
+Information-theoretic: **DEEP+ ⊃ DEEP ⊃ TOPS**. DEEP+ carries every individual displayed order's lifecycle (Add/Modify/Delete/Execute by Order ID). Aggregating order sizes by `(symbol, side, price)` derives DEEP-equivalent price levels for free. So DEEP is a stopping point we'd throw away — once we've invested in book reconstruction, the marginal cost to track individual orders is small.
+
+Narrative value: DEEP+ unlocks order-lifecycle stories ("8 orders posted and cancelled within 50ms — classic spoof shape"; "median order time-in-book on SPY collapsed from 800ms to 90ms") that map directly to IEX's transparency brand. DEEP only unlocks depth-of-book narratives, which are less distinctive.
+
+**Why SNAP feeds are out of scope.**
+
+SNAP (TOPS/DEEP/DEEP+) is a TCP request-response service used by live consumers who joined the multicast mid-day and need to recover the current order book state. Read of `deep-plus-snap-1.03.pdf` confirms: SnapshotRequest → SnapshotStart/SnapshotData(...)/SnapshotEnd response carrying the latest admin messages + Add Orders needed to rebuild book state at a given Sequence Number. Auth-gated, 1000-requests/day quota, credentials via Market Ops.
+
+Long Exposure consumes complete daily .pcap.gz files from HIST T+1. Every message is in correct sequence in the file; mid-day recovery isn't a concept that applies. The SNAP specs stay archived at `~/workspace/data/long-exposure/specs/` for completeness but won't be implemented.
+
+**What this changes in the codebase.**
+
+- README's "Alternatives considered" → DEEP section becomes a DEEP+ section; size claims corrected to ~7 GB/day per feed (was "few hundred MB" / "13 TB").
+- `docs/plan.md` Day 22 phase 2 note → DEEP+, with the 2–3 week follow-up framing.
+- `docs/protocol-notes.md` already updated with real spec content (TOPS/DEEP/DEEP+ trading message tables).
+- Architecture work that needs to be DEEP+-ready from day 1:
+  - `DownloadHistActivity(date, feed_name, version)` — parameterized
+  - `events` hypertable has a `feed_source TEXT` column from initial schema
+  - Parser package structure: shared `transport/` + `admin/` + per-feed `tops/` (later `deepplus/`)
+
+**Confidence + what's still open.**
+
+High confidence on the v1 = TOPS decision. The "skip DEEP, go straight to DEEP+ in phase 2" call is opinionated and could be revisited if any of these turn out differently than expected:
+
+- If TOPS daily-totals validation reveals decoder bugs that take longer than ~1 week to chase, phase 2 may slip; DEEP+'s harder validation surface is a bigger version of the same problem.
+- If real `*.pcap.gz` files exhibit framing edge cases (truncated packets, gap-fill artifacts) we haven't anticipated, the shared transport layer might absorb more time than planned and the per-feed work could compress.
+- If, after seeing real TOPS narratives at launch, the depth-of-book signal feels worth the extra integration cost, we could land DEEP between v1 and DEEP+ as an intermediate milestone — but this is unlikely given the strict information-superset argument.
+
+**Addendum 2026-05-10 (later) — DPLS = DEEP+ access confirmed, history depth caveat, reference implementation availability.**
+
+After publishing the decision above, three additional pieces of information were gathered that confirm the plan but add nuance:
+
+1. **DPLS = DEEP+.** The HIST filename token is `DPLS` (URL/filename-safe; "+" is awkward in filenames). The product/spec name is "DEEP+". Same wire format, same Message Protocol ID `0x8005`. Filenames follow `YYYYMMDD_IEXTP1_<FEED><VERSION>.pcap.gz` so the slot uses `DPLS`. Convergent evidence: DPLS first appears in HIST listings in Jan 2025, exactly aligned with the DEEP+ spec publication date.
+
+2. **HIST access is free and identical for all three feeds.** No additional authentication or quota beyond what TOPS / DEEP already require (none). Same JSON API at `https://iextrading.com/api/1.0/hist`, same Google Cloud Storage download URLs.
+
+3. **DEEP+ history depth is limited to ~Jan 2025 onward.** TOPS and DEEP go back to 2017; DEEP+ has ~16 months as of the project start. Implications:
+   - 30-day rolling baseline and 30-day backfill (what the scorer needs): well within DPLS available history. **No impact on v1 or phase 2.**
+   - Multi-year historical analysis with DEEP+ is not possible. Would require falling back to TOPS+DEEP for pre-2025 data. The project doesn't plan multi-year analysis, so this is a constraint to record but not a blocker.
+   - Phase 2 launch positioning: DEEP+ can't claim "years of order-by-order history" — only "everything DEEP+ has published." Still a real product, but the marketing changes from "deep history" to "deep granularity."
+
+4. **Reference implementations available.** GitHub search turned up several open-source IEX parsers:
+   - `WojciechZankowski/iextrading4j-hist` (Java, 22 stars, Jun 2023) — TOPS + DEEP. **Same language as us; primary cross-check target.**
+   - `rob-blackbourn/iex_parser` (Python, 29 stars, Jan 2022) — TOPS + DEEP. Most-starred; useful for cross-language validation.
+   - Three C++ implementations covering DEEP (`Anirudhsekar96/IEX_DEEP_HISTORICAL_DATA_PARSER`, `kushal-goenka/iex-pcap-parser`, `dhsilv/iex_deep_parser`).
+   - `B1tWhys/iextool` (Python, small CLI).
+   - **No existing parser for DEEP+** in any language as of search.
+
+   Cross-check strategy for v1: parse a sample TOPS .pcap.gz with `iextrading4j-hist`, dump the message stream, run our parser against the same file, diff the outputs message-by-message. Combined with the daily-totals validator this gives us two independent correctness checks.
+
+   For phase 2: no reference parser exists for DEEP+, so we'd be flying solo on decoder correctness. This is the strongest additional reason to ship TOPS first — TOPS work matures our shared decoder + validation infrastructure, so when DEEP+ work begins we already trust the surrounding layers and can focus purely on the new trading-message decoders and order-tracking state machine. It also positions Long Exposure as **the open-source reference implementation for DEEP+ in Java** — which directly reinforces the README's "reference implementation" framing for IEX.
+
+5. **Bootstrap and "30-day baseline" clarified.** The scorer flags events as "unusual" by comparing to per-symbol rolling 30-trading-day averages of several metrics (daily volume, daily trade count, avg spread, halt frequency, intraday volume distribution). TimescaleDB continuous aggregates maintain these incrementally. On day 1 of launch we have zero history in DB; the bootstrap is: parse the previous 30 trading days of HIST files → ingest → baselines populate → re-score and re-narrate each of those 30 days with their now-defined baselines. Launch day shows 30 days of populated narrated archive. The same 30-day backfill is the bootstrap *and* the visible launch content. See @plan.md Days 11–13.
+
+**Recorded URLs (for reproducibility).**
+
+- HIST API endpoint: `https://iextrading.com/api/1.0/hist` (returns all dates) or `?date=YYYYMMDD` for one date.
+- HIST file naming convention: `YYYYMMDD_IEXTP1_<FEED><VERSION>.pcap.gz` where FEED ∈ {TOPS, DEEP, DPLS}.
+- IEX market data landing page: `https://iextrading.com/trading/market-data/`
+- Spec PDFs (canonical IEX pages and the CDN URLs of the actual PDFs):
+  - TOPS 1.66: `https://www.iex.io/documents/tops-v1-66`
+  - TOPS 1.5: `https://www.iex.io/documents/tops-v1-5`
+  - DEEP 1.08: `https://www.iex.io/documents/deep-v1-08`
+  - DEEP+ 1.02: `https://www.iex.io/documents/iex-deep-plus-specification`
+  - TOPS SNAP: `https://www.iex.io/documents/iex-tops-snap-specification` (out of scope)
+  - DEEP SNAP: `https://www.iex.io/documents/iex-deep-snap-specification` (out of scope)
+  - DEEP+ SNAP: `https://www.iex.io/documents/deep-plus-snap-specification` (out of scope)
+- Reference parsers (sorted by relevance):
+  - `https://github.com/WojciechZankowski/iextrading4j-hist` (Java, primary cross-check)
+  - `https://github.com/rob-blackbourn/iex_parser` (Python, most popular)
+  - `https://github.com/Anirudhsekar96/IEX_DEEP_HISTORICAL_DATA_PARSER` (C++ DEEP)
+  - `https://github.com/dhsilv/iex_deep_parser` (C++ DEEP, most recent)
+
+Local archived copies of all 7 spec PDFs live at `~/workspace/data/long-exposure/specs/`.
+
+---
+
 ## 2026-05-10 — No frontend in this repo; surface UI through vedanta-systems
 
 **Context.** The original Day-1 scaffold (commit `8079d64`) included a `frontend/` directory containing a Svelte 5 SPA, an nginx prod image, a Vite dev image, and a public Cloudflare hostname (`longexposure.vedanta.systems`) routed through the workspace Caddy. This violates the workspace pattern.
