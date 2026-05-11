@@ -49,14 +49,34 @@ public record ProtectedBbo(long priceRaw, long size) {
      * Compute the protected BBO from a side's level map ordered best-first.
      * For bids pass {@code TreeMap.descendingMap()} (highest price first);
      * for asks pass the natural {@code TreeMap} order (lowest first).
+     *
+     * <p>This overload uses the level's own price to determine the
+     * round-lot tier (best when prior-close data isn't available).
      */
     public static ProtectedBbo from(final NavigableMap<Long, Long> bestFirstLevels) {
+        return from(bestFirstLevels, 0L);
+    }
+
+    /**
+     * Same, but with an explicit per-symbol round-lot (e.g. derived
+     * from the symbol's prior-day closing price). Pass {@code 0} to
+     * fall back to per-level-price tier (equivalent to the no-arg
+     * overload).
+     *
+     * <p>This is the closer-to-spec form — TOPS fixes the round-lot
+     * for the trading day from yesterday's close, then holds it across
+     * all intraday price moves. Tier-crossing stocks (LNG, GME, ASR,
+     * BIO, etc.) only match TOPS BBO with the symbol-fixed round-lot.
+     */
+    public static ProtectedBbo from(final NavigableMap<Long, Long> bestFirstLevels,
+                                    final long fixedRoundLot) {
         long cumulative = 0L;
         for (Map.Entry<Long, Long> e : bestFirstLevels.entrySet()) {
             long levelPrice = e.getKey();
             long levelSize = e.getValue();
             cumulative += levelSize;
-            if (cumulative >= RoundLot.forPriceRaw(levelPrice)) {
+            long roundLot = (fixedRoundLot > 0) ? fixedRoundLot : RoundLot.forPriceRaw(levelPrice);
+            if (cumulative >= roundLot) {
                 return new ProtectedBbo(levelPrice, cumulative);
             }
         }

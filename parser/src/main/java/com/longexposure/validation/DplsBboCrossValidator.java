@@ -1,7 +1,12 @@
 package com.longexposure.validation;
 
+import com.longexposure.dpls.AddOrder;
+import com.longexposure.dpls.ClearBook;
 import com.longexposure.dpls.OrderBook;
 import com.longexposure.dpls.OrderBookManager;
+import com.longexposure.dpls.OrderDelete;
+import com.longexposure.dpls.OrderExecuted;
+import com.longexposure.dpls.OrderModify;
 import com.longexposure.tops.QuoteUpdate;
 import com.longexposure.wire.IexMessage;
 import com.longexposure.wire.ProtectedBbo;
@@ -53,6 +58,20 @@ import java.util.Map;
 public final class DplsBboCrossValidator {
 
     private final OrderBookManager bookManager = new OrderBookManager();
+    private final Map<String, Long> roundLotBySymbol;
+
+    public DplsBboCrossValidator() {
+        this(Map.of());
+    }
+
+    /**
+     * @param roundLotBySymbol per-symbol round-lot (derived from
+     *                         prior-day close). Symbols not in the
+     *                         map fall back to level-price tier.
+     */
+    public DplsBboCrossValidator(final Map<String, Long> roundLotBySymbol) {
+        this.roundLotBySymbol = roundLotBySymbol;
+    }
 
     private long totalQuotesCompared;
     private long matched;
@@ -68,13 +87,16 @@ public final class DplsBboCrossValidator {
      * Pending TOPS QuoteUpdates awaiting comparison, keyed by symbol.
      * Multiple QuoteUpdates at the same {@code (symbol, ts)} get
      * squashed here — only the latest survives, representing the BBO
-     * after the final of multiple same-ns atomic transactions. Same
-     * mechanism as {@link DeepVsDplsValidator}'s same-ns dedupe.
-     * Comparison is deferred until the smallest observable timestamp
-     * across both streams exceeds the pending QU's ts.
+     * after the final of multiple same-ns atomic transactions.
+     *
+     * <p>Comparison is deferred until either (a) we're about to apply
+     * a DPLS book event for the same symbol — at which point the
+     * symbol's book is still in its "at pending.ts" state since no
+     * events for it have arrived since, or (b) end of stream. This
+     * gives O(1) flush per event instead of the O(symbols) iteration
+     * a periodic-flush design would do.
      */
     private final Map<String, QuoteUpdate> pendingBySymbol = new HashMap<>();
-    private long lastFlushedTs = Long.MIN_VALUE;
 
     public BboValidationResult run(final Path dplsFile, final Path topsFile) throws IOException {
         long startNanos = System.nanoTime();
@@ -85,14 +107,13 @@ public final class DplsBboCrossValidator {
             while (!deep.isExhausted() || !tops.isExhausted()) {
                 long deepTs = deep.peekTs();
                 long topsTs = tops.peekTs();
-                long nextTs = Math.min(deepTs, topsTs);
-                if (nextTs > lastFlushedTs) {
-                    flushPendingOlderThan(nextTs);
-                    lastFlushedTs = nextTs;
-                }
 
                 if (deepTs <= topsTs) {
                     IexMessage m = deep.consume();
+                    String sym = bookAffectingSymbol(m);
+                    if (sym != null) {
+                        preApplyFlush(sym, deepTs);
+                    }
                     bookManager.apply(m);
                     depthEventsApplied++;
                 } else {
@@ -104,7 +125,13 @@ public final class DplsBboCrossValidator {
                     }
                 }
             }
-            flushPendingOlderThan(Long.MAX_VALUE);
+            // End-of-stream: flush every remaining pending. Each one's
+            // symbol had no further book events after the pending ts, so
+            // the book is still at the correct "at pending.ts" state.
+            for (QuoteUpdate qu : pendingBySymbol.values()) {
+                compareBbo(qu);
+            }
+            pendingBySymbol.clear();
 
             long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
             return new BboValidationResult(
@@ -123,9 +150,12 @@ public final class DplsBboCrossValidator {
     }
 
     /**
-     * Buffer a QuoteUpdate by symbol; if an older-ts QU is already
-     * pending for the same symbol, flush it first. Same-ns
-     * replacements are silently overwritten (final QU at the ns wins).
+     * Buffer a QuoteUpdate by symbol. Same-ns replacements at the same
+     * symbol are silently overwritten (final QU at the ns wins). An
+     * older-ts pending for the same symbol gets flushed first (this
+     * can happen when TOPS publishes consecutive QUs for the symbol
+     * without a DPLS event in between — the older one represents an
+     * older engine state we'd never compare against otherwise).
      */
     private void stashPendingQu(final QuoteUpdate qu) {
         QuoteUpdate prev = pendingBySymbol.get(qu.symbol());
@@ -135,16 +165,34 @@ public final class DplsBboCrossValidator {
         pendingBySymbol.put(qu.symbol(), qu);
     }
 
-    private void flushPendingOlderThan(final long ts) {
-        if (pendingBySymbol.isEmpty()) return;
-        var it = pendingBySymbol.entrySet().iterator();
-        while (it.hasNext()) {
-            var e = it.next();
-            if (e.getValue().timestampNanos() < ts) {
-                compareBbo(e.getValue());
-                it.remove();
-            }
+    /**
+     * Before applying a book-affecting event for {@code symbol} at
+     * {@code newTs}, flush any pending QU for the same symbol at a
+     * strictly earlier ts. Symbol's book is still in its "at pending.ts"
+     * state at this point, since no events for this symbol have
+     * arrived since pending.ts. Same-ns matches are NOT flushed — DPLS
+     * wins ties so the new DPLS event represents a state at or before
+     * the pending QU's reporting instant; the pending stays valid until
+     * a strictly later event.
+     */
+    private void preApplyFlush(final String symbol, final long newTs) {
+        QuoteUpdate pending = pendingBySymbol.get(symbol);
+        if (pending != null && pending.timestampNanos() < newTs) {
+            compareBbo(pending);
+            pendingBySymbol.remove(symbol);
         }
+    }
+
+    /** Symbol affected by the message, or {@code null} for non-book-affecting types. */
+    private static String bookAffectingSymbol(final IexMessage m) {
+        return switch (m) {
+            case AddOrder a       -> a.symbol();
+            case OrderModify om   -> om.symbol();
+            case OrderDelete od   -> od.symbol();
+            case OrderExecuted oe -> oe.symbol();
+            case ClearBook cb     -> cb.symbol();
+            default -> null;
+        };
     }
 
     private void compareBbo(final QuoteUpdate qu) {
@@ -153,8 +201,9 @@ public final class DplsBboCrossValidator {
                 qu.symbol(), BboValidationResult.SymbolStats::new);
 
         OrderBook book = bookManager.book(qu.symbol());
-        ProtectedBbo bid = book == null ? ProtectedBbo.EMPTY : book.bestBidProtected();
-        ProtectedBbo ask = book == null ? ProtectedBbo.EMPTY : book.bestAskProtected();
+        long rl = roundLotBySymbol.getOrDefault(qu.symbol(), 0L);
+        ProtectedBbo bid = book == null ? ProtectedBbo.EMPTY : book.bestBidProtected(rl);
+        ProtectedBbo ask = book == null ? ProtectedBbo.EMPTY : book.bestAskProtected(rl);
 
         boolean bidMatch = bid.priceRaw() == qu.bidPriceRaw() && bid.size() == (long) qu.bidSize();
         boolean askMatch = ask.priceRaw() == qu.askPriceRaw() && ask.size() == (long) qu.askSize();

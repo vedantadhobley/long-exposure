@@ -2,6 +2,7 @@ package com.longexposure.validation;
 
 import com.longexposure.deep.PriceLevelBook;
 import com.longexposure.deep.PriceLevelBookManager;
+import com.longexposure.deep.PriceLevelUpdate;
 import com.longexposure.tops.QuoteUpdate;
 import com.longexposure.wire.IexMessage;
 import com.longexposure.wire.ProtectedBbo;
@@ -36,6 +37,15 @@ import java.util.Map;
 public final class DeepBboCrossValidator {
 
     private final PriceLevelBookManager bookManager = new PriceLevelBookManager();
+    private final Map<String, Long> roundLotBySymbol;
+
+    public DeepBboCrossValidator() {
+        this(Map.of());
+    }
+
+    public DeepBboCrossValidator(final Map<String, Long> roundLotBySymbol) {
+        this.roundLotBySymbol = roundLotBySymbol;
+    }
 
     private long totalQuotesCompared;
     private long matched;
@@ -49,7 +59,6 @@ public final class DeepBboCrossValidator {
 
     /** Same-ns dedupe — see {@link DplsBboCrossValidator#pendingBySymbol} for rationale. */
     private final Map<String, QuoteUpdate> pendingBySymbol = new HashMap<>();
-    private long lastFlushedTs = Long.MIN_VALUE;
 
     public BboValidationResult run(final Path deepFile, final Path topsFile) throws IOException {
         long startNanos = System.nanoTime();
@@ -60,14 +69,12 @@ public final class DeepBboCrossValidator {
             while (!deep.isExhausted() || !tops.isExhausted()) {
                 long deepTs = deep.peekTs();
                 long topsTs = tops.peekTs();
-                long nextTs = Math.min(deepTs, topsTs);
-                if (nextTs > lastFlushedTs) {
-                    flushPendingOlderThan(nextTs);
-                    lastFlushedTs = nextTs;
-                }
 
                 if (deepTs <= topsTs) {
                     IexMessage m = deep.consume();
+                    if (m instanceof PriceLevelUpdate plu) {
+                        preApplyFlush(plu.symbol(), deepTs);
+                    }
                     bookManager.apply(m);
                     depthEventsApplied++;
                 } else {
@@ -79,7 +86,10 @@ public final class DeepBboCrossValidator {
                     }
                 }
             }
-            flushPendingOlderThan(Long.MAX_VALUE);
+            for (QuoteUpdate qu : pendingBySymbol.values()) {
+                compareBbo(qu);
+            }
+            pendingBySymbol.clear();
 
             long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
             return new BboValidationResult(
@@ -105,15 +115,11 @@ public final class DeepBboCrossValidator {
         pendingBySymbol.put(qu.symbol(), qu);
     }
 
-    private void flushPendingOlderThan(final long ts) {
-        if (pendingBySymbol.isEmpty()) return;
-        var it = pendingBySymbol.entrySet().iterator();
-        while (it.hasNext()) {
-            var e = it.next();
-            if (e.getValue().timestampNanos() < ts) {
-                compareBbo(e.getValue());
-                it.remove();
-            }
+    private void preApplyFlush(final String symbol, final long newTs) {
+        QuoteUpdate pending = pendingBySymbol.get(symbol);
+        if (pending != null && pending.timestampNanos() < newTs) {
+            compareBbo(pending);
+            pendingBySymbol.remove(symbol);
         }
     }
 
@@ -123,8 +129,9 @@ public final class DeepBboCrossValidator {
                 qu.symbol(), BboValidationResult.SymbolStats::new);
 
         PriceLevelBook book = bookManager.book(qu.symbol());
-        ProtectedBbo bid = book == null ? ProtectedBbo.EMPTY : book.bestBidProtected();
-        ProtectedBbo ask = book == null ? ProtectedBbo.EMPTY : book.bestAskProtected();
+        long rl = roundLotBySymbol.getOrDefault(qu.symbol(), 0L);
+        ProtectedBbo bid = book == null ? ProtectedBbo.EMPTY : book.bestBidProtected(rl);
+        ProtectedBbo ask = book == null ? ProtectedBbo.EMPTY : book.bestAskProtected(rl);
 
         boolean bidMatch = bid.priceRaw() == qu.bidPriceRaw() && bid.size() == (long) qu.bidSize();
         boolean askMatch = ask.priceRaw() == qu.askPriceRaw() && ask.size() == (long) qu.askSize();

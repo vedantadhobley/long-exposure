@@ -29,6 +29,8 @@ import com.longexposure.validation.DplsBboCrossValidator;
 import com.longexposure.validation.DeepVsDplsValidator;
 import com.longexposure.validation.DplsVsDeepTracer;
 import com.longexposure.validation.EventTracer;
+import com.longexposure.validation.PriorCloseExtractor;
+import com.longexposure.wire.PriorClose;
 import com.longexposure.wire.Bytes;
 import com.longexposure.wire.IexMessage;
 
@@ -102,6 +104,18 @@ public final class Main {
         boolean writeDb = "true".equalsIgnoreCase(System.getenv("IEX_WRITE_DB"));
         boolean crossValidate = "true".equalsIgnoreCase(System.getenv("IEX_CROSS_VALIDATE"));
 
+        String extractTo = System.getenv("IEX_EXTRACT_PRIOR_CLOSE_TO");
+        if (extractTo != null && !extractTo.isBlank()) {
+            System.out.println("== prior-close extraction ==");
+            System.out.println("tops file:  " + filePath);
+            System.out.println("output:     " + extractTo);
+            long t0 = System.nanoTime();
+            int n = PriorCloseExtractor.extract(Path.of(filePath), Path.of(extractTo));
+            long elapsedMs = (System.nanoTime() - t0) / 1_000_000L;
+            System.out.printf("✓ wrote %,d symbols in %,d ms%n", n, elapsedMs);
+            return;
+        }
+
         String bboAgainst = System.getenv("IEX_BBO_VALIDATE_AGAINST");
         if (bboAgainst != null && !bboAgainst.isBlank()) {
             String traceSymbol = System.getenv("IEX_TRACE_SYMBOL");
@@ -163,14 +177,19 @@ public final class Main {
      * derived round-lot-protected BBO.
      */
     private static void bboCrossValidate(final Path depthFile, final Feed depthFeed, final Path topsFile) throws Exception {
+        Map<String, Long> roundLotBySymbol = loadPriorCloseRoundLots();
+
         System.out.println("== " + depthFeed.label + " → TOPS BBO cross-validation ==");
         System.out.println(depthFeed.label + " file:  " + depthFile);
         System.out.println("tops  file:  " + topsFile);
+        if (!roundLotBySymbol.isEmpty()) {
+            System.out.printf("prior-close:  %,d symbols loaded%n", roundLotBySymbol.size());
+        }
         System.out.println();
 
         BboValidationResult r = (depthFeed == Feed.DPLS)
-                ? new DplsBboCrossValidator().run(depthFile, topsFile)
-                : new DeepBboCrossValidator().run(depthFile, topsFile);
+                ? new DplsBboCrossValidator(roundLotBySymbol).run(depthFile, topsFile)
+                : new DeepBboCrossValidator(roundLotBySymbol).run(depthFile, topsFile);
 
         System.out.println();
         System.out.println("== summary ==");
@@ -266,6 +285,17 @@ public final class Main {
             System.out.println();
             System.out.println("✓ every DEEP price level matched the DPLS aggregate exactly.");
         }
+    }
+
+    /**
+     * Load per-symbol round-lots from IEX_PRIOR_CLOSE_CSV if set,
+     * otherwise return an empty map (validators then fall back to
+     * per-level tier).
+     */
+    private static Map<String, Long> loadPriorCloseRoundLots() throws IOException {
+        String path = System.getenv("IEX_PRIOR_CLOSE_CSV");
+        if (path == null || path.isBlank()) return Map.of();
+        return PriorClose.roundLotBySymbol(PriorClose.loadCsv(Path.of(path)));
     }
 
     /**

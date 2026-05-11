@@ -206,6 +206,19 @@ public final class OrderBook {
     }
 
     /**
+     * Round-lot-protected BBO using an explicit per-symbol round lot
+     * (e.g. derived from the symbol's prior-day close). Pass {@code 0}
+     * to fall back to the per-level-price tier.
+     */
+    public ProtectedBbo bestBidProtected(final long fixedRoundLot) {
+        return ProtectedBbo.from(sizeAtBidPrice.descendingMap(), fixedRoundLot);
+    }
+
+    public ProtectedBbo bestAskProtected(final long fixedRoundLot) {
+        return ProtectedBbo.from(sizeAtAskPrice, fixedRoundLot);
+    }
+
+    /**
      * Fixed-threshold round-lot best bid: highest bid price whose own
      * aggregate is at least {@code minSize}. Simpler than
      * {@link #bestBidProtected()} (no aggregation, no tier table) —

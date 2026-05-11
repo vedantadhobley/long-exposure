@@ -114,6 +114,15 @@ public final class PriceLevelBook {
         return ProtectedBbo.from(sizeAtAskPrice);
     }
 
+    /** See {@link com.longexposure.dpls.OrderBook#bestBidProtected(long)}. */
+    public ProtectedBbo bestBidProtected(final long fixedRoundLot) {
+        return ProtectedBbo.from(sizeAtBidPrice.descendingMap(), fixedRoundLot);
+    }
+
+    public ProtectedBbo bestAskProtected(final long fixedRoundLot) {
+        return ProtectedBbo.from(sizeAtAskPrice, fixedRoundLot);
+    }
+
     /**
      * Fixed-threshold best bid (no tier table, no aggregation). Kept for
      * tests where a single threshold is the right knob.
