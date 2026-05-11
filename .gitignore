@@ -28,6 +28,10 @@ frontend/.vite/
 *.swp
 *~
 
+# Per-machine Claude Code settings (auto-generated permission allowlist,
+# accumulates per-session; not portable across machines/users)
+.claude/
+
 # Local data
 data/
 hist/
