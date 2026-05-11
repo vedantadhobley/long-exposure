@@ -99,3 +99,20 @@ http://long-exposure-prod-adminer.luv — server is preset to `long-exposure-pro
 ## Inspect Temporal workflow state
 
 http://long-exposure-prod-temporal-ui.luv — full execution history, retry counts, activity heartbeats. The source of truth for pipeline-execution debugging.
+
+## LLM endpoint (joi)
+
+Qwen3.5-122B-A10B served from joi (Framework Desktop, 128 GB unified, Strix Halo APU) via llama.cpp. Observed throughput **~23 tokens/sec**. Budget-comfortable for 5–50 narrations/day at ~150 tokens each.
+
+Verify joi is reachable from this host:
+
+```bash
+curl -s http://joi.<tailnet>:3101/v1/models | jq '.data[].id'
+```
+
+From inside the worker container (which is on the `luv-prod` / `luv-dev` network for tailnet egress):
+
+```bash
+docker compose -f docker-compose.yml exec worker \
+  curl -s http://llama-large.joi/v1/models | jq '.data[].id'
+```

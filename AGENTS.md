@@ -24,16 +24,17 @@ The frontend lives in a different repo — see [Frontend integration](#frontend-
 - **Workflow orchestration**: Temporal (its own Postgres for metadata, separate from the events DB).
 - **Database**: Postgres 16 + TimescaleDB extension (`timescale/timescaledb:latest-pg16`). Hypertable for events; continuous aggregates for T-30 baselines.
 - **API**: FastAPI 3.12 (asyncpg + psycopg + pydantic + structlog).
-- **External LLM**: `Qwen3.5-122B-A10B` (chat) served from `joi` over Tailscale, OpenAI-compatible endpoint. Reachable as `llama-large.joi` from the worker container via the `luv-prod` / `luv-dev` shared docker network. Live model IDs may shift; check `curl http://joi.<tailnet>:3101/v1/models` before relying on them.
+- **External LLM**: `Qwen3.5-122B-A10B` 4-bit quant via llama.cpp on `joi` (Framework Desktop Strix Halo, 128 GB unified). Observed throughput **~23 tok/sec** end-of-stream, which is the relevant number for capacity planning the narration loop (5–50 narrations/day × ~150 tokens each = budget-comfortable). OpenAI-compatible HTTP; reachable as `llama-large.joi` from the worker via the `luv-prod` / `luv-dev` shared docker network. Live model IDs may shift; check `curl http://joi.<tailnet>:3101/v1/models` before relying on them.
 
 ## Where to look first
 
 - @README.md — public-facing project description (motivation, architecture, alternatives considered, protocol notes)
 - @docs/architecture.md — service layout + data flow diagram
-- @docs/plan.md — the 22-day build plan, day-by-day, with current progress
-- @docs/todo.md — active checklist; this is the agent-editable scratchpad
+- @docs/plan.md — sprint-by-sprint build plan with current progress (was 22-day plan; compressed substantially)
+- @docs/todo.md — active checklist; **paste-ready start-of-session block at the top**
 - @docs/decisions.md — append-only log of architectural decisions
-- @docs/protocol-notes.md — IEX-TP + TOPS spec notes, parser gotchas
+- @docs/scoring-and-narration.md — design reference for the EventScorer + LLM prompt engineering (DEEP+ pattern catalog, narration grounding rules, output structure)
+- @docs/protocol-notes.md — IEX-TP + TOPS + DEEP+ spec notes, parser gotchas
 - @docs/operations.md — runbook (bring-up, restart, schema refresh, replay a day)
 - @deploy/INFRA-NOTES.md — Caddyfile entries + vedanta-systems wiring needed outside this repo
 

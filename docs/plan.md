@@ -211,13 +211,23 @@ The remaining post-parser work, in priority order. Day numbers are nominal now; 
 
 ### Days 14–17 (post-DEEP+) — Event scoring
 
+Design reference: @scoring-and-narration.md — pattern catalog (spoof-shaped post-cancel clusters, liquidity withdrawal, layering, sweeps, iceberg detection, time-in-book distribution shifts).
+
 - [ ] `EventScorer` interface (input: event + symbol baseline; output: score + JSON breakdown)
-- [ ] Per-event-type scorers — halt, large trade, quote-spread anomaly, order-flow anomaly (order add/cancel rates, time-in-book distribution)
+- [ ] Per-pattern scorers — one class per pattern in @scoring-and-narration.md plus the simpler ones (halt, large trade, quote-spread anomaly)
+- [ ] Score breakdown JSON must be sufficient to reconstruct every claim in the eventual narrative (grounding contract)
 - [ ] Tune weights until top-N events on 2026-05-08 pass the "would I read this?" check
 
 ### Days 18–19 — LLM narration
 
-**The hardest design work in the project.** Prompt engineering against `llama-large.joi` until narratives read like a sober finance journalist. Cache by event hash. Refuse on incomplete data. Tone: clear, factual, accessible.
+**The hardest design work in the project.** Design reference: @scoring-and-narration.md "Narration design principles" + "Output structure" sections.
+
+- [ ] Prompt template that takes a structured scored event and produces 2–3 sentence narration
+- [ ] Automated grounding check: every number / claim in the output text must appear in the structured input
+- [ ] Per-day "daily patterns" second-pass narration consuming the full scored event list
+- [ ] Cache by event hash (already supported by `narratives` table schema)
+- [ ] Refuse on incomplete data
+- [ ] Tone: financial-journalist register, no jargon, no excited-blog tone
 
 ### Days 20–21 — Temporal + API
 
