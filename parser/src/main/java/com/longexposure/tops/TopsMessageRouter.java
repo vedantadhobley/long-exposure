@@ -12,7 +12,7 @@ import com.longexposure.wire.IexMessage;
  * Unknown types throw — TOPS 1.66 reserves room to grow but every type we
  * see in the 2026-era HIST data should be one of these 12.
  *
- * <p>Phase 2 will add a parallel {@code DeepPlusMessageRouter} sharing the
+ * <p>Phase 2 will add a parallel {@code DplsMessageRouter} sharing the
  * same admin dispatch.
  */
 public final class TopsMessageRouter {

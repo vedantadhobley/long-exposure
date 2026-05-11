@@ -1,4 +1,4 @@
-package com.longexposure.deepplus;
+package com.longexposure.dpls;
 
 import com.longexposure.wire.Bytes;
 
@@ -30,7 +30,7 @@ public record OrderModify(
         String symbol,
         long orderId,
         int size,
-        long priceRaw) implements DeepPlusMessage {
+        long priceRaw) implements DplsMessage {
 
     public static final byte MESSAGE_TYPE = (byte) 0x4D;
     public static final int BYTE_LENGTH = 38;

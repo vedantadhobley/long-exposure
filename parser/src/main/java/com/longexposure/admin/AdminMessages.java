@@ -2,7 +2,7 @@ package com.longexposure.admin;
 
 /**
  * Dispatcher for the 7 byte-identical IEX admin messages. Per-feed routers
- * (TopsMessageRouter, DeepPlusMessageRouter, ...) call into this before
+ * (TopsMessageRouter, DplsMessageRouter, ...) call into this before
  * trying their feed-specific trading-message decoders.
  *
  * <pre>{@code

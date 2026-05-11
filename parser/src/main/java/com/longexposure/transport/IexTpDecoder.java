@@ -13,7 +13,7 @@ import java.nio.ByteOrder;
  *  ------  ----  --------------------------------
  *      0     1   Version
  *      1     1   Reserved
- *      2     2   Message Protocol ID  (TOPS=0x8003, DEEP=0x8004, DEEP+=0x8005)
+ *      2     2   Message Protocol ID  (TOPS=0x8003, DEEP=0x8004, DPLS=0x8005)
  *      4     4   Channel ID
  *      8     4   Session ID
  *     12     2   Payload Length
@@ -86,7 +86,7 @@ public final class IexTpDecoder {
             return switch (protocolId) {
                 case PROTOCOL_TOPS  -> "TOPS";
                 case PROTOCOL_DEEP  -> "DEEP";
-                case PROTOCOL_DEEPP -> "DEEP+";
+                case PROTOCOL_DEEPP -> "DPLS";
                 default -> String.format("UNKNOWN(0x%04x)", protocolId);
             };
         }

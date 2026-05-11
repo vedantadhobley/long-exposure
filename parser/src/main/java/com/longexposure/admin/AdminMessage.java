@@ -4,12 +4,12 @@ import com.longexposure.wire.IexMessage;
 
 /**
  * Marker interface for the seven IEX administrative messages that are
- * byte-identical across TOPS, DEEP, and DEEP+ feeds. Decoders for these
+ * byte-identical across TOPS, DEEP, and DPLS feeds. Decoders for these
  * messages live in this package and are reused unchanged when the project
- * extends from TOPS (v1) to DEEP+ (phase 2).
+ * extends from TOPS (v1) to DPLS (phase 2).
  *
  * <p>The "Security Event" message ({@code E}, 0x45) is carried by DEEP and
- * DEEP+ but not TOPS — however the wire format is identical when present,
+ * DPLS but not TOPS — however the wire format is identical when present,
  * so the record lives in this same package.
  *
  * <p>Sealed so consumers can switch exhaustively without a default branch.

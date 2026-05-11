@@ -2,7 +2,7 @@ package com.longexposure.wire;
 
 /**
  * Common marker for any decoded IEX message — admin or feed-specific
- * (TOPS today, DEEP+ in phase 2). Lets per-feed routers return a single
+ * (TOPS today, DPLS in phase 2). Lets per-feed routers return a single
  * type that covers both shared admin messages and feed-specific bodies.
  *
  * <p>Intentionally not sealed: the set of feed-specific subhierarchies

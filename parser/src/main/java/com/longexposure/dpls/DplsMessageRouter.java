@@ -1,22 +1,22 @@
-package com.longexposure.deepplus;
+package com.longexposure.dpls;
 
 import com.longexposure.admin.AdminMessage;
 import com.longexposure.admin.AdminMessages;
 import com.longexposure.wire.IexMessage;
 
 /**
- * Decode a DEEP+ message (admin or trading) by its 1-byte type identifier.
+ * Decode a DPLS message (admin or trading) by its 1-byte type identifier.
  *
  * <p>Admin types are tried first via {@link AdminMessages#decode}; if the
- * type byte isn't an admin message, the DEEP+-specific decoders are tried.
+ * type byte isn't an admin message, the DPLS-specific decoders are tried.
  * Unknown types throw.
  *
  * <p>Mirrors the shape of {@code TopsMessageRouter} exactly — admin dispatch
  * is shared identical infrastructure across feeds.
  */
-public final class DeepPlusMessageRouter {
+public final class DplsMessageRouter {
 
-    private DeepPlusMessageRouter() {}
+    private DplsMessageRouter() {}
 
     /**
      * Decode the message at {@code offset} in {@code buf} given its
@@ -39,12 +39,12 @@ public final class DeepPlusMessageRouter {
             case TradeBreak.MESSAGE_TYPE    -> TradeBreak.decode(buf, offset);
             case ClearBook.MESSAGE_TYPE     -> ClearBook.decode(buf, offset);
             default -> throw new IllegalArgumentException(
-                    String.format("Unknown DEEP+ message type: 0x%02x", messageType & 0xff));
+                    String.format("Unknown DPLS message type: 0x%02x", messageType & 0xff));
         };
     }
 
-    /** True if {@code messageType} is one of the 7 DEEP+-specific trading types. */
-    public static boolean isDeepPlusTradingType(final byte messageType) {
+    /** True if {@code messageType} is one of the 7 DPLS-specific trading types. */
+    public static boolean isDplsTradingType(final byte messageType) {
         return switch (messageType) {
             case AddOrder.MESSAGE_TYPE,
                  OrderModify.MESSAGE_TYPE,

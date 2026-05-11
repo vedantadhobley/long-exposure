@@ -1,4 +1,4 @@
-package com.longexposure.deepplus;
+package com.longexposure.dpls;
 
 import com.longexposure.wire.IexMessage;
 
@@ -8,9 +8,9 @@ import java.util.Map;
 
 /**
  * Owns one {@link OrderBook} per symbol seen so far. Applies incoming
- * DEEP+ messages to the appropriate book based on the message's symbol.
+ * DPLS messages to the appropriate book based on the message's symbol.
  *
- * <p>Per the DEEP+ spec, only these message types affect the displayed
+ * <p>Per the DPLS spec, only these message types affect the displayed
  * order book:
  * <ul>
  *   <li>{@link AddOrder} — insert new order
@@ -35,7 +35,7 @@ public final class OrderBookManager {
     private final Map<String, OrderBook> booksBySymbol = new HashMap<>();
 
     /**
-     * Route a decoded DEEP+ message to the right book. Messages that don't
+     * Route a decoded DPLS message to the right book. Messages that don't
      * affect book state are silently ignored.
      */
     public void apply(final IexMessage m) {

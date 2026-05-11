@@ -1,4 +1,4 @@
-package com.longexposure.deepplus;
+package com.longexposure.dpls;
 
 import com.longexposure.admin.SystemEvent;
 import com.longexposure.admin.TradingStatus;
@@ -12,23 +12,23 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Byte-level decoder tests for the 7 DEEP+ trading messages plus the
- * DeepPlusMessageRouter. Worked example bytes are transcribed from the
- * DEEP+ 1.02 spec PDF (pages 16-22 for individual messages; appendix B
+ * Byte-level decoder tests for the 7 DPLS trading messages plus the
+ * DplsMessageRouter. Worked example bytes are transcribed from the
+ * DPLS 1.02 spec PDF (pages 16-22 for individual messages; appendix B
  * bitwise representations on pages 32-38 confirm the offsets).
  *
- * <p>Note on timestamp annotations: DEEP+ spec examples reuse the same
+ * <p>Note on timestamp annotations: DPLS spec examples reuse the same
  * "2016-08-23 15:32:04.912754610" timestamp byte sequence that the TOPS
  * spec uses. We verified earlier (see TopsMessagesTest + protocol-notes
  * gotcha) that this annotation is in Eastern Time despite the spec text
  * saying timestamps are UTC. Bytes decode to 19:32:04 UTC.
  */
-class DeepPlusMessagesTest {
+class DplsMessagesTest {
 
     private static final byte[] ZIEXT =
             { 0x5a, 0x49, 0x45, 0x58, 0x54, 0x20, 0x20, 0x20 };
 
-    // Shared timestamp bytes used in DEEP+ spec examples.
+    // Shared timestamp bytes used in DPLS spec examples.
     // Decodes to 2016-08-23 19:32:04.912754610 UTC (spec annotation is 15:32:04 ET).
     private static final byte[] TS_BYTES =
             { (byte) 0xb2, (byte) 0x8f, (byte) 0xa5, (byte) 0xa0,
@@ -226,61 +226,61 @@ class DeepPlusMessagesTest {
     void routerDispatchesAdminTypeToAdminDecoder() {
         // 'S' SystemEvent — admin, byte-identical across all feeds
         byte[] buf = bytes(0x53, 0x45, 0x00, 0xa0, 0x99, 0x97, 0xe9, 0x3d, 0xb6, 0x14);
-        IexMessage m = DeepPlusMessageRouter.decode((byte) 0x53, buf, 0);
+        IexMessage m = DplsMessageRouter.decode((byte) 0x53, buf, 0);
         assertInstanceOf(SystemEvent.class, m);
     }
 
     @Test
-    void routerDispatchesEachDeepPlusTradingType() {
+    void routerDispatchesEachDplsTradingType() {
         // a — Add Order
         byte[] a = concat(bytes(0x61, 0x38), TS_BYTES, ZIEXT, ORDER_ID_429974, SIZE_100, PRICE_99_05);
-        assertInstanceOf(AddOrder.class, DeepPlusMessageRouter.decode((byte) 0x61, a, 0));
+        assertInstanceOf(AddOrder.class, DplsMessageRouter.decode((byte) 0x61, a, 0));
 
         // M — Order Modify
         byte[] mod = concat(bytes(0x4D, 0x00), TS_BYTES, ZIEXT, ORDER_ID_429974, SIZE_100, PRICE_99_05);
-        assertInstanceOf(OrderModify.class, DeepPlusMessageRouter.decode((byte) 0x4D, mod, 0));
+        assertInstanceOf(OrderModify.class, DplsMessageRouter.decode((byte) 0x4D, mod, 0));
 
         // R — Order Delete
         byte[] del = concat(bytes(0x52, 0x00), TS_BYTES, ZIEXT, ORDER_ID_429974);
-        assertInstanceOf(OrderDelete.class, DeepPlusMessageRouter.decode((byte) 0x52, del, 0));
+        assertInstanceOf(OrderDelete.class, DplsMessageRouter.decode((byte) 0x52, del, 0));
 
         // L — Order Executed
         byte[] ex = concat(bytes(0x4C, 0x00), TS_BYTES, ZIEXT, ORDER_ID_429974, SIZE_100, PRICE_99_05, TRADE_ID_167830);
-        assertInstanceOf(OrderExecuted.class, DeepPlusMessageRouter.decode((byte) 0x4C, ex, 0));
+        assertInstanceOf(OrderExecuted.class, DplsMessageRouter.decode((byte) 0x4C, ex, 0));
 
         // T — Trade
         byte[] t = concat(bytes(0x54, 0x00), TS_BYTES, ZIEXT, SIZE_100, PRICE_99_05, TRADE_ID_167830);
-        assertInstanceOf(Trade.class, DeepPlusMessageRouter.decode((byte) 0x54, t, 0));
+        assertInstanceOf(Trade.class, DplsMessageRouter.decode((byte) 0x54, t, 0));
 
         // B — Trade Break
         byte[] tb = concat(bytes(0x42, 0x00), TS_BYTES, ZIEXT, SIZE_100, PRICE_99_05, ORDER_ID_429974);
-        assertInstanceOf(TradeBreak.class, DeepPlusMessageRouter.decode((byte) 0x42, tb, 0));
+        assertInstanceOf(TradeBreak.class, DplsMessageRouter.decode((byte) 0x42, tb, 0));
 
         // C — Clear Book
         byte[] cb = concat(bytes(0x43, 0x00), TS_BYTES, ZIEXT);
-        assertInstanceOf(ClearBook.class, DeepPlusMessageRouter.decode((byte) 0x43, cb, 0));
+        assertInstanceOf(ClearBook.class, DplsMessageRouter.decode((byte) 0x43, cb, 0));
     }
 
     @Test
-    void routerHandlesAllSevenDeepPlusTradingTypes() {
-        assertTrue(DeepPlusMessageRouter.isDeepPlusTradingType(AddOrder.MESSAGE_TYPE));
-        assertTrue(DeepPlusMessageRouter.isDeepPlusTradingType(OrderModify.MESSAGE_TYPE));
-        assertTrue(DeepPlusMessageRouter.isDeepPlusTradingType(OrderDelete.MESSAGE_TYPE));
-        assertTrue(DeepPlusMessageRouter.isDeepPlusTradingType(OrderExecuted.MESSAGE_TYPE));
-        assertTrue(DeepPlusMessageRouter.isDeepPlusTradingType(Trade.MESSAGE_TYPE));
-        assertTrue(DeepPlusMessageRouter.isDeepPlusTradingType(TradeBreak.MESSAGE_TYPE));
-        assertTrue(DeepPlusMessageRouter.isDeepPlusTradingType(ClearBook.MESSAGE_TYPE));
-        assertFalse(DeepPlusMessageRouter.isDeepPlusTradingType(SystemEvent.MESSAGE_TYPE));
-        assertFalse(DeepPlusMessageRouter.isDeepPlusTradingType(TradingStatus.MESSAGE_TYPE));
-        // 0x51 = TOPS Quote Update — not a DEEP+ trading type
-        assertFalse(DeepPlusMessageRouter.isDeepPlusTradingType((byte) 0x51));
+    void routerHandlesAllSevenDplsTradingTypes() {
+        assertTrue(DplsMessageRouter.isDplsTradingType(AddOrder.MESSAGE_TYPE));
+        assertTrue(DplsMessageRouter.isDplsTradingType(OrderModify.MESSAGE_TYPE));
+        assertTrue(DplsMessageRouter.isDplsTradingType(OrderDelete.MESSAGE_TYPE));
+        assertTrue(DplsMessageRouter.isDplsTradingType(OrderExecuted.MESSAGE_TYPE));
+        assertTrue(DplsMessageRouter.isDplsTradingType(Trade.MESSAGE_TYPE));
+        assertTrue(DplsMessageRouter.isDplsTradingType(TradeBreak.MESSAGE_TYPE));
+        assertTrue(DplsMessageRouter.isDplsTradingType(ClearBook.MESSAGE_TYPE));
+        assertFalse(DplsMessageRouter.isDplsTradingType(SystemEvent.MESSAGE_TYPE));
+        assertFalse(DplsMessageRouter.isDplsTradingType(TradingStatus.MESSAGE_TYPE));
+        // 0x51 = TOPS Quote Update — not a DPLS trading type
+        assertFalse(DplsMessageRouter.isDplsTradingType((byte) 0x51));
     }
 
     @Test
     void routerThrowsOnUnknownType() {
-        // 0x51 = TOPS Quote Update — would never appear in a DEEP+ stream
+        // 0x51 = TOPS Quote Update — would never appear in a DPLS stream
         assertThrows(IllegalArgumentException.class,
-                () -> DeepPlusMessageRouter.decode((byte) 0x51, new byte[100], 0));
+                () -> DplsMessageRouter.decode((byte) 0x51, new byte[100], 0));
     }
 
     @Test

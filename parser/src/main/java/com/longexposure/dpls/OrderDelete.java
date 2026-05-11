@@ -1,4 +1,4 @@
-package com.longexposure.deepplus;
+package com.longexposure.dpls;
 
 import com.longexposure.wire.Bytes;
 
@@ -21,7 +21,7 @@ import com.longexposure.wire.Bytes;
 public record OrderDelete(
         long timestampNanos,
         String symbol,
-        long orderId) implements DeepPlusMessage {
+        long orderId) implements DplsMessage {
 
     public static final byte MESSAGE_TYPE = (byte) 0x52;
     public static final int BYTE_LENGTH = 26;

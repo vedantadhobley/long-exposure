@@ -1,4 +1,4 @@
-package com.longexposure.deepplus;
+package com.longexposure.dpls;
 
 import com.longexposure.wire.Bytes;
 import com.longexposure.wire.SaleConditionFlags;
@@ -35,7 +35,7 @@ public record OrderExecuted(
         long orderId,
         int size,
         long priceRaw,
-        long tradeId) implements DeepPlusMessage {
+        long tradeId) implements DplsMessage {
 
     public static final byte MESSAGE_TYPE = (byte) 0x4C;
     public static final int BYTE_LENGTH = 46;

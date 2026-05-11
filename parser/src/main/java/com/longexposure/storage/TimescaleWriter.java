@@ -39,7 +39,7 @@ import java.util.Map;
  * COPY pipelines the writes server-side and runs at ~50–200K rows/sec.
  *
  * <p>One {@code feed_source} value per writer instance — pass {@code "TOPS"}
- * for v1, {@code "DEEP+"} when phase 2 lands.
+ * for v1, {@code "DPLS"} when phase 2 lands.
  *
  * <p>Not thread-safe. Use one writer per parser thread (parser is currently
  * single-threaded; we'll partition by symbol-hash for parallelism later if

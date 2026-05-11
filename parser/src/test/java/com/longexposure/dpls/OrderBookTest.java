@@ -1,4 +1,4 @@
-package com.longexposure.deepplus;
+package com.longexposure.dpls;
 
 import org.junit.jupiter.api.Test;
 
@@ -279,6 +279,93 @@ class OrderBookTest {
         b.apply(new OrderDelete(T0 + 5, SYM, 3L));
         assertEquals(140L, b.totalBidSize());                     // 40 + 100
         assertEquals(1, b.bidLevelCount());                       // only $99.05 left
+    }
+
+    // ─── round-lot-protected BBO ─────────────────────────────────────────────
+    //
+    // Mirrors TOPS QuoteUpdate semantics: a price level only qualifies as
+    // the best when its aggregate displayed size meets the round-lot
+    // threshold (100 shares for most NMS equities). Without this rule, an
+    // odd-lot order resting above the round-lot top produces a derived BBO
+    // that disagrees with TOPS — see the 2026-05-11 BBO-cross-validation
+    // investigation that surfaced the spec gap.
+
+    @Test
+    void roundLotSkipsOddLotOnlyLevel() {
+        OrderBook b = new OrderBook(SYM);
+        b.apply(buy(1, 1,   729000L, T0));       // odd lot at $72.90
+        b.apply(buy(2, 500, 728800L, T0 + 1));   // round lot at $72.88
+
+        // Unprotected: odd lot wins
+        assertEquals(OptionalLong.of(729000L), b.bestBidPriceRaw());
+        assertEquals(1L, b.sizeAtBestBid());
+
+        // Round-lot-protected: skip the 1-share level, $72.88 qualifies
+        assertEquals(OptionalLong.of(728800L), b.bestBidPriceRaw(100L));
+        assertEquals(500L, b.sizeAtBestBid(100L));
+    }
+
+    @Test
+    void roundLotAggregatesOddLotAtQualifyingPrice() {
+        OrderBook b = new OrderBook(SYM);
+        b.apply(buy(1, 1,   729000L, T0));       // odd lot at $72.90
+        b.apply(buy(2, 500, 729000L, T0 + 1));   // round lot at same price → aggregate = 501
+
+        // 501 ≥ 100 so $72.90 qualifies; full aggregate reported (matches TOPS)
+        assertEquals(OptionalLong.of(729000L), b.bestBidPriceRaw(100L));
+        assertEquals(501L, b.sizeAtBestBid(100L));
+    }
+
+    @Test
+    void roundLotReturnsEmptyWhenNoLevelQualifies() {
+        OrderBook b = new OrderBook(SYM);
+        b.apply(buy(1, 1,  729000L, T0));        // odd lot
+        b.apply(buy(2, 50, 728900L, T0 + 1));    // odd lot
+        b.apply(buy(3, 75, 728800L, T0 + 2));    // odd lot — none reach 100
+
+        assertEquals(OptionalLong.empty(), b.bestBidPriceRaw(100L));
+        assertEquals(0L, b.sizeAtBestBid(100L));
+
+        // And the ask side, symmetrically
+        b.apply(sell(4, 40, 422400L, T0 + 3));
+        assertEquals(OptionalLong.empty(), b.bestAskPriceRaw(100L));
+        assertEquals(0L, b.sizeAtBestAsk(100L));
+    }
+
+    @Test
+    void roundLotSkipsMultipleOddLotLevelsToFindQualifying() {
+        // Mirrors the GME-style mismatch: a "stub quote" deep below where
+        // multiple odd-lot levels sit above the next round-lot-qualifying
+        // price.
+        OrderBook b = new OrderBook(SYM);
+        b.apply(sell(1, 40,  4_224_000L, T0));        // 40 @ $422.40
+        b.apply(sell(2, 25,  5_000_000L, T0 + 1));    // 25 @ $500.00
+        b.apply(sell(3, 125, 70_250_600L, T0 + 2));   // 125 @ $7025.06 (qualifies)
+
+        // Unprotected sees $422.40 (40 shares)
+        assertEquals(OptionalLong.of(4_224_000L), b.bestAskPriceRaw());
+
+        // Round-lot-protected jumps to $7025.06 (the GME pattern)
+        assertEquals(OptionalLong.of(70_250_600L), b.bestAskPriceRaw(100L));
+        assertEquals(125L, b.sizeAtBestAsk(100L));
+    }
+
+    @Test
+    void roundLotEqualToThresholdQualifies() {
+        // Boundary: exactly 100 shares should qualify.
+        OrderBook b = new OrderBook(SYM);
+        b.apply(buy(1, 100, 729000L, T0));
+        assertEquals(OptionalLong.of(729000L), b.bestBidPriceRaw(100L));
+        assertEquals(100L, b.sizeAtBestBid(100L));
+    }
+
+    @Test
+    void roundLotWithMinSizeOneEqualsUnprotected() {
+        // Defensive: a minSize of 1 should reproduce the original behavior.
+        OrderBook b = new OrderBook(SYM);
+        b.apply(buy(1, 1, 729000L, T0));
+        assertEquals(b.bestBidPriceRaw(), b.bestBidPriceRaw(1L));
+        assertEquals(b.sizeAtBestBid(), b.sizeAtBestBid(1L));
     }
 
     // ─── helpers ─────────────────────────────────────────────────────────────

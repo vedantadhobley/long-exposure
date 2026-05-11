@@ -14,7 +14,7 @@ class IexTpDecoderTest {
      * Hand-built TOPS IEX-TP header — version 1, TOPS protocol, channel 1,
      * session 0x4b1881f0, payload of 35 bytes / 1 message, stream offset 937732,
      * first seq 44130, send time = 2022-08-17 07:28:10.893922241 UTC.
-     * (Field values taken from the worked example on page 9 of the DEEP+ SNAP
+     * (Field values taken from the worked example on page 9 of the DPLS SNAP
      * spec, which embeds a complete IEX-TP header — the same wire format used
      * for TOPS and DEEP.)
      */
@@ -23,7 +23,7 @@ class IexTpDecoderTest {
         ByteBuffer b = ByteBuffer.allocate(40).order(ByteOrder.LITTLE_ENDIAN);
         b.put((byte) 0x01);                        // Version
         b.put((byte) 0x00);                        // Reserved
-        b.putShort((short) 0x8005);                // Protocol ID (DEEP+)
+        b.putShort((short) 0x8005);                // Protocol ID (DPLS)
         b.putInt(1);                               // Channel ID
         b.putInt(0x4b1881f0);                      // Session ID
         b.putShort((short) 35);                    // Payload length
@@ -37,7 +37,7 @@ class IexTpDecoderTest {
         assertEquals((byte) 1, h.version());
         assertEquals((byte) 0, h.reserved());
         assertEquals(0x8005, h.protocolId());
-        assertEquals("DEEP+", h.protocolName());
+        assertEquals("DPLS", h.protocolName());
         assertEquals(1, h.channelId());
         assertEquals(0x4b1881f0, h.sessionId());
         assertEquals(35, h.payloadLength());
@@ -51,7 +51,7 @@ class IexTpDecoderTest {
     void recognizesProtocolIdsForAllFeeds() {
         assertEquals("TOPS",  buildHeaderWithProtocol(0x8003).protocolName());
         assertEquals("DEEP",  buildHeaderWithProtocol(0x8004).protocolName());
-        assertEquals("DEEP+", buildHeaderWithProtocol(0x8005).protocolName());
+        assertEquals("DPLS", buildHeaderWithProtocol(0x8005).protocolName());
     }
 
     @Test

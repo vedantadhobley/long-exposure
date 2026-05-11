@@ -1,4 +1,6 @@
-package com.longexposure.deepplus;
+package com.longexposure.dpls;
+
+import com.longexposure.wire.ProtectedBbo;
 
 import java.util.Collections;
 import java.util.HashMap;
@@ -8,7 +10,7 @@ import java.util.OptionalLong;
 import java.util.TreeMap;
 
 /**
- * Per-symbol order book reconstructed from a DEEP+ event stream.
+ * Per-symbol order book reconstructed from a DPLS event stream.
  *
  * <p>Maintains two views simultaneously:
  * <ul>
@@ -32,7 +34,7 @@ import java.util.TreeMap;
  * <p>Not thread-safe. One book per symbol; multiple symbols are managed by
  * {@link OrderBookManager}.
  *
- * <p>Per the DEEP+ spec, Trade ({@code T}) and Trade Break ({@code B})
+ * <p>Per the DPLS spec, Trade ({@code T}) and Trade Break ({@code B})
  * messages do not modify the displayed book — they pertain to
  * non-displayed-vs-non-displayed executions and to broken-trade
  * notifications respectively. {@link OrderBookManager} handles those at a
@@ -182,6 +184,62 @@ public final class OrderBook {
         return sizeAtAskPrice.isEmpty() ? 0L : sizeAtAskPrice.firstEntry().getValue();
     }
 
+    /**
+     * Round-lot-protected best bid using TOPS BBO semantics — Reg NMS
+     * tiered round lot plus odd-lot-above aggregation. The returned
+     * record's {@code priceRaw} is the highest qualifying bid level,
+     * {@code size} is the sum at that price plus all shares at any
+     * better odd-lot-only level above. See {@link ProtectedBbo} for the
+     * full definition and the empirical fit against 2026-05-08 HIST.
+     *
+     * <p>Use this in any comparison against a TOPS {@code QuoteUpdate}.
+     * Use {@link #bestBidPriceRaw()} / {@link #sizeAtBestBid()} for the
+     * raw unprotected best (e.g. for internal analysis).
+     */
+    public ProtectedBbo bestBidProtected() {
+        return ProtectedBbo.from(sizeAtBidPrice.descendingMap());
+    }
+
+    /** TOPS-semantics best ask. See {@link #bestBidProtected()}. */
+    public ProtectedBbo bestAskProtected() {
+        return ProtectedBbo.from(sizeAtAskPrice);
+    }
+
+    /**
+     * Fixed-threshold round-lot best bid: highest bid price whose own
+     * aggregate is at least {@code minSize}. Simpler than
+     * {@link #bestBidProtected()} (no aggregation, no tier table) —
+     * kept for tests and ad-hoc analysis where a single threshold is
+     * the right knob. Returned size is the level's own aggregate only.
+     */
+    public OptionalLong bestBidPriceRaw(final long minSize) {
+        for (Map.Entry<Long, Long> e : sizeAtBidPrice.descendingMap().entrySet()) {
+            if (e.getValue() >= minSize) return OptionalLong.of(e.getKey());
+        }
+        return OptionalLong.empty();
+    }
+
+    public OptionalLong bestAskPriceRaw(final long minSize) {
+        for (Map.Entry<Long, Long> e : sizeAtAskPrice.entrySet()) {
+            if (e.getValue() >= minSize) return OptionalLong.of(e.getKey());
+        }
+        return OptionalLong.empty();
+    }
+
+    public long sizeAtBestBid(final long minSize) {
+        for (Map.Entry<Long, Long> e : sizeAtBidPrice.descendingMap().entrySet()) {
+            if (e.getValue() >= minSize) return e.getValue();
+        }
+        return 0L;
+    }
+
+    public long sizeAtBestAsk(final long minSize) {
+        for (Map.Entry<Long, Long> e : sizeAtAskPrice.entrySet()) {
+            if (e.getValue() >= minSize) return e.getValue();
+        }
+        return 0L;
+    }
+
     public long totalBidSize() {
         long sum = 0L;
         for (long s : sizeAtBidPrice.values()) sum += s;
@@ -210,6 +268,17 @@ public final class OrderBook {
 
     public int askLevelCount() {
         return sizeAtAskPrice.size();
+    }
+
+    /**
+     * Aggregate displayed size at one specific (side, price) — what DEEP's
+     * {@link com.longexposure.deep.PriceLevelUpdate} reports for the same
+     * level. Used by the DEEP-vs-DPLS price-level cross-validator. Returns
+     * 0 if no order rests at that exact price on that side.
+     */
+    public long aggregateAt(final AddOrder.Side side, final long priceRaw) {
+        Long v = levelMap(side).get(priceRaw);
+        return v == null ? 0L : v;
     }
 
     /**

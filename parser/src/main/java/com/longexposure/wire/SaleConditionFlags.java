@@ -2,8 +2,8 @@ package com.longexposure.wire;
 
 /**
  * Sale Condition Flags bitfield — shared across TOPS Trade Report,
- * TOPS Trade Break, DEEP+ Order Executed, DEEP+ Trade, DEEP+ Trade Break.
- * TOPS 1.66 Appendix A and DEEP+ 1.02 Appendix A define the same layout.
+ * TOPS Trade Break, DPLS Order Executed, DPLS Trade, DPLS Trade Break.
+ * TOPS 1.66 Appendix A and DPLS 1.02 Appendix A define the same layout.
  *
  * <pre>
  *  Bit  Mask  Name                            Set means...

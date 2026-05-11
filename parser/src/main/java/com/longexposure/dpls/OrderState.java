@@ -1,4 +1,4 @@
-package com.longexposure.deepplus;
+package com.longexposure.dpls;
 
 /**
  * Per-order state tracked by an {@link OrderBook}. Constructed when an
@@ -19,7 +19,7 @@ package com.longexposure.deepplus;
  * </ul>
  *
  * <p>Scorers that look at queue-position behavior or time-at-current-state
- * (a key DEEP+ narrative input) read {@code priorityNanos}, not
+ * (a key DPLS narrative input) read {@code priorityNanos}, not
  * {@code addedNanos}.
  *
  * <p>Package-private — order state is an internal implementation detail of

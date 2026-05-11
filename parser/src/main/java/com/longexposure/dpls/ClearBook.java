@@ -1,4 +1,4 @@
-package com.longexposure.deepplus;
+package com.longexposure.dpls;
 
 import com.longexposure.wire.Bytes;
 
@@ -19,7 +19,7 @@ import com.longexposure.wire.Bytes;
  */
 public record ClearBook(
         long timestampNanos,
-        String symbol) implements DeepPlusMessage {
+        String symbol) implements DplsMessage {
 
     public static final byte MESSAGE_TYPE = (byte) 0x43;
     public static final int BYTE_LENGTH = 18;

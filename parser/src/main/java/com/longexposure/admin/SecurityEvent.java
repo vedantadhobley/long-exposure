@@ -6,7 +6,7 @@ import com.longexposure.wire.Bytes;
  * Security Event Message — {@code E} (0x45), 18 bytes.
  *
  * <p>Per-symbol Opening/Closing Process Complete marker. Carried by DEEP
- * and DEEP+; not present in TOPS, but byte-identical when it appears.
+ * and DPLS; not present in TOPS, but byte-identical when it appears.
  *
  * <pre>
  * Offset  Size  Field

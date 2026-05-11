@@ -1,4 +1,4 @@
-package com.longexposure.deepplus;
+package com.longexposure.dpls;
 
 import com.longexposure.admin.SystemEvent;
 import org.junit.jupiter.api.Test;

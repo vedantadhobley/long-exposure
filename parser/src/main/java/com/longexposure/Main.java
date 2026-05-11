@@ -7,12 +7,13 @@ import com.longexposure.admin.SecurityEvent;
 import com.longexposure.admin.ShortSalePriceTestStatus;
 import com.longexposure.admin.SystemEvent;
 import com.longexposure.admin.TradingStatus;
-import com.longexposure.deepplus.AddOrder;
-import com.longexposure.deepplus.ClearBook;
-import com.longexposure.deepplus.DeepPlusMessageRouter;
-import com.longexposure.deepplus.OrderDelete;
-import com.longexposure.deepplus.OrderExecuted;
-import com.longexposure.deepplus.OrderModify;
+import com.longexposure.deep.DeepMessageRouter;
+import com.longexposure.dpls.AddOrder;
+import com.longexposure.dpls.ClearBook;
+import com.longexposure.dpls.DplsMessageRouter;
+import com.longexposure.dpls.OrderDelete;
+import com.longexposure.dpls.OrderExecuted;
+import com.longexposure.dpls.OrderModify;
 import com.longexposure.pcap.PcapReader;
 import com.longexposure.storage.SchemaManager;
 import com.longexposure.storage.TimescaleWriter;
@@ -22,10 +23,15 @@ import com.longexposure.tops.QuoteUpdate;
 import com.longexposure.tops.TopsMessageRouter;
 import com.longexposure.tops.TradeReport;
 import com.longexposure.transport.IexTpDecoder;
-import com.longexposure.validation.BboCrossValidator;
+import com.longexposure.validation.BboValidationResult;
+import com.longexposure.validation.DeepBboCrossValidator;
+import com.longexposure.validation.DplsBboCrossValidator;
+import com.longexposure.validation.DeepVsDplsValidator;
+import com.longexposure.validation.EventTracer;
 import com.longexposure.wire.Bytes;
 import com.longexposure.wire.IexMessage;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -41,7 +47,7 @@ import java.util.TreeMap;
 /**
  * Entry point for the parser/worker process.
  *
- * <p>Smoke test: read a real HIST {@code .pcap.gz} (TOPS or DEEP+ — feed is
+ * <p>Smoke test: read a real HIST {@code .pcap.gz} (TOPS or DPLS — feed is
  * auto-detected from the IEX-TP Protocol ID of the first non-heartbeat
  * packet), walk message blocks past heartbeats, decode every message via
  * the feed-appropriate router.
@@ -51,8 +57,8 @@ import java.util.TreeMap;
  *   <li>Per-message-type histogram (sanity-check that distribution matches
  *       what we expect for that feed)
  *   <li>Per-symbol trade-volume aggregate. For TOPS that's
- *       {@code SUM(TradeReport.size)}; for DEEP+ it's
- *       {@code SUM(OrderExecuted.size + Trade.size)}. When running DEEP+
+ *       {@code SUM(TradeReport.size)}; for DPLS it's
+ *       {@code SUM(OrderExecuted.size + Trade.size)}. When running DPLS
  *       and a TOPS dataset for the same day is already loaded in Postgres,
  *       we diff the two aggregates per-symbol — same matching engine,
  *       totals must match.
@@ -68,7 +74,7 @@ public final class Main {
             DateTimeFormatter.ofPattern("HH:mm:ss.SSSSSSSSS").withZone(ZoneOffset.UTC);
 
     private enum Feed {
-        TOPS("TOPS"), DEEPPLUS("DEEP+");
+        TOPS("TOPS"), DEEP("DEEP"), DPLS("DPLS");
         final String label;
         Feed(final String label) { this.label = label; }
     }
@@ -97,7 +103,15 @@ public final class Main {
 
         String bboAgainst = System.getenv("IEX_BBO_VALIDATE_AGAINST");
         if (bboAgainst != null && !bboAgainst.isBlank()) {
-            bboCrossValidate(Path.of(filePath), Path.of(bboAgainst));
+            String traceSymbol = System.getenv("IEX_TRACE_SYMBOL");
+            if (traceSymbol != null && !traceSymbol.isBlank()) {
+                long targetTs = parseLongOrDefault(System.getenv("IEX_TRACE_TS_NANOS"), 0L);
+                long windowMs = parseLongOrDefault(System.getenv("IEX_TRACE_WINDOW_MS"), 2L);
+                new EventTracer(traceSymbol, targetTs, windowMs, System.out)
+                        .run(Path.of(filePath), Path.of(bboAgainst));
+                return;
+            }
+            crossValidate(Path.of(filePath), Path.of(bboAgainst));
             return;
         }
 
@@ -105,28 +119,59 @@ public final class Main {
     }
 
     /**
-     * Stream a DEEP+ pcap and a TOPS pcap from the same day, merge by timestamp,
-     * reconstruct the order book from DEEP+, compare derived BBO to every
-     * TOPS QuoteUpdate. Reports overall match rate + worst symbols + a sample
-     * of mismatched cases.
+     * Cross-validation dispatcher. Auto-detects feeds via {@link #sniffFeed}
+     * and routes to the appropriate validator:
+     *
+     * <ul>
+     *   <li>depth=DPLS, ref=TOPS → {@link DplsBboCrossValidator}
+     *   <li>depth=DEEP,  ref=TOPS → {@link DeepBboCrossValidator}
+     *   <li>depth=DPLS, ref=DEEP → {@link DeepVsDplsValidator} (third
+     *       triangle leg; independent of TOPS)
+     * </ul>
      */
-    private static void bboCrossValidate(final Path deepPlusFile, final Path topsFile) throws Exception {
-        System.out.println("== DEEP+ → TOPS BBO cross-validation ==");
-        System.out.println("deep+ file:  " + deepPlusFile);
+    private static void crossValidate(final Path sourceFile, final Path refFile) throws Exception {
+        Feed sourceFeed = sniffFeed(sourceFile);
+        Feed refFeed = sniffFeed(refFile);
+
+        if (sourceFeed == Feed.DPLS && refFeed == Feed.DEEP) {
+            deepVsDplsValidate(sourceFile, refFile);
+            return;
+        }
+        if (refFeed != Feed.TOPS) {
+            throw new IllegalArgumentException(
+                    "Unsupported feed pair: source=" + sourceFeed.label
+                    + ", ref=" + refFeed.label + ". Supported: DPLS→TOPS, DEEP→TOPS, DPLS→DEEP.");
+        }
+        if (sourceFeed != Feed.DEEP && sourceFeed != Feed.DPLS) {
+            throw new IllegalArgumentException("BBO cross-validation requires a DEEP or DPLS "
+                    + "depth file as IEX_PCAP_FILE; got " + sourceFeed.label);
+        }
+        bboCrossValidate(sourceFile, sourceFeed, refFile);
+    }
+
+    /**
+     * Depth → TOPS BBO validation. The depth feed (DEEP or DPLS)
+     * supplies the book; every TOPS QuoteUpdate is compared against the
+     * derived round-lot-protected BBO.
+     */
+    private static void bboCrossValidate(final Path depthFile, final Feed depthFeed, final Path topsFile) throws Exception {
+        System.out.println("== " + depthFeed.label + " → TOPS BBO cross-validation ==");
+        System.out.println(depthFeed.label + " file:  " + depthFile);
         System.out.println("tops  file:  " + topsFile);
         System.out.println();
 
-        BboCrossValidator validator = new BboCrossValidator();
-        BboCrossValidator.Result r = validator.run(deepPlusFile, topsFile);
+        BboValidationResult r = (depthFeed == Feed.DPLS)
+                ? new DplsBboCrossValidator().run(depthFile, topsFile)
+                : new DeepBboCrossValidator().run(depthFile, topsFile);
 
         System.out.println();
         System.out.println("== summary ==");
         System.out.printf("elapsed:               %s%n", r.elapsed());
-        System.out.printf("DEEP+ events applied:  %,d%n", r.deepEventsApplied());
+        System.out.printf("%-22s %,d%n", depthFeed.label + " events applied:", r.depthEventsApplied());
         System.out.printf("TOPS non-quote msgs:   %,d (skipped)%n", r.topsNonQuoteEventsSkipped());
         System.out.printf("heartbeats skipped:    %,d%n", r.heartbeatsSkipped());
         System.out.printf("decode failures:       %,d%n", r.decodeFailures());
-        System.out.printf("symbols tracked:       %,d (DEEP+ side)%n", r.symbolsTracked());
+        System.out.printf("symbols tracked:       %,d (%s side)%n", r.symbolsTracked(), depthFeed.label);
         System.out.println();
         System.out.printf("QuoteUpdates compared: %,d%n", r.totalQuotesCompared());
         System.out.printf("  matched:             %,d (%.4f%%)%n", r.matched(), r.matchRate() * 100);
@@ -135,13 +180,13 @@ public final class Main {
         if (r.mismatched() > 0) {
             System.out.println();
             System.out.println("worst 10 symbols by mismatch count:");
-            for (BboCrossValidator.SymbolStats s : r.worstSymbols(10)) {
+            for (BboValidationResult.SymbolStats s : r.worstSymbols(10)) {
                 System.out.printf("  %-10s matched=%,d  mismatched=%,d  rate=%.4f%%%n",
                         s.symbol(), s.matched(), s.mismatched(), s.matchRate() * 100);
             }
             System.out.println();
             System.out.println("first " + r.mismatchSamples().size() + " mismatches:");
-            for (BboCrossValidator.MismatchSample sample : r.mismatchSamples()) {
+            for (BboValidationResult.MismatchSample sample : r.mismatchSamples()) {
                 System.out.printf(
                         "  %-8s @%s  derived: %dx%d / %dx%d  TOPS: %dx%d / %dx%d%n",
                         sample.symbol(),
@@ -153,8 +198,82 @@ public final class Main {
             }
         } else {
             System.out.println();
-            System.out.println("✓ every TOPS QuoteUpdate matched the derived DEEP+ BBO exactly.");
+            System.out.println("✓ every TOPS QuoteUpdate matched the derived "
+                    + depthFeed.label + " BBO exactly.");
         }
+    }
+
+    /**
+     * Price-level cross-validation: DPLS aggregate at (sym, side, price)
+     * compared to DEEP's PLU(transaction-complete) for the same level,
+     * after every DEEP transaction closes. Independent of TOPS — the third
+     * leg of the DEEP / DPLS / TOPS validation triangle.
+     */
+    private static void deepVsDplsValidate(final Path dplsFile, final Path deepFile) throws Exception {
+        System.out.println("== DPLS ↔ DEEP price-level cross-validation ==");
+        System.out.println("dpls file:  " + dplsFile);
+        System.out.println("deep  file:  " + deepFile);
+        System.out.println();
+
+        DeepVsDplsValidator.Result r = new DeepVsDplsValidator().run(dplsFile, deepFile);
+
+        System.out.println();
+        System.out.println("== summary ==");
+        System.out.printf("elapsed:                  %s%n", r.elapsed());
+        System.out.printf("DPLS events applied:     %,d%n", r.dplsEventsApplied());
+        System.out.printf("  on timestamp ties:      %,d%n", r.dplsEventsOnTie());
+        System.out.printf("DEEP events observed:     %,d%n", r.deepEventsObserved());
+        System.out.printf("  mid-txn PLUs skipped:   %,d%n", r.deepMidTransactionSkipped());
+        System.out.printf("heartbeats skipped:       %,d%n", r.heartbeatsSkipped());
+        System.out.printf("decode failures:          %,d%n", r.decodeFailures());
+        System.out.printf("symbols tracked:          %,d%n", r.symbolsTracked());
+        System.out.println();
+        System.out.printf("DEEP transactions compared: %,d%n", r.deepTransactionsCompared());
+        System.out.printf("  matched:                  %,d (%.4f%%)%n", r.matched(), r.matchRate() * 100);
+        System.out.printf("  mismatched:               %,d%n", r.mismatched());
+
+        if (r.mismatched() > 0) {
+            System.out.println();
+            System.out.println("worst 10 symbols by mismatch count:");
+            for (BboValidationResult.SymbolStats s : r.worstSymbols(10)) {
+                System.out.printf("  %-10s matched=%,d  mismatched=%,d  rate=%.4f%%%n",
+                        s.symbol(), s.matched(), s.mismatched(), s.matchRate() * 100);
+            }
+            System.out.println();
+            System.out.println("first " + r.mismatchSamples().size() + " mismatches:");
+            for (DeepVsDplsValidator.LevelMismatch m : r.mismatchSamples()) {
+                System.out.printf(
+                        "  %-8s @%s  side=%s  price=%d  DPLS aggregate=%d  DEEP size=%d  (delta=%d)%n",
+                        m.symbol(),
+                        formatNanos(m.timestampNanos()),
+                        m.side(),
+                        m.priceRaw(),
+                        m.dplsAggregate(),
+                        m.deepSize(),
+                        m.dplsAggregate() - m.deepSize());
+            }
+        } else {
+            System.out.println();
+            System.out.println("✓ every DEEP price level matched the DPLS aggregate exactly.");
+        }
+    }
+
+    /**
+     * Open the file, peek packets until we find one with a non-zero
+     * message-count (i.e. not a heartbeat), and decode its IEX-TP header
+     * to identify the feed. Closes the reader before returning.
+     */
+    private static Feed sniffFeed(final Path file) throws IOException {
+        try (PcapReader r = PcapReader.open(file)) {
+            byte[] payload;
+            while ((payload = r.nextUdpPayload()) != null) {
+                if (payload.length < IexTpDecoder.HEADER_BYTES) continue;
+                IexTpDecoder.Header h = IexTpDecoder.decode(payload);
+                if (h.messageCount() == 0 || h.payloadLength() == 0) continue;
+                return feedFromProtocolId(h.protocolId());
+            }
+        }
+        throw new IllegalStateException("no non-heartbeat packets in " + file);
     }
 
     private static void smokeTest(final Path path, final int printLimit, final long maxPackets,
@@ -220,7 +339,8 @@ public final class Main {
                     try {
                         IexMessage m = switch (feed) {
                             case TOPS     -> TopsMessageRouter.decode(typeByte, payload, pos);
-                            case DEEPPLUS -> DeepPlusMessageRouter.decode(typeByte, payload, pos);
+                            case DEEP     -> DeepMessageRouter.decode(typeByte, payload, pos);
+                            case DPLS -> DplsMessageRouter.decode(typeByte, payload, pos);
                         };
                         aggregateTradeVolume(m, tradeVolumeBySymbol);
                         if (writer != null) {
@@ -274,7 +394,7 @@ public final class Main {
                     .forEach(e -> System.out.printf("  %-16s %s%n", e.getKey().tableName, e.getValue()));
         }
 
-        if (crossValidate && feed == Feed.DEEPPLUS) {
+        if (crossValidate && feed == Feed.DPLS) {
             try (Connection xvConn = (conn != null && !conn.isClosed()) ? conn : openConnection()) {
                 crossValidateAgainstTops(xvConn, tradeVolumeBySymbol);
             }
@@ -286,15 +406,16 @@ public final class Main {
     private static Feed feedFromProtocolId(final int protocolId) {
         return switch (protocolId) {
             case IexTpDecoder.PROTOCOL_TOPS  -> Feed.TOPS;
-            case IexTpDecoder.PROTOCOL_DEEPP -> Feed.DEEPPLUS;
+            case IexTpDecoder.PROTOCOL_DEEP  -> Feed.DEEP;
+            case IexTpDecoder.PROTOCOL_DEEPP -> Feed.DPLS;
             default -> throw new IllegalArgumentException(
                     "Unsupported IEX-TP protocol id 0x" + String.format("%04x", protocolId)
-                    + " — only TOPS (0x8003) and DEEP+ (0x8005) are handled");
+                    + " — only TOPS (0x8003), DEEP (0x8004), and DPLS (0x8005) are handled");
         };
     }
 
     /**
-     * Trade-volume aggregation. TOPS: sum TradeReport sizes. DEEP+: sum
+     * Trade-volume aggregation. TOPS: sum TradeReport sizes. DPLS: sum
      * OrderExecuted + Trade sizes (both contribute to total IEX volume per
      * spec). Trade Breaks are NOT subtracted here — they're rare and would
      * need to be reconciled separately if total accuracy mattered.
@@ -303,20 +424,20 @@ public final class Main {
         switch (m) {
             case TradeReport tr      -> agg.merge(tr.symbol(), (long) tr.size(), Long::sum);
             case OrderExecuted ox    -> agg.merge(ox.symbol(), (long) ox.size(), Long::sum);
-            case com.longexposure.deepplus.Trade dt
+            case com.longexposure.dpls.Trade dt
                                      -> agg.merge(dt.symbol(), (long) dt.size(), Long::sum);
             default -> { /* other types don't contribute */ }
         }
     }
 
     /**
-     * Per-symbol trade-volume diff: this run's DEEP+ aggregate vs the
+     * Per-symbol trade-volume diff: this run's DPLS aggregate vs the
      * TOPS volumes already loaded in the {@code trades} table for the
      * same trading date.
      */
-    private static void crossValidateAgainstTops(final Connection conn, final Map<String, Long> deepPlusVolume) throws Exception {
+    private static void crossValidateAgainstTops(final Connection conn, final Map<String, Long> dplsVolume) throws Exception {
         System.out.println();
-        System.out.println("== cross-validation: DEEP+ vs TOPS trade volumes ==");
+        System.out.println("== cross-validation: DPLS vs TOPS trade volumes ==");
 
         // Pull TOPS aggregates for every symbol that traded in either feed.
         Map<String, Long> topsVolume = new HashMap<>();
@@ -335,13 +456,13 @@ public final class Main {
         }
 
         // Union of symbols on both sides
-        TreeMap<String, long[]> joined = new TreeMap<>();  // symbol → [deepPlus, tops]
-        deepPlusVolume.forEach((s, v) -> joined.computeIfAbsent(s, k -> new long[2])[0] = v);
+        TreeMap<String, long[]> joined = new TreeMap<>();  // symbol → [dpls, tops]
+        dplsVolume.forEach((s, v) -> joined.computeIfAbsent(s, k -> new long[2])[0] = v);
         topsVolume.forEach((s, v) -> joined.computeIfAbsent(s, k -> new long[2])[1] = v);
 
         int matched = 0;
         int mismatched = 0;
-        int onlyDeepPlus = 0;
+        int onlyDpls = 0;
         int onlyTops = 0;
         long absDeltaSum = 0;
         TreeMap<Long, String> topMismatches = new TreeMap<>(java.util.Collections.reverseOrder());
@@ -349,7 +470,7 @@ public final class Main {
             long dp = e.getValue()[0];
             long tops = e.getValue()[1];
             if (dp == 0 && tops > 0) { onlyTops++; continue; }
-            if (tops == 0 && dp > 0) { onlyDeepPlus++; continue; }
+            if (tops == 0 && dp > 0) { onlyDpls++; continue; }
             long delta = Math.abs(dp - tops);
             absDeltaSum += delta;
             if (delta == 0) {
@@ -357,22 +478,22 @@ public final class Main {
             } else {
                 mismatched++;
                 topMismatches.put(delta * 1_000_000L + e.getKey().hashCode(),  // dedupe key
-                        String.format("%-10s DEEP+=%d TOPS=%d delta=%+d", e.getKey(), dp, tops, dp - tops));
+                        String.format("%-10s DPLS=%d TOPS=%d delta=%+d", e.getKey(), dp, tops, dp - tops));
             }
         }
 
         System.out.printf("symbols in both feeds:   %d%n", matched + mismatched);
         System.out.printf("  exact match:           %d%n", matched);
         System.out.printf("  mismatched:            %d%n", mismatched);
-        System.out.printf("symbols only in DEEP+:   %d%n", onlyDeepPlus);
+        System.out.printf("symbols only in DPLS:   %d%n", onlyDpls);
         System.out.printf("symbols only in TOPS:    %d%n", onlyTops);
         System.out.printf("aggregate |delta|:       %d shares%n", absDeltaSum);
         if (!topMismatches.isEmpty()) {
             System.out.println("top 10 mismatches by absolute delta:");
             topMismatches.values().stream().limit(10).forEach(s -> System.out.println("  " + s));
         }
-        if (matched == joined.size() - onlyDeepPlus - onlyTops && onlyDeepPlus == 0 && onlyTops == 0) {
-            System.out.println("✓ DEEP+ trade aggregates match TOPS exactly across every symbol.");
+        if (matched == joined.size() - onlyDpls - onlyTops && onlyDpls == 0 && onlyTops == 0) {
+            System.out.println("✓ DPLS trade aggregates match TOPS exactly across every symbol.");
         }
     }
 
@@ -421,7 +542,7 @@ public final class Main {
                     a.referencePrice(), a.indicativeClearingPrice(),
                     formatNanos(a.timestampNanos()));
 
-            // DEEP+-specific
+            // DPLS-specific
             case AddOrder ao           -> String.format("AddOrder              %-8s %s %d @ $%.4f  id=%d  @%s",
                     ao.symbol(), ao.side(), ao.size(), ao.price(), ao.orderId(),
                     formatNanos(ao.timestampNanos()));
@@ -433,9 +554,9 @@ public final class Main {
             case OrderExecuted ox      -> String.format("OrderExecuted         %-8s id=%d %d @ $%.4f  trade=%d  @%s",
                     ox.symbol(), ox.orderId(), ox.size(), ox.price(), ox.tradeId(),
                     formatNanos(ox.timestampNanos()));
-            case com.longexposure.deepplus.Trade dt -> String.format("Trade[DEEP+]          %-8s %d @ $%.4f  trade=%d  @%s",
+            case com.longexposure.dpls.Trade dt -> String.format("Trade[DPLS]          %-8s %d @ $%.4f  trade=%d  @%s",
                     dt.symbol(), dt.size(), dt.price(), dt.tradeId(), formatNanos(dt.timestampNanos()));
-            case com.longexposure.deepplus.TradeBreak dtb -> String.format("TradeBreak[DEEP+]     %-8s broken trade=%d  @%s",
+            case com.longexposure.dpls.TradeBreak dtb -> String.format("TradeBreak[DPLS]     %-8s broken trade=%d  @%s",
                     dtb.symbol(), dtb.brokenTradeId(), formatNanos(dtb.timestampNanos()));
             case ClearBook cb          -> String.format("ClearBook             %-8s  @%s",
                     cb.symbol(), formatNanos(cb.timestampNanos()));
