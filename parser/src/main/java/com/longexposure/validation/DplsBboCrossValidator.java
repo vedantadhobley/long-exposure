@@ -64,6 +64,18 @@ public final class DplsBboCrossValidator {
     private final List<BboValidationResult.MismatchSample> mismatchSamples = new ArrayList<>();
     private static final int MAX_SAMPLES = 20;
 
+    /**
+     * Pending TOPS QuoteUpdates awaiting comparison, keyed by symbol.
+     * Multiple QuoteUpdates at the same {@code (symbol, ts)} get
+     * squashed here — only the latest survives, representing the BBO
+     * after the final of multiple same-ns atomic transactions. Same
+     * mechanism as {@link DeepVsDplsValidator}'s same-ns dedupe.
+     * Comparison is deferred until the smallest observable timestamp
+     * across both streams exceeds the pending QU's ts.
+     */
+    private final Map<String, QuoteUpdate> pendingBySymbol = new HashMap<>();
+    private long lastFlushedTs = Long.MIN_VALUE;
+
     public BboValidationResult run(final Path dplsFile, final Path topsFile) throws IOException {
         long startNanos = System.nanoTime();
 
@@ -73,6 +85,12 @@ public final class DplsBboCrossValidator {
             while (!deep.isExhausted() || !tops.isExhausted()) {
                 long deepTs = deep.peekTs();
                 long topsTs = tops.peekTs();
+                long nextTs = Math.min(deepTs, topsTs);
+                if (nextTs > lastFlushedTs) {
+                    flushPendingOlderThan(nextTs);
+                    lastFlushedTs = nextTs;
+                }
+
                 if (deepTs <= topsTs) {
                     IexMessage m = deep.consume();
                     bookManager.apply(m);
@@ -80,12 +98,13 @@ public final class DplsBboCrossValidator {
                 } else {
                     IexMessage m = tops.consume();
                     if (m instanceof QuoteUpdate qu) {
-                        compareBbo(qu);
+                        stashPendingQu(qu);
                     } else {
                         topsNonQuoteEventsSkipped++;
                     }
                 }
             }
+            flushPendingOlderThan(Long.MAX_VALUE);
 
             long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
             return new BboValidationResult(
@@ -100,6 +119,31 @@ public final class DplsBboCrossValidator {
                     List.copyOf(mismatchSamples),
                     deep.heartbeatPacketsSkipped() + tops.heartbeatPacketsSkipped(),
                     deep.decodeFailures() + tops.decodeFailures());
+        }
+    }
+
+    /**
+     * Buffer a QuoteUpdate by symbol; if an older-ts QU is already
+     * pending for the same symbol, flush it first. Same-ns
+     * replacements are silently overwritten (final QU at the ns wins).
+     */
+    private void stashPendingQu(final QuoteUpdate qu) {
+        QuoteUpdate prev = pendingBySymbol.get(qu.symbol());
+        if (prev != null && prev.timestampNanos() < qu.timestampNanos()) {
+            compareBbo(prev);
+        }
+        pendingBySymbol.put(qu.symbol(), qu);
+    }
+
+    private void flushPendingOlderThan(final long ts) {
+        if (pendingBySymbol.isEmpty()) return;
+        var it = pendingBySymbol.entrySet().iterator();
+        while (it.hasNext()) {
+            var e = it.next();
+            if (e.getValue().timestampNanos() < ts) {
+                compareBbo(e.getValue());
+                it.remove();
+            }
         }
     }
 

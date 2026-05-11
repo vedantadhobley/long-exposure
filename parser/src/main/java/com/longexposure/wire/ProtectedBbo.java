@@ -8,31 +8,36 @@ import java.util.NavigableMap;
  * {@code QuoteUpdate} semantics. Used to derive a comparable BBO from
  * either the DPLS order-level book or the DEEP price-level book.
  *
- * <p><b>The rule (two parts):</b>
- * <ol>
- *   <li>BBO price = the first price level (from best to worst) whose
- *       aggregate displayed size meets its tier's round-lot threshold
- *       (see {@link RoundLot}).
- *   <li>BBO size = sum of displayed shares at the BBO price <em>plus</em>
- *       all shares at any "better" price levels above it (which by
- *       definition are odd-lot-only levels that failed step 1).
- * </ol>
+ * <p><b>The rule:</b> walk levels from best to worst, accumulating size.
+ * The BBO is the first level at which the <em>running cumulative</em>
+ * meets that level's round-lot threshold (see {@link RoundLot}). Size
+ * reported is that cumulative total.
  *
- * <p>Empirical fit verified against 2026-05-08 IEX HIST data: the
- * combination of tiered threshold + odd-lot-above-aggregation reproduces
- * TOPS BBO sizes for every mismatch pattern surfaced by the validator:
+ * <p><b>Why cumulative, not individual-per-level.</b> AIIO on 2026-05-08
+ * had ask levels $1.13×18, $12.50×1, $67.45×90 — no single level reached
+ * the 100-share tier-1 threshold, yet TOPS still reported BBO ask =
+ * $67.45 × 109 (= 18 + 1 + 90). The cumulative rule captures this: by
+ * $67.45 the running total crosses 100 and that level qualifies as
+ * protected. Empirically refits every mismatch pattern surfaced by the
+ * validator:
  *
  * <pre>
- *   MASK   $2.89 ask: 100 round + 47 odd at $2.86 → TOPS reports 147 @ $2.89
- *   SMR   $12.44 bid: 100 round + 75 odd at $12.45 → TOPS reports 175 @ $12.44
- *   SOXX $502.11 ask:  80 (tier-2 round=40)        → TOPS reports  80 @ $502.11
- *   GME $7025.06 ask: 125 (tier-3 round=10)        → TOPS reports 125 @ $7025.06
+ *   MASK   $2.89 ask: 47 @ $2.86 + 100 @ $2.89  → cum=147 ≥ 100 → BBO=$2.89  ×147
+ *   SMR   $12.44 bid: 75 @ $12.45 + 100 @ $12.44 → cum=175 ≥ 100 → BBO=$12.44 ×175
+ *   SOXX $502.11 ask: 80 (tier-2 lot=40)         → cum=80  ≥  40 → BBO=$502.11 ×80
+ *   AIIO  $67.45 ask: 18 + 1 + 90                → cum=109 ≥ 100 → BBO=$67.45  ×109
  * </pre>
  *
- * <p>The "size includes better-priced odd lots" rule mirrors Reg NMS's
- * protected-quote concept: at the protected BBO price, you can pick up
- * not just the round-lot at that price but every better-priced odd lot
- * sitting above it.
+ * <p>This mirrors Reg NMS's "protected quote" concept: at the protected
+ * BBO price, you can pick up the full cumulative quantity at the BBO
+ * price and any better-priced odd lots above.
+ *
+ * <p>One known edge case still unhandled: tier-crossing stocks like GME
+ * where the symbol's prior closing price determines the round-lot tier
+ * (not the level price). In those cases this implementation under-uses
+ * the threshold near the BBO and produces a different price than TOPS.
+ * Fixing this requires per-symbol round-lot data, which isn't available
+ * in HIST .pcap.gz outside the sparse SecurityDirectory messages.
  */
 public record ProtectedBbo(long priceRaw, long size) {
 
@@ -51,7 +56,7 @@ public record ProtectedBbo(long priceRaw, long size) {
             long levelPrice = e.getKey();
             long levelSize = e.getValue();
             cumulative += levelSize;
-            if (levelSize >= RoundLot.forPriceRaw(levelPrice)) {
+            if (cumulative >= RoundLot.forPriceRaw(levelPrice)) {
                 return new ProtectedBbo(levelPrice, cumulative);
             }
         }

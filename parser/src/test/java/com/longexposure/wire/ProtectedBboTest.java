@@ -99,13 +99,43 @@ class ProtectedBboTest {
     }
 
     @Test
-    void allLevelsBelowThresholdYieldsEmpty() {
-        // No level qualifies under its tier — empty BBO.
+    void cumulativeQualifies_aiioPattern() {
+        // AIIO 2026-05-08 12:24:38 ask side: $1.13×18, $12.50×1, $67.45×90.
+        // No single level meets the 100-share tier-1 threshold, but the
+        // running cumulative crosses 100 at $67.45 — TOPS reports BBO
+        // ask = $67.45 × 109. Cumulative rule must produce the same.
+        TreeMap<Long, Long> asks = new TreeMap<>();
+        asks.put(1_13_00L,  18L);
+        asks.put(12_50_00L,  1L);
+        asks.put(67_45_00L, 90L);
+        ProtectedBbo bbo = ProtectedBbo.from(asks);
+        assertEquals(67_45_00L, bbo.priceRaw());
+        assertEquals(109L, bbo.size());
+    }
+
+    @Test
+    void cumulativeBelowThresholdYieldsEmpty() {
+        // Even cumulatively under the tier threshold — empty BBO.
         TreeMap<Long, Long> bids = new TreeMap<>();
         bids.put(50_00_00L, 30L);                                        // tier 1, needs 100
-        bids.put(49_00_00L, 50L);
-        bids.put(48_00_00L, 80L);
+        bids.put(49_00_00L, 20L);
+        bids.put(48_00_00L, 40L);                                        // cum=90 across all
         ProtectedBbo bbo = ProtectedBbo.from(bids.descendingMap());
         assertFalse(bbo.isPresent());
+    }
+
+    @Test
+    void cumulativeReachesThresholdAtSubThresholdLevel() {
+        // Three sub-threshold levels whose cumulative crosses 100 at the
+        // bottom one — the bottom level qualifies via cumulative even
+        // though its own size is well under 100. AIIO-shaped but in
+        // a fully synthetic case.
+        TreeMap<Long, Long> bids = new TreeMap<>();
+        bids.put(50_00_00L, 30L);
+        bids.put(49_00_00L, 50L);
+        bids.put(48_00_00L, 80L);                                        // cum=160 at this level
+        ProtectedBbo bbo = ProtectedBbo.from(bids.descendingMap());
+        assertEquals(48_00_00L, bbo.priceRaw());
+        assertEquals(160L, bbo.size());
     }
 }

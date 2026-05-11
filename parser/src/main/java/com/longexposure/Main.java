@@ -27,6 +27,7 @@ import com.longexposure.validation.BboValidationResult;
 import com.longexposure.validation.DeepBboCrossValidator;
 import com.longexposure.validation.DplsBboCrossValidator;
 import com.longexposure.validation.DeepVsDplsValidator;
+import com.longexposure.validation.DplsVsDeepTracer;
 import com.longexposure.validation.EventTracer;
 import com.longexposure.wire.Bytes;
 import com.longexposure.wire.IexMessage;
@@ -107,8 +108,15 @@ public final class Main {
             if (traceSymbol != null && !traceSymbol.isBlank()) {
                 long targetTs = parseLongOrDefault(System.getenv("IEX_TRACE_TS_NANOS"), 0L);
                 long windowMs = parseLongOrDefault(System.getenv("IEX_TRACE_WINDOW_MS"), 2L);
-                new EventTracer(traceSymbol, targetTs, windowMs, System.out)
-                        .run(Path.of(filePath), Path.of(bboAgainst));
+                Feed sourceFeed = sniffFeed(Path.of(filePath));
+                Feed refFeed = sniffFeed(Path.of(bboAgainst));
+                if (sourceFeed == Feed.DPLS && refFeed == Feed.DEEP) {
+                    new DplsVsDeepTracer(traceSymbol, targetTs, windowMs, System.out)
+                            .run(Path.of(filePath), Path.of(bboAgainst));
+                } else {
+                    new EventTracer(traceSymbol, targetTs, windowMs, System.out)
+                            .run(Path.of(filePath), Path.of(bboAgainst));
+                }
                 return;
             }
             crossValidate(Path.of(filePath), Path.of(bboAgainst));
@@ -224,6 +232,8 @@ public final class Main {
         System.out.printf("  on timestamp ties:      %,d%n", r.dplsEventsOnTie());
         System.out.printf("DEEP events observed:     %,d%n", r.deepEventsObserved());
         System.out.printf("  mid-txn PLUs skipped:   %,d%n", r.deepMidTransactionSkipped());
+        System.out.printf("  same-ns PLUs squashed:  %,d  (multi-txn at same ns; later PLU wins)%n",
+                r.sameNsSupersededPlus());
         System.out.printf("heartbeats skipped:       %,d%n", r.heartbeatsSkipped());
         System.out.printf("decode failures:          %,d%n", r.decodeFailures());
         System.out.printf("symbols tracked:          %,d%n", r.symbolsTracked());

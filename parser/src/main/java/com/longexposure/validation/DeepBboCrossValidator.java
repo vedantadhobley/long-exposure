@@ -47,6 +47,10 @@ public final class DeepBboCrossValidator {
     private final List<BboValidationResult.MismatchSample> mismatchSamples = new ArrayList<>();
     private static final int MAX_SAMPLES = 20;
 
+    /** Same-ns dedupe — see {@link DplsBboCrossValidator#pendingBySymbol} for rationale. */
+    private final Map<String, QuoteUpdate> pendingBySymbol = new HashMap<>();
+    private long lastFlushedTs = Long.MIN_VALUE;
+
     public BboValidationResult run(final Path deepFile, final Path topsFile) throws IOException {
         long startNanos = System.nanoTime();
 
@@ -56,6 +60,12 @@ public final class DeepBboCrossValidator {
             while (!deep.isExhausted() || !tops.isExhausted()) {
                 long deepTs = deep.peekTs();
                 long topsTs = tops.peekTs();
+                long nextTs = Math.min(deepTs, topsTs);
+                if (nextTs > lastFlushedTs) {
+                    flushPendingOlderThan(nextTs);
+                    lastFlushedTs = nextTs;
+                }
+
                 if (deepTs <= topsTs) {
                     IexMessage m = deep.consume();
                     bookManager.apply(m);
@@ -63,12 +73,13 @@ public final class DeepBboCrossValidator {
                 } else {
                     IexMessage m = tops.consume();
                     if (m instanceof QuoteUpdate qu) {
-                        compareBbo(qu);
+                        stashPendingQu(qu);
                     } else {
                         topsNonQuoteEventsSkipped++;
                     }
                 }
             }
+            flushPendingOlderThan(Long.MAX_VALUE);
 
             long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
             return new BboValidationResult(
@@ -83,6 +94,26 @@ public final class DeepBboCrossValidator {
                     List.copyOf(mismatchSamples),
                     deep.heartbeatPacketsSkipped() + tops.heartbeatPacketsSkipped(),
                     deep.decodeFailures() + tops.decodeFailures());
+        }
+    }
+
+    private void stashPendingQu(final QuoteUpdate qu) {
+        QuoteUpdate prev = pendingBySymbol.get(qu.symbol());
+        if (prev != null && prev.timestampNanos() < qu.timestampNanos()) {
+            compareBbo(prev);
+        }
+        pendingBySymbol.put(qu.symbol(), qu);
+    }
+
+    private void flushPendingOlderThan(final long ts) {
+        if (pendingBySymbol.isEmpty()) return;
+        var it = pendingBySymbol.entrySet().iterator();
+        while (it.hasNext()) {
+            var e = it.next();
+            if (e.getValue().timestampNanos() < ts) {
+                compareBbo(e.getValue());
+                it.remove();
+            }
         }
     }
 

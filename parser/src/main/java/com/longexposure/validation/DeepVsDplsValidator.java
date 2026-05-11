@@ -51,14 +51,37 @@ public final class DeepVsDplsValidator {
     private long dplsEventsApplied;
     private long dplsBecauseTie;            // diagnostic — events processed on a DPLS → DEEP tie
     private long deepEventsObserved;
-    private long deepTransactionsCompared;      // only flag=0x01 PLUs
+    private long deepTransactionsCompared;      // only flag=0x01 PLUs that survive the same-ns dedupe
     private long deepMidTransactionSkipped;     // flag=0x00 PLUs (still applied to DEEP book if we kept one)
+    private long sameNsSupersededPlus;          // diagnostic — flag=0x01 PLUs dropped because a later
+                                                // flag=0x01 PLU at the same (sym, side, price, ts) arrived
     private long matched;
     private long mismatched;
 
     private final Map<String, BboValidationResult.SymbolStats> perSymbol = new HashMap<>();
     private final List<LevelMismatch> mismatchSamples = new ArrayList<>();
     private static final int MAX_SAMPLES = 20;
+
+    /**
+     * Pending flag=0x01 PLUs awaiting comparison, keyed by
+     * {@code (symbol, side, price)}. Multiple TXN-COMPLETE PLUs at the
+     * same {@code (sym, side, price, ts)} get squashed here — only the
+     * latest survives, representing the final state at that ns.
+     *
+     * <p>Comparison is deferred until the smallest observable timestamp
+     * across both streams exceeds the pending PLU's ts — at that point
+     * we know no more same-ns events at this level can arrive, and our
+     * DPLS book has fully absorbed every same-ns DPLS event (DPLS-wins-
+     * ties merge rule).
+     *
+     * <p>Empirically, every one of the 83 DPLS↔DEEP mismatches observed
+     * on 2026-05-08 was an intermediate same-ns multi-transaction state
+     * — see {@code docs/decisions.md} 2026-05-12 entry.
+     */
+    private final Map<LevelKey, PriceLevelUpdate> pendingByLevel = new HashMap<>();
+    private long lastFlushedTs = Long.MIN_VALUE;
+
+    private record LevelKey(String symbol, PriceLevelUpdate.Side side, long priceRaw) {}
 
     public Result run(final Path dplsFile, final Path deepFile) throws IOException {
         long startNanos = System.nanoTime();
@@ -69,6 +92,22 @@ public final class DeepVsDplsValidator {
             while (!dp.isExhausted() || !dd.isExhausted()) {
                 long dpTs = dp.peekTs();
                 long ddTs = dd.peekTs();
+                long nextTs = Math.min(dpTs, ddTs);
+
+                // Flush pending PLUs whose ts < nextTs. By the merge invariant
+                // (DPLS wins ties on equal ts), all DPLS events at any pending.ts
+                // have already been applied to the book by the time we reach
+                // a strictly larger ts on either stream. So pending compared now
+                // sees the correct final-state DPLS aggregate for that level.
+                //
+                // Only iterate the pending map when ts has actually advanced —
+                // doing it on every event is O(symbols × events) and blew up
+                // runtime by 50× on the full-day run.
+                if (nextTs > lastFlushedTs) {
+                    flushPendingOlderThan(nextTs);
+                    lastFlushedTs = nextTs;
+                }
+
                 if (dpTs <= ddTs) {
                     IexMessage m = dp.consume();
                     dplsBookManager.apply(m);
@@ -79,13 +118,15 @@ public final class DeepVsDplsValidator {
                     deepEventsObserved++;
                     if (m instanceof PriceLevelUpdate plu) {
                         if (plu.isTransactionComplete()) {
-                            compareLevel(plu);
+                            stashPendingTxnComplete(plu);
                         } else {
                             deepMidTransactionSkipped++;
                         }
                     }
                 }
             }
+            // End of stream: flush whatever pending entries remain.
+            flushPendingOlderThan(Long.MAX_VALUE);
 
             long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
             return new Result(
@@ -95,6 +136,7 @@ public final class DeepVsDplsValidator {
                     deepEventsObserved,
                     deepTransactionsCompared,
                     deepMidTransactionSkipped,
+                    sameNsSupersededPlus,
                     matched,
                     mismatched,
                     dplsBookManager.symbolCount(),
@@ -102,6 +144,41 @@ public final class DeepVsDplsValidator {
                     List.copyOf(mismatchSamples),
                     dp.heartbeatPacketsSkipped() + dd.heartbeatPacketsSkipped(),
                     dp.decodeFailures() + dd.decodeFailures());
+        }
+    }
+
+    /**
+     * Record a flag=0x01 PLU as the latest known size at its
+     * {@code (sym, side, price)}. If another flag=0x01 PLU at the same
+     * {@code (sym, side, price, ts)} already pending, the new one
+     * supersedes it (count the discard as a same-ns squash). If the
+     * pending entry has a strictly earlier ts, flush it first — it
+     * represents a different transaction at a different ns.
+     */
+    private void stashPendingTxnComplete(final PriceLevelUpdate plu) {
+        LevelKey key = new LevelKey(plu.symbol(), plu.side(), plu.priceRaw());
+        PriceLevelUpdate prev = pendingByLevel.get(key);
+        if (prev != null) {
+            if (prev.timestampNanos() < plu.timestampNanos()) {
+                compareLevel(prev);
+            } else {
+                // Same ts — newer PLU wins; the older one represented an
+                // intermediate state of a same-ns multi-transaction.
+                sameNsSupersededPlus++;
+            }
+        }
+        pendingByLevel.put(key, plu);
+    }
+
+    private void flushPendingOlderThan(final long ts) {
+        if (pendingByLevel.isEmpty()) return;
+        var it = pendingByLevel.entrySet().iterator();
+        while (it.hasNext()) {
+            var e = it.next();
+            if (e.getValue().timestampNanos() < ts) {
+                compareLevel(e.getValue());
+                it.remove();
+            }
         }
     }
 
@@ -141,6 +218,7 @@ public final class DeepVsDplsValidator {
             long deepEventsObserved,
             long deepTransactionsCompared,
             long deepMidTransactionSkipped,
+            long sameNsSupersededPlus,
             long matched,
             long mismatched,
             int symbolsTracked,
