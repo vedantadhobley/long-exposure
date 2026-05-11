@@ -4,6 +4,31 @@ Append-only record of architectural and operational decisions, ordered by date. 
 
 ---
 
+## 2026-05-11 (late) — Code identifiers use DPLS (filename token), docs/prose use DEEP+ (product name)
+
+**Context.** Two names for the same feed: the spec / product name is **DEEP+**, the HIST filename token is **DPLS**. We had been using "DeepPlus" in Java code (package `com.longexposure.deepplus`, classes `DeepPlusMessage*`, enum `Feed.DEEPPLUS`, variable `deepPlusFile`), which was asymmetric with the 4-letter `Tops` / `Deep` siblings and grated to read.
+
+**Decided.** Rename all code-internal references to use **`Dpls`** / **`DPLS`** / **`dpls`** (matching the HIST filename token). User-facing prose (README marketing line, narrative copy) keeps **DEEP+** since that's the canonical product name IEX uses and it has stronger SEO/recognition (people search for "DEEP+ parser"). Docs reference DEEP+ as the product, with a one-line equivalence note at the top of `AGENTS.md` and `docs/protocol-notes.md`.
+
+**What changed in code.**
+- Package: `com.longexposure.deepplus` → `com.longexposure.dpls` (12 files)
+- Sealed marker: `DeepPlusMessage` → `DplsMessage`
+- Router: `DeepPlusMessageRouter` → `DplsMessageRouter`
+- Validators: `DeepPlusBboCrossValidator` → `DplsBboCrossValidator`, `DeepVsDeepPlusValidator` → `DeepVsDplsValidator`
+- Test: `DeepPlusMessagesTest` → `DplsMessagesTest`
+- Enum constant: `Feed.DEEPPLUS` → `Feed.DPLS`; display label `"DEEP+"` → `"DPLS"`
+- All identifier-cased forms (`deepPlusFile`, `onlyDeepPlus`, etc.) → `dpls*`
+- All javadoc references `DEEP+` → `DPLS` inside code
+
+**What stayed DEEP+.**
+- README marketing line: "the first open-source IEX DEEP+ parser in any language" — the product name people will search for.
+- README "Data feed selection" section: introduces DEEP+ as the product, with the DPLS-is-the-filename-token explanation alongside.
+- Historical entries in this log: prior decision entries keep their original phrasing.
+
+**Why this matters.** Naming consistency in code is load-bearing for readability — `Tops`, `Deep`, `Dpls` reads as three siblings; `Tops`, `Deep`, `DeepPlus` reads as two-and-an-outlier. The product name in marketing copy is also load-bearing for discoverability — "DEEP+" has years of IEX documentation behind it; "DPLS" does not. Splitting code-vs-prose lets each optimize for its own constraint.
+
+---
+
 ## 2026-05-11 — Pivot: DEEP+ is the v1 product; TOPS becomes the validation oracle
 
 **Supersedes the 2026-05-10 "TOPS v1 / DEEP+ phase 2" decision below.** The reasoning in that entry still applies in isolation, but a load-bearing assumption — "each feed is 2–3 weeks of work" — was invalidated by today's execution pace.
@@ -53,7 +78,7 @@ The five other morning-of reasons (stepping-stone reuse, ship risk, LLM prompt i
 - `README.md` — "reference implementation of the IEX TOPS parser" → "first open-source IEX DEEP+ parser." TOPS demoted to "validation oracle." Feed-selection section reframed.
 - `AGENTS.md` — "touching feed-handling code" guardrail flipped (DEEP+ is v1; TOPS is the validator).
 - `docs/todo.md` — start-of-next-session checklist now leads with "download a DPLS .pcap.gz."
-- Source code layout (`com.longexposure.tops.*` for TOPS, future `com.longexposure.deepplus.*` for DEEP+) is unchanged — same per-feed package convention, just different priority order.
+- Source code layout (`com.longexposure.tops.*` for TOPS, future `com.longexposure.dpls.*` for DEEP+) is unchanged — same per-feed package convention, just different priority order.
 
 **Open risks (unchanged from morning analysis, accepted).**
 
@@ -112,7 +137,7 @@ Long Exposure consumes complete daily .pcap.gz files from HIST T+1. Every messag
 - Architecture work that needs to be DEEP+-ready from day 1:
   - `DownloadHistActivity(date, feed_name, version)` — parameterized
   - `events` hypertable has a `feed_source TEXT` column from initial schema
-  - Parser package structure: shared `transport/` + `admin/` + per-feed `tops/` (later `deepplus/`)
+  - Parser package structure: shared `transport/` + `admin/` + per-feed `tops/` (later `dpls/`)
 
 **Confidence + what's still open.**
 

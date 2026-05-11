@@ -8,8 +8,8 @@
 --     - TIMESTAMPTZ is the hypertable partition column (microsecond precision)
 --     - ts_nanos preserves the spec-level nanosecond ordering for tie-breakers
 --       and for sub-microsecond analysis the Postgres timestamp can't represent.
---   * `feed_source` column on every event lets phase-2 DEEP+ data land in the
---     same tables without schema churn (TOPS today; 'DEEP+' / 'DPLS' later).
+--   * `feed_source` column on every event lets phase-2 DPLS data land in the
+--     same tables without schema churn (TOPS today; 'DPLS' later).
 --   * IEX prices stored as BIGINT (4 implied decimals). Divide by 10000 only
 --     at presentation — preserves precision, avoids float-rounding bugs in
 --     aggregates.
@@ -83,7 +83,7 @@ CREATE INDEX IF NOT EXISTS quotes_symbol_ts_idx ON quotes (symbol, ts DESC);
 
 -- ─── Status / lifecycle events (S, H, O, P, E) ───────────────────────────────
 -- Rare events — halts, market open/close markers, short-sale restriction
--- changes, security open/close markers (DEEP/DEEP+ only). Polymorphic by
+-- changes, security open/close markers (DEEP/DPLS only). Polymorphic by
 -- event_kind because they're closely related shapes and joining them in
 -- queries is common ("show me everything that happened to AAPL").
 

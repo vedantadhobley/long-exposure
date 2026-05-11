@@ -4,6 +4,8 @@ Daily IEX market-data narrative pipeline. Java parser + Temporal workflows + Tim
 
 This file is your front door. Read it first; follow the imports below for deeper detail.
 
+> **Naming note.** The product/spec name IEX uses for the order-by-order feed is **DEEP+**. The HIST filename token for the same feed is **DPLS** (the `+` is awkward in filenames/URLs). Docs and prose use DEEP+ as the canonical product name; code identifiers (packages, classes, enum constants, log strings) use `Dpls` / `DPLS` for symmetry with `Tops` / `Deep` — all 4-letter feed names. Same wire format, same Message Protocol ID `0x8005`.
+
 ## Run
 
 ```bash
@@ -61,7 +63,7 @@ Mirror this pattern for any future personal-project work: per-project repos ship
 - **Touching the events schema**: the events table is a TimescaleDB hypertable. Schema migrations need to handle the hypertable conventions (`create_hypertable`, continuous aggregate refresh policies). See @docs/decisions.md for why TimescaleDB over QuestDB / DuckDB / kdb+.
 - **Worker/API talking to each other**: they don't. The API is read-only against the events + narratives tables in Postgres. The worker writes via JDBC `COPY`. No direct API-to-worker calls.
 - **LLM calls**: only from Temporal activities, only inside `NarrateEventsActivity`. Cache by event hash — re-running a day's pipeline must not re-narrate identical events.
-- **Touching feed-handling code**: **DEEP+ (DPLS) is v1** as of the 2026-05-11 pivot (see @docs/decisions.md). TOPS code in `com.longexposure.tops.*` is **repurposed as the validation oracle**, not deleted. Admin decoders in `com.longexposure.admin.*` are shared across feeds and reused as-is. DEEP+ trading decoders go in `com.longexposure.deepplus.*` (mirrors the existing `com.longexposure.tops.*` package layout). When implementing a DEEP+ decoder, cross-check it against the corresponding TOPS data already in the events DB for the same trading day.
+- **Touching feed-handling code**: **DEEP+ (DPLS) is v1** as of the 2026-05-11 pivot (see @docs/decisions.md). TOPS code in `com.longexposure.tops.*` is **repurposed as the validation oracle**, not deleted. Admin decoders in `com.longexposure.admin.*` are shared across feeds and reused as-is. DEEP+ trading decoders go in `com.longexposure.dpls.*` (mirrors the existing `com.longexposure.tops.*` package layout). When implementing a DEEP+ decoder, cross-check it against the corresponding TOPS data already in the events DB for the same trading day.
 
 ## Reference material — local files
 
@@ -74,7 +76,7 @@ Mirror this pattern for any future personal-project work: per-project repos ship
 - **Implementation status** (as of 2026-05-11 late session):
   - Pcap-ng reader, IEX-TP decoder, 7 admin decoders + sealed `AdminMessage`, common `IexMessage` marker, shared `wire/` package
   - **TOPS parser**: 5 trading decoders + `TopsMessageRouter`, 295M messages loaded to Postgres in 22:27 min, continuous aggregate populated (9,134 symbols, 770M shares, 7.75M trades for 2026-05-08)
-  - **DEEP+ parser**: 7 trading decoders + `DeepPlusMessageRouter`, 364M messages decoded in 97 s, full file pass at ~3.75M msg/sec
+  - **DEEP+ parser**: 7 trading decoders + `DplsMessageRouter`, 364M messages decoded in 97 s, full file pass at ~3.75M msg/sec
   - **Cross-feed validation (trade-level)**: 9,134 / 9,134 symbols match exactly between DEEP+ and TOPS for 2026-05-08, 0 mismatches, 0 share delta. Strong evidence the DEEP+ decoder is correct for trade-affecting messages.
   - **Tests**: 45 passing across the suite (`IexTpDecoder` + admin + TOPS + DEEP+)
   - **Storage**: 8 TOPS-side hypertables populated; DEEP+ tables not yet added to schema (Sprint C work)

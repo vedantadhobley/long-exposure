@@ -14,13 +14,13 @@ This plan is the agent-editable source of truth. The README has a condensed pros
 
 **Session progress (late 2026-05-11)**:
 
-- ✅ **Sprint A done** — DEEP+ parser: 7 trading-message records, `DeepPlusMessage` sealed interface, `DeepPlusMessageRouter`, `SaleConditionFlags` promoted to shared `wire/` package. 14 new JUnit tests; 45 total passing across the suite.
+- ✅ **Sprint A done** — DEEP+ parser: 7 trading-message records, `DplsMessage` sealed interface, `DplsMessageRouter`, `SaleConditionFlags` promoted to shared `wire/` package. 14 new JUnit tests; 45 total passing across the suite.
 - ✅ **Trade-level cross-validation done** (Sprint D, first half) — Main.java auto-detects feed from IEX-TP protocol id; aggregates per-symbol volume; queries Postgres for TOPS aggregates and diffs. Full 10.4 GB DPLS file decoded in 97 s (~3.75M msg/sec, 364,098,518 messages). **9,134 / 9,134 symbols match exactly, 0 mismatches, 0 share delta** vs the existing TOPS data already loaded for 2026-05-08. Every shared admin message type also matches count-for-count between feeds.
 - 🔜 **Sprint B next** — Order book state machine. `Map<orderId, OrderState>` per symbol, updated on Add/Modify/Delete/Execute, dropped on ClearBook. Derives top-of-book at arbitrary timestamps. Then Sprint D's second half: diff that derived BBO against the loaded TOPS QuoteUpdate stream.
 
 Concrete next actions in order:
 
-1. **`com.longexposure.deepplus.OrderBook` class** — instance per symbol, internal `Map<Long, OrderState>`. Methods: `add(AddOrder)`, `modify(OrderModify)`, `execute(OrderExecuted)`, `delete(OrderDelete)`, `clear()`. Plus derivation: `bestBid()`, `bestAsk()`, `depthAtLevel(int)`, `orderCount()`.
+1. **`com.longexposure.dpls.OrderBook` class** — instance per symbol, internal `Map<Long, OrderState>`. Methods: `add(AddOrder)`, `modify(OrderModify)`, `execute(OrderExecuted)`, `delete(OrderDelete)`, `clear()`. Plus derivation: `bestBid()`, `bestAsk()`, `depthAtLevel(int)`, `orderCount()`.
 2. **`OrderBookManager` (or similar)** — holds `Map<String symbol, OrderBook>`, routes incoming DEEP+ trading messages to the right book. Handles ClearBook by dropping the symbol's entry.
 3. **JUnit tests** — small synthetic message streams (5–10 events per test) covering: simple add+execute, partial fills, modify with priority maintained vs reset, delete, clear-book, add-after-delete-with-same-id.
 4. **BBO cross-validation against loaded TOPS data** — run DPLS through the parser + book manager; at each timestamp where a TOPS QuoteUpdate exists in DB for the same symbol, derive BBO from book state and diff. Tolerance considerations: order events and quote events in DEEP+ vs TOPS may arrive in different packets, so exact-microsecond comparison may need a small alignment window (~100 ns).
@@ -60,7 +60,7 @@ Concrete next actions in order:
 - [ ] **`validation.DailyTotalsValidator`** — cross-checks against IEX's published per-symbol summaries. Don't wait until the end; every new decoder gets a paired check. Still pending — needs the `/stats` endpoint figured out.
 - [ ] **Reference-implementation cross-check**: integrate `WojciechZankowski/iextrading4j-hist` as a test dependency (Java, same JVM); for each sample TOPS .pcap.gz, run both parsers and diff message streams. Any divergence = bug (usually ours). See @protocol-notes.md "Reference implementations" section.
 
-**Shared decoder note delivered**: 7 of these messages (`S`, `D`, `H`, `I`, `O`, `P`, plus `E` Security Event which is DEEP/DEEP+ only) are byte-identical across all three feeds. Package layout matches: `com.longexposure.admin.*` for shared, `com.longexposure.tops.*` for TOPS trading, `com.longexposure.deepplus.*` to come in phase 2. ~60% of the decoder LOC is in the admin package, all reusable as-is.
+**Shared decoder note delivered**: 7 of these messages (`S`, `D`, `H`, `I`, `O`, `P`, plus `E` Security Event which is DEEP/DEEP+ only) are byte-identical across all three feeds. Package layout matches: `com.longexposure.admin.*` for shared, `com.longexposure.tops.*` for TOPS trading, `com.longexposure.dpls.*` to come in phase 2. ~60% of the decoder LOC is in the admin package, all reusable as-is.
 
 ## Days 8–10 — Postgres + TimescaleDB + storage
 
@@ -132,9 +132,9 @@ Reframed 2026-05-11 — see `docs/decisions.md`. The TOPS work done today is rep
 ### Sprint A — DEEP+ parser ✅ done 2026-05-11
 
 - [x] Download 2026-05-08 DPLS file (10.4 GB at `~/workspace/data/long-exposure/raw/20260508_IEXTP1_DPLS1.0.pcap.gz`)
-- [x] `com.longexposure.deepplus.DeepPlusMessage` sealed interface (mirrors TopsMessage)
+- [x] `com.longexposure.dpls.DplsMessage` sealed interface (mirrors TopsMessage)
 - [x] DEEP+ trading-message records (all 7: `a` Add, `M` Modify, `R` Delete, `L` Order Executed, `T` Trade, `B` Trade Break, `C` Clear Book)
-- [x] `DeepPlusMessageRouter` (admin dispatch first, then DEEP+ trading)
+- [x] `DplsMessageRouter` (admin dispatch first, then DEEP+ trading)
 - [x] `SaleConditionFlags` promoted from `tops/` to `wire/` (shared across feeds per Appendix A)
 - [x] 14 JUnit tests against spec worked examples; 45 total passing
 

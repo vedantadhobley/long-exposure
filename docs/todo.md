@@ -24,7 +24,7 @@ Next thing to build: **Sprint B — order book state machine**.
    git log --oneline -10
    ```
 
-3. **Tell me "go" and I'll start on Sprint B** — `com.longexposure.deepplus.OrderBook` class, `OrderBookManager`, JUnit tests with synthetic message streams. After it lands, the second half of Sprint D unblocks (BBO-level cross-validation vs the loaded TOPS QuoteUpdate stream).
+3. **Tell me "go" and I'll start on Sprint B** — `com.longexposure.dpls.OrderBook` class, `OrderBookManager`, JUnit tests with synthetic message streams. After it lands, the second half of Sprint D unblocks (BBO-level cross-validation vs the loaded TOPS QuoteUpdate stream).
 
 ---
 
@@ -34,10 +34,10 @@ Full layout in @plan.md. Quick status:
 
 ### Sprint A — parser ✅ done 2026-05-11
 
-- [x] `com.longexposure.deepplus` package
-- [x] Sealed `DeepPlusMessage` interface
+- [x] `com.longexposure.dpls` package
+- [x] Sealed `DplsMessage` interface
 - [x] 7 trading-message records: AddOrder (a), OrderModify (M), OrderDelete (R), OrderExecuted (L), Trade (T), TradeBreak (B), ClearBook (C)
-- [x] `DeepPlusMessageRouter`
+- [x] `DplsMessageRouter`
 - [x] `SaleConditionFlags` promoted from `tops/` to `wire/`
 - [x] 14 JUnit tests (45 total in the suite)
 
@@ -85,7 +85,7 @@ Everything we built today for TOPS stays in the repo. Its role changes:
 
 - TOPS decoders (`com.longexposure.tops.*`) — produce the reference data for DEEP+ cross-validation
 - The 285M quotes + 7.75M trades already in Postgres for 2026-05-08 — the cross-check reference
-- `TopsMessageRouter` — keeps working; v1 production pipeline calls `DeepPlusMessageRouter` instead but TOPS code is exercised in validation runs
+- `TopsMessageRouter` — keeps working; v1 production pipeline calls `DplsMessageRouter` instead but TOPS code is exercised in validation runs
 
 ---
 

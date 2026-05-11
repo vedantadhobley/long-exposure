@@ -10,6 +10,8 @@ Working notes from reading IEX's market data specifications, distilled to what w
 
 The README has the narrative overview; this doc is the implementation reference.
 
+> **DEEP+ vs DPLS.** IEX's product/spec name for the order-by-order feed is **DEEP+**. The HIST filename token is **DPLS** (the `+` is awkward in filenames/URLs). Same wire format (Message Protocol ID `0x8005`). Throughout this doc, DEEP+ refers to the product/spec; DPLS shows up only when discussing filenames or HIST URLs. Code identifiers (`com.longexposure.dpls.*`, `DplsMessageRouter`, `Feed.DPLS`) use the filename token for naming symmetry with `tops` / `deep`.
+
 ---
 
 ## HIST access
