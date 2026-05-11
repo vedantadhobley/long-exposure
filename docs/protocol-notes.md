@@ -283,9 +283,13 @@ The Order ID space is per-session; `R` (delete) frees an ID but a subsequent `a`
 
 ---
 
-## Parser gotchas to capture (filled in during implementation)
+## Parser gotchas captured during implementation
 
-Stub list — every gotcha encountered while building the parser lands here, and gets a paired check in `DailyTotalsValidator`.
+Every gotcha encountered while building the parser lands here. Real findings get a date; speculative items stay marked TBD until confirmed.
+
+- **2026-05-10 — HIST files are PCAP-NG, not classic libpcap.** Magic bytes at the start of `20260508_IEXTP1_TOPS1.6.pcap.gz` (after gunzip) are `0a 0d 0d 0a` — the PCAP-NG Section Header Block signature. The README and the spec PDFs' "pcap format" wording implied classic libpcap. `PcapReader` auto-detects and handles both; the format-discriminator dispatch is in `PcapReader.open()`. The SHB even self-identifies as a merged file ("File created by merging:" option string), suggesting IEX uses `mergecap` or equivalent in their HIST publishing pipeline.
+
+- **2026-05-10 — IEX-TP heartbeats dominate the early packets.** First several packets in a trading day are heartbeats: IEX-TP header with `Payload Length = 0`, `Message Count = 0`, `First Sequence = 1`, arriving at ~1s intervals (verified: 2026-05-08 file, packets 1–10 at 11:05:18 → 11:05:28 UTC = 7:05 AM ET, well before pre-market). Real market messages begin later, framed by the System Event `O` (Start of Messages). Any parser stage that sums per-packet stats must skip-or-tolerate `Payload Length = 0` packets — they're framing keep-alives, not malformed data.
 
 - **(TBD)** Truncated packets at end-of-file
 - **(TBD)** Sequence-number gaps and how (if) IEX signals them in HIST files (gap fills via TCP unicast don't apply to HIST — every file is supposed to be complete, but defensive coding still matters)

@@ -10,7 +10,7 @@ COPY src ./src
 RUN gradle --no-daemon installDist
 
 FROM eclipse-temurin:21-jre-alpine AS runtime
-RUN apk add --no-cache libpcap   # pcap4j needs libpcap at runtime
+# No libpcap — pcap parsing is implemented in-tree, no native deps required.
 WORKDIR /app
 COPY --from=builder /build/build/install/long-exposure-parser /app/
 ENV PATH="/app/bin:${PATH}"

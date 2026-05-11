@@ -17,9 +17,9 @@ repositories {
 }
 
 dependencies {
-    // pcap parsing — the central dependency
-    implementation("org.pcap4j:pcap4j-core:1.8.2")
-    implementation("org.pcap4j:pcap4j-packetfactory-static:1.8.2")
+    // pcap parsing is implemented in-tree (com.longexposure.pcap.PcapReader)
+    // against the libpcap file format directly — no pcap4j dependency, no
+    // libpcap native runtime required. Streams from .pcap.gz via GZIPInputStream.
 
     // Postgres driver (TimescaleDB speaks PG wire)
     implementation("org.postgresql:postgresql:42.7.4")

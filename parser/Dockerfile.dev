@@ -3,6 +3,5 @@
 # `gradle run`) inside the container during development.
 
 FROM gradle:8.10-jdk21-alpine
-RUN apk add --no-cache libpcap
 WORKDIR /app
 ENTRYPOINT ["gradle", "--no-daemon", "run"]
