@@ -53,7 +53,7 @@ It also demonstrates, in a single project:
 - Production-grade pipeline orchestration with Temporal
 - A real public product with real users
 
-It's open source from day one — MIT licensed — positioned as a reference implementation of the IEX TOPS parser in Java with a public daily-narrative demo on top.
+It's open source from day one — MIT licensed — positioned as **the first public reference implementation of the IEX DEEP+ (DPLS) parser in any language**, with a public daily-narrative demo on top. (Verified 2026-05-11: no open-source DEEP+ parser exists in any language on GitHub.)
 
 ---
 
@@ -190,7 +190,9 @@ Sizes are roughly equivalent across feeds. `DPLS` is the filename token for what
 
 Information-theoretically, **DPLS ⊃ DEEP ⊃ TOPS**: DEEP's price-level book can be derived from DPLS by aggregating order sizes; TOPS's BBO can be derived from DEEP's best price level on each side. So storing more than one feed for the same date is pure duplication.
 
-**Decision: TOPS 1.6 for v1. DPLS / DEEP+ for phase 2 (skipping DEEP entirely).** The reasoning, including why we skip DEEP, lives in `docs/decisions.md`. The short version: DEEP is a stopping point we'd throw away — once we invest in book reconstruction for phase 2, marginal cost to track individual orders (going all the way to DPLS) is small, and the order-by-order narratives are dramatically more on-brand for IEX's transparency mission than depth-only narratives.
+**Decision: DEEP+ / DPLS 1.0 for v1.** The reasoning lives in `docs/decisions.md`. The short version: the morning's "TOPS first, DEEP+ phase 2" plan rested on assuming each feed was 2–3 weeks of work. Real execution pace compressed Days 1–10 of the original plan into one session. With that velocity, deferring DEEP+ no longer makes sense — and the *order-by-order* narratives DEEP+ unlocks ("8 orders posted and cancelled within 50ms — classic spoof shape", "median order time-in-book on SPY collapsed from 800ms to 90ms") are dramatically more on-brand for IEX's transparency mission than the generic top-of-book narratives any feed would support.
+
+**TOPS is the validation oracle, not deferred.** The TOPS parser, message decoders, schema, and 285M-row dataset already loaded for 2026-05-08 stay in the repo — repurposed as the cross-validation reference. Same trading day, derive top-of-book from DEEP+ book state, diff against the real TOPS Quote Update stream. Same logic for trade size sums. Where they agree, the DEEP+ decoder is correct on the overlapping surface (which covers every event type TOPS publishes).
 
 **Out of scope.** TOPS / DEEP / DEEP+ all have companion **SNAP** specifications. SNAP is a TCP request-response service for live consumers joining the multicast mid-day to recover the current book state. It does not appear in HIST and is irrelevant to a T+1 batch pipeline.
 
@@ -402,7 +404,7 @@ Design principles for the browser component (lives in `vedanta-systems`): clean,
 
 ## Open source positioning
 
-The repository is MIT-licensed from day one. The README frames the project as a *reference implementation of the IEX TOPS parser in Java*, with the public daily-narrative site as a working demo. This is on-brand for IEX's transparency mission and avoids the "portfolio piece" framing.
+The repository is MIT-licensed from day one. The README frames the project as **the first open-source reference implementation of the IEX DEEP+ (DPLS) parser in any language**, with the public daily-narrative site as a working demo. The TOPS parser is kept as the validation oracle (and as a contribution to the existing open-source ecosystem alongside it). This positioning is on-brand for IEX's transparency mission and avoids the "portfolio piece" framing.
 
 Repo layout:
 
@@ -416,39 +418,36 @@ Frontend is not part of this repo; see [Frontend integration](#frontend-integrat
 
 ---
 
-## 22-day build plan
+## Build plan
 
-Adjusted from a 20-day plan: added 1 day to event scoring (the hardest tuning problem), added 1 day to validation harness work (do this in parallel with parser dev, not after).
+The original 22-day estimate compressed substantially in practice. Real cadence is captured in `docs/plan.md` and updated as sprints land. Headline structure:
 
-**Days 1–3 — Foundation**
-Set up Gradle project. Multi-stage Dockerfile. Implement `PcapReader` using pcap4j. Parse IEX-TP headers. Get raw message bytes printing to stdout from a real HIST file. Open the GitHub repo public on Day 1.
+**Foundation + TOPS parser + storage (done 2026-05-11, one session)**
+Gradle project, multi-stage Dockerfile, pcap-ng reader (no pcap4j dep), IEX-TP transport decoder, 7 shared admin message decoders, 5 TOPS-specific trading decoders, sealed-interface message hierarchies, `TopsMessageRouter`, 48 unit tests, Postgres + TimescaleDB schema with 8 hypertables + continuous aggregate, COPY-based `TimescaleWriter`. End-to-end: 9.5 GB 2026-05-08 HIST → 294,790,405 messages → Postgres in 22:27. Counts match the parser's in-memory histogram exactly.
 
-**Days 4–7 — TOPS parser + validation harness (in parallel)**
-Implement `TopsMessageRouter` and all core message decoders. Validate price decoding. Unit tests for each decoder. Start the `DailyTotalsValidator` immediately — every new decoder gets a corresponding validation check. Don't wait until the end.
+**DEEP+ parser (next sprints, target ~1 session)**
+Implement the 7 DEEP+ trading-message decoders (Add/Modify/Delete/Execute Order, Trade, Trade Break, Clear Book), the order book state machine (`Map<OrderID, OrderState>` per symbol), extend the schema + writer. Cross-validate against the existing TOPS data (derive top-of-book from DEEP+ book state, compare to the real TOPS Quote Update stream).
 
-**Days 8–10 — Postgres + TimescaleDB + storage**
-Stand up Postgres 16 with the TimescaleDB extension on luv (per the workspace conventions: container on `proxy` network, no host ports; Adminer container alongside for ad-hoc SQL access). Schema for nanosecond-precision TOPS events as a TimescaleDB hypertable. Implement `TimescaleWriter` in Java using JDBC `COPY` for bulk insert. Parse a full day's HIST file end-to-end and verify the data lands.
+**Bootstrap baselines**
+Download 30 trading days of DPLS HIST, parse each through the pipeline. Continuous aggregate populates with rolling 30-day per-symbol metrics. This is the visible launch archive — re-scored and re-narrated once the scorer + narrator land.
 
-**Days 11–13 — Baseline data + bootstrap**
-Implement the rolling-baseline calculation. Backfill against 30 days of historical HIST. Verify baselines look sensible by spot-checking known events (a real halt from the past month should score high; a routine quote on a quiet day should score low).
+**Event scoring**
+`EventScorer` interface taking a decoded event + per-symbol baseline, returning a score + JSON breakdown. Per-event-type scorers including the DEEP+-unique order-flow ones (rapid post-cancel patterns, time-in-book distribution shifts). Tune weights until top-N events on a sample day pass the "would I read this?" check.
 
-**Days 14–17 — Event scoring**
-Implement `EventScorer`. Define significance tiers and scoring weights. Every event surfaces its score breakdown in the data model so it's exposable in the UI and inspectable in tests. Tune until the top-N events on a sample day pass an honest "would I read this?" check.
+**LLM narration**
+Prompt engineering against `llama-large.joi`. **Expected to be the hardest design work** in the project. Cache by event hash. Refuse on incomplete data. Tone: clear, factual, accessible.
 
-**Days 18–19 — LLM narration**
-Prompt engineering for `llama-large.joi`. Implement the narration pipeline with caching by event hash. Generate and review narratives for a week of historical events. Iterate on prompt until the output reads like a sober finance journalist, not an excited blog.
+**Temporal + API**
+Wire the pipeline stages into a proper Temporal workflow with retry policies, heartbeating, replayability. Implement the FastAPI endpoints consumed by vedanta-systems.
 
-**Days 20–21 — Temporal + API**
-Wire pipeline stages into Temporal workflow with proper retry policies and heartbeating. Implement FastAPI endpoints. Full end-to-end pipeline test: download → parse → validate → score → narrate → store → publish.
-
-**Day 22 — vedanta-systems integration + deploy**
-In `~/workspace/dev/vedanta-systems/`: add the `/api/long-exposure/*` nginx proxy, build `src/components/long-exposure-browser.tsx` consuming the API, register the project in `src/App.tsx`. Bring up the production stack on luv. Public launch with 30 backfilled days already narrated and live at `vedanta.systems`.
+**vedanta-systems integration + deploy**
+In `~/workspace/dev/vedanta-systems/`: add the `/api/long-exposure/*` nginx proxy, build `src/components/long-exposure-browser.tsx` consuming the API, register the project in `src/App.tsx`. Public launch at `vedanta.systems` with 30 backfilled days already narrated.
 
 ---
 
 ## What's not in the v1
 
-- DEEP+ / DPLS (order-by-order) — phase 2 (skipping DEEP entirely; see [Data feed selection](#data-feed-selection--tops-deep-dpls) and `docs/decisions.md`)
+- DEEP / TOPS-only historical analysis for pre-2025 dates (DPLS history starts Jan 2025; multi-year analysis would require falling back to those feeds)
 - Real-time streaming (HIST is T+1 only; real-time requires the IEX SIP feed which is a different licensing model)
 - Multi-exchange comparison — IEX only for v1
 - User accounts / saved searches / alerts — purely read-only public for v1

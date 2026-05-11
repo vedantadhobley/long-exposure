@@ -1,81 +1,108 @@
 # TODO
 
-The persistent, project-scoped scratchpad. Cross-references @plan.md for phase context and @decisions.md for the reasoning behind structural choices.
+Project scratchpad, agent + human editable. Cross-references @plan.md for full context and @decisions.md for the reasoning behind structural choices.
 
-This file is editable by both humans and the agent during sessions. Append-friendly; use markdown checkboxes; reference file:line where helpful.
+Last refresh: 2026-05-11 end-of-day. Pivot recorded: v1 is now DEEP+, not TOPS. See `docs/decisions.md` 2026-05-11 entry.
 
 ---
 
-## Blockers (must resolve before code starts)
+## ⏯ Start of next session — paste-ready checklist
 
-- [x] ~~Create `.env` from `.env.example`~~ (2026-05-10) — `leuser/lepass` for events DB, `temporal/lepass` for Temporal metadata, matching the found-footy `ffuser/ffpass` convention.
-- [ ] **Apply Caddyfile entries** from @../deploy/INFRA-NOTES.md to `~/workspace/proxy/Caddyfile`, then restart caddy. Until this lands, even the API health-check is unreachable at `*.luv` URLs.
-- [ ] **Write `parser/src/main/resources/schema.sql`** — there is no SQL committed yet. Hypertable + continuous-aggregate definitions need to live in the repo before Day 8 lands.
+1. **Download the 2026-05-08 DPLS file** (same date as the TOPS data already in DB, so cross-validation is symbol-for-symbol on the same day):
 
-## Day 1–3 (foundation work, in progress)
+   ```bash
+   curl -s 'https://iextrading.com/api/1.0/hist?date=20260508' \
+     | jq '.[] | select(.feed == "DPLS")'
+   # → copy the link, then:
+   curl -L -o ~/workspace/data/long-exposure/raw/20260508_IEXTP1_DPLS1.0.pcap.gz '<link>'
+   ```
 
-- [ ] Implement `pcap/PcapReader.java` — currently a one-line stub
-- [ ] Implement `transport/IexTpDecoder.java` — currently a one-line stub
-- [ ] Replace `Main.java`'s "stub" banner with a meaningful Day-1 smoke test (read a sample pcap, print the first 5 IEX-TP headers)
+   Expected size: ~7–9 GB compressed.
 
-## Stub-fill backlog (Java)
+2. **Verify the dev stack is still up** (postgres + temporal + worker containers):
 
-All currently one-line placeholders under `parser/src/main/java/com/longexposure/`:
+   ```bash
+   docker compose -f docker-compose.dev.yml ps
+   ```
 
-- [ ] `pcap/PcapReader.java`
-- [ ] `transport/IexTpDecoder.java`
-- [ ] `tops/TopsMessageRouter.java`
-- [ ] `tops/messages/TopsMessage.java` (base interface)
-- [ ] `tops/messages/QuoteUpdate.java`
-- [ ] `tops/messages/TradeReport.java`
-- [ ] `tops/messages/TradingStatus.java`
-- [ ] `tops/messages/SecurityDirectory.java`
-- [ ] `tops/messages/SystemEvent.java`
-- [ ] Trade Break and Official Price decoders (no stubs exist yet — add them)
-- [ ] `validation/DailyTotalsValidator.java`
-- [ ] `storage/TimescaleWriter.java`
-- [ ] `scoring/EventScorer.java`
+3. **Tell me the file is ready** and I'll start on Sprint A (DEEP+ parser).
 
-## Temporal worker wiring (when stubs are filled)
+---
 
-- [ ] Replace `Main.java`'s `Thread.currentThread().join()` keep-alive with Temporal worker registration (connect to `TEMPORAL_HOST`, register activities, block on the worker)
-- [ ] Define the workflow class with the activity sequence in @architecture.md
-- [ ] Per-activity retry policies + timeouts + heartbeat configuration
+## DEEP+ v1 sprint work (top of priority)
 
-## API endpoints (none implemented yet)
+Full layout in @plan.md "DEEP+ v1 sprints" section. Quick checklist:
 
-Endpoint stubs are listed as comments in `api/src/long_exposure_api/main.py`. To implement:
+### Sprint A — parser
+- [ ] `com.longexposure.deepplus` package
+- [ ] Sealed `DeepPlusMessage` interface (mirrors `TopsMessage`)
+- [ ] 7 trading-message records: AddOrder (a, 0x61), OrderModify (M, 0x4D), OrderDelete (R, 0x52), OrderExecuted (L, 0x4C), Trade (T, 0x54), TradeBreak (B, 0x42), ClearBook (C, 0x43)
+- [ ] `DeepPlusMessageRouter` (admin first, then DEEP+ trading)
+- [ ] JUnit tests using spec worked examples — `deep-plus-1.02.pdf` at `~/workspace/data/long-exposure/specs/`, pages 16–22
 
-- [ ] `GET /api/v1/market/today`
-- [ ] `GET /api/v1/market/{date}`
-- [ ] `GET /api/v1/market/{date}/events`
-- [ ] `GET /api/v1/ticker/{symbol}/history`
-- [ ] `GET /api/v1/event/{event_id}` — must include the score breakdown
+### Sprint B — order book state machine
+- [ ] `OrderBook` class: `Map<Long orderId, OrderState>` per symbol
+- [ ] Updates on Add/Modify/Delete/Execute
+- [ ] ClearBook drops all entries
+- [ ] BBO derivation method
+- [ ] Aggregate depth metrics
 
-## vedanta-systems integration (cross-repo, Day 22)
+### Sprint C — storage extensions
+- [ ] New `orders` hypertable in `schema.sql` (or extend events — design decision after seeing data shape)
+- [ ] `TimescaleWriter` extensions for the new message types
+- [ ] End-to-end DEEP+ run
 
-Work happens in `~/workspace/dev/vedanta-systems/` — track here so it's visible from this project's state:
+### Sprint D — cross-validation against existing TOPS data
+- [ ] Per-second BBO derived from DEEP+ book == TOPS Quote Update BBO (same symbol/second)
+- [ ] Per-symbol DEEP+ Order Executed size sum == TOPS Trade Report size sum
+- [ ] Investigate any divergence
 
-- [ ] Add `/api/long-exposure/*` location to vedanta-systems' `nginx.conf` (mirror existing `/api/found-footy/*`, `/api/spin-cycle/*`)
-- [ ] Build `src/components/long-exposure-browser.tsx` — timeline UI
-- [ ] Register project entry in `src/App.tsx` under `~/workspace/long-exposure`
-- [ ] Add the GitHub link entry in `App.tsx`'s `projectGithubLinks` map
-- [ ] Sanity-check end-to-end: `curl https://vedanta.systems/api/long-exposure/v1/health`
+---
 
-## Cleanup / scaffolding follow-ups
+## After DEEP+ ships
 
-- [x] ~~Remove the erroneous Svelte SPA scaffold~~ (2026-05-10)
-- [x] ~~Strip frontend service from compose files~~ (2026-05-10)
-- [x] ~~Drop the `longexposure.vedanta.systems` Cloudflare route from INFRA-NOTES~~ (2026-05-10)
-- [x] ~~Drop `VITE_API_BASE_URL` from `.env.example`~~ (2026-05-10)
-- [x] ~~Update README service-layout table, frontend section, day-22 plan, repo layout~~ (2026-05-10)
-- [ ] Resolve the `pipeline/` references in old README copy — the worker *is* the parser, no separate `pipeline/` dir. (README has been corrected; double-check once `Main.java` becomes the worker entry point that no comments still reference `pipeline/`.)
-- [ ] Decide whether the `frontend/Dockerfile` `EXPOSE 3000` declaration in any leftover doc still makes sense — probably needs a final pass.
+The remaining post-parser work, full details in @plan.md:
 
-## Deferred / phase 2
+- [ ] **Bootstrap baselines**: parse 30 days of DPLS HIST → continuous aggregate populates → ready for scorer
+- [ ] **Event scoring** (`com.longexposure.scoring.EventScorer`) — the algorithmic core. Per-event-type scoring with transparent JSON breakdown for "why this event scored high"
+- [ ] **LLM narration** — prompt engineering against `llama-large.joi`. Expected to be the hardest part of the project.
+- [ ] **Temporal workflow** — convert the smoke-test loop into a proper workflow with retries + heartbeats
+- [ ] **FastAPI endpoints** — the read-only API consumed by vedanta-systems
+- [ ] **vedanta-systems integration** — `/api/long-exposure/*` nginx route + `long-exposure-browser.tsx` component
+- [ ] **Production bring-up** on luv (Caddyfile entries from `deploy/INFRA-NOTES.md`)
+- [ ] **Public launch** with 30-day backfilled narrative archive
 
-- [ ] DEEP feed (depth-of-book) ingestion if liquidity analysis is added
+---
+
+## TOPS work — repurposed as validation oracle (not deferred, not deleted)
+
+Everything we built today for TOPS stays in the repo. Its role changes:
+
+- TOPS decoders (`com.longexposure.tops.*`) — produce the reference data for DEEP+ cross-validation
+- The 285M quotes + 7.75M trades already in Postgres for 2026-05-08 — the cross-check reference
+- `TopsMessageRouter` — keeps working; v1 production pipeline calls `DeepPlusMessageRouter` instead but TOPS code is exercised in validation runs
+
+---
+
+## Deferred / phase 2 (post-launch)
+
 - [ ] Real-time streaming (requires the IEX SIP feed; different licensing model)
 - [ ] Multi-exchange comparison
 - [ ] User accounts / saved searches / alerts
-- [ ] DuckDB as a dev-time companion against parquet exports of the events table
+- [ ] DEEP / TOPS-only historical analysis for pre-2025 dates (DPLS history doesn't go back that far)
+
+---
+
+## Bug-catching infra (low-but-real priority)
+
+- [ ] **`DailyTotalsValidator`** — cross-check parsed trade volumes/counts against IEX's published per-symbol daily summaries. Works for both feeds. Still 0 LOC written. Needs the `/stats` endpoint shape figured out.
+- [ ] **Reference-parser diff (TOPS only)** — wire `WojciechZankowski/iextrading4j-hist` as a test dep, diff message streams against ours for a sample TOPS file. Confirms TOPS decoder correctness (which we then use to validate DEEP+).
+
+---
+
+## Cleanup / done-today notes
+
+- [x] ~~Frontend scaffold removed~~ (2026-05-10)
+- [x] ~~Caddy `caddy.d/` per-project split~~ (2026-05-10, on the proxy side)
+- [x] ~~Day 1–10 implementation~~ (2026-05-11)
+- [x] ~~End-to-end 9.5 GB → 295M Postgres rows~~ (2026-05-11, 22:27 min)

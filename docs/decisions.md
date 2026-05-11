@@ -4,6 +4,67 @@ Append-only record of architectural and operational decisions, ordered by date. 
 
 ---
 
+## 2026-05-11 — Pivot: DEEP+ is the v1 product; TOPS becomes the validation oracle
+
+**Supersedes the 2026-05-10 "TOPS v1 / DEEP+ phase 2" decision below.** The reasoning in that entry still applies in isolation, but a load-bearing assumption — "each feed is 2–3 weeks of work" — was invalidated by today's execution pace.
+
+**What changed.** On 2026-05-11 we compressed Days 1–10 of the README plan into roughly one working day:
+- pcap-ng + libpcap reader (~270 LOC, no native deps)
+- IEX-TP transport decoder
+- All 7 admin message decoders + sealed `AdminMessage` interface
+- All 5 TOPS-specific trading decoders + `TopsMessageRouter`
+- 48 passing unit tests
+- Postgres + TimescaleDB schema with 8 hypertables + continuous aggregate
+- COPY-based `TimescaleWriter`
+- End-to-end run: 9.5 GB 2026-05-08 HIST → 294,790,405 messages written in 22:27 min
+
+The morning's "phase 2 = 2–3 week post-launch sprint" was already an estimate, not a measurement. Given actual velocity, the DEEP+ parser is a 1–2 session sprint — comparable to one day's TOPS work. **Treating TOPS as a separate v1 launch with DEEP+ deferred no longer makes sense.**
+
+**Decided.**
+
+- **v1 = DEEP+** (DPLS feed). All scoring, narration, UI work targets DEEP+ event types from day 1.
+- **TOPS code stays.** It's repurposed as a **validation oracle**: same trading day, parse both feeds, derive TOPS-equivalent BBO from DEEP+ book state, diff against the actual TOPS feed. Where they disagree, the DEEP+ decoder has a bug.
+- **The 7.75M trades + 285M quotes already loaded in Postgres are not thrown away** — they become the cross-check reference data for DEEP+ decoder correctness.
+- **Positioning shifts** from "reference implementation of the IEX TOPS parser in Java" to **"first open-source reference implementation of IEX DEEP+ in any language."** Verified 2026-05-11: no public DEEP+ parser exists in any language (GitHub search results below). This is a genuine community contribution.
+
+**Why the velocity argument is load-bearing.**
+
+The morning's 7 reasons for TOPS-first reduce to two structural concerns when velocity is fast:
+
+1. **Validation difficulty for DEEP+** — book-state reconstruction has no analogous "compare to a published number" check.
+2. **No reference parser exists** for DEEP+ in any language.
+
+Both are real but **both are mitigatable**, and the mitigation is exactly the TOPS work we already did:
+- The same trading day's TOPS feed serves as the reference. Derive top-of-book from the DEEP+ order-book state machine and compare to the canonical TOPS Quote Update / Trade Report stream. Per-symbol per-second BBO must match. Per-symbol total trade size + count must match.
+- We already have the TOPS infrastructure (parser + writer + 285M loaded quotes for 2026-05-08). Reusing it as a validation oracle is essentially free.
+
+The five other morning-of reasons (stepping-stone reuse, ship risk, LLM prompt iteration time, spec maturity, reputation narrative) either no longer apply at our pace or now favor the pivot:
+- Stepping-stone reuse: confirmed today. ~60% of parser LOC is in the shared `admin/` + `wire/` + `transport/` + `pcap/` packages and works unchanged for DEEP+.
+- Ship risk: lower at our pace than feared.
+- LLM iteration: we want the scorer designed against DEEP+ event types from day 1 (richer narrative surface) rather than re-design after a TOPS-only v1 launch.
+- Spec maturity: DEEP+ 1.02 spec is excellent and we've read it cover-to-cover.
+- Reputation: "first open-source DEEP+ parser, with a public narrative product on top" is strictly better than "shipped a generic TOPS-only narrative, then added DEEP+."
+
+**GitHub search verification (2026-05-11).** Queries `IEX DEEP+ parser`, `IEX DPLS`, `iex order book parser` — all return either zero results or only TOPS/DEEP parsers from years ago. The 5 existing parsers (`WojciechZankowski/iextrading4j-hist` Java, `rob-blackbourn/iex_parser` Python, three C++ DEEP parsers, `B1tWhys/iextool` Python) all predate the Jan 2025 DEEP+ spec publication and don't support its trading-message set.
+
+**What this changes in the codebase / docs.**
+
+- `docs/plan.md` — phase 2 section reframed as "next sprints"; Day 11+ moves to DEEP+ implementation.
+- `README.md` — "reference implementation of the IEX TOPS parser" → "first open-source IEX DEEP+ parser." TOPS demoted to "validation oracle." Feed-selection section reframed.
+- `AGENTS.md` — "touching feed-handling code" guardrail flipped (DEEP+ is v1; TOPS is the validator).
+- `docs/todo.md` — start-of-next-session checklist now leads with "download a DPLS .pcap.gz."
+- Source code layout (`com.longexposure.tops.*` for TOPS, future `com.longexposure.deepplus.*` for DEEP+) is unchanged — same per-feed package convention, just different priority order.
+
+**Open risks (unchanged from morning analysis, accepted).**
+
+- No reference parser to cross-check against. Mitigated by the TOPS cross-validation above.
+- DEEP+ history only back to Jan 2025 (~16 months). Fine for narrating yesterday + 30-day baselines; rules out multi-year analysis.
+- Book-state validation is structurally harder than trades-totals validation. We'll likely need a SNAP-equivalent reconstruction comparison as a tertiary check eventually.
+
+**What's still open.** When this entry was written we hadn't yet downloaded a DPLS file. First action next session: pull the 2026-05-08 DPLS HIST file (same date as the TOPS data already loaded) so cross-validation is a same-day same-symbols comparison.
+
+---
+
 ## 2026-05-10 — TOPS for v1, DEEP+ (not DEEP) for phase 2; SNAP feeds out of scope
 
 **Context.** The README originally specified TOPS-only for v1 with DEEP earmarked for phase 2, citing file sizes (TOPS "few hundred MB", DEEP "13 TB across full history"). Pulling real numbers from the HIST API for recent dates showed all three feeds (TOPS, DEEP, DEEP+/DPLS) are within 5% of each other in compressed size — ~7 GB/day in 2025, ~2.9 GB/day in 2024. The original size-based argument for TOPS doesn't hold; the choice has to rest on parser complexity, validation difficulty, and ship risk instead.

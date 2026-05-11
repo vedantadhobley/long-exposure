@@ -60,7 +60,7 @@ Mirror this pattern for any future personal-project work: per-project repos ship
 - **Touching the events schema**: the events table is a TimescaleDB hypertable. Schema migrations need to handle the hypertable conventions (`create_hypertable`, continuous aggregate refresh policies). See @docs/decisions.md for why TimescaleDB over QuestDB / DuckDB / kdb+.
 - **Worker/API talking to each other**: they don't. The API is read-only against the events + narratives tables in Postgres. The worker writes via JDBC `COPY`. No direct API-to-worker calls.
 - **LLM calls**: only from Temporal activities, only inside `NarrateEventsActivity`. Cache by event hash — re-running a day's pipeline must not re-narrate identical events.
-- **Touching feed-handling code**: TOPS is v1, DEEP+/DPLS is phase 2 (NOT DEEP — see @docs/decisions.md). Admin decoders are shared across feeds (`com.longexposure.admin.*`); per-feed trading decoders live in `com.longexposure.tops.*` and later `com.longexposure.deepplus.*`. `DownloadHistActivity` is parameterized on `feed_name` from day 1.
+- **Touching feed-handling code**: **DEEP+ (DPLS) is v1** as of the 2026-05-11 pivot (see @docs/decisions.md). TOPS code in `com.longexposure.tops.*` is **repurposed as the validation oracle**, not deleted. Admin decoders in `com.longexposure.admin.*` are shared across feeds and reused as-is. DEEP+ trading decoders go in `com.longexposure.deepplus.*` (mirrors the existing `com.longexposure.tops.*` package layout). When implementing a DEEP+ decoder, cross-check it against the corresponding TOPS data already in the events DB for the same trading day.
 
 ## Reference material — local files
 
@@ -69,10 +69,15 @@ Mirror this pattern for any future personal-project work: per-project repos ship
 
 ## Active state
 
-- **Phase**: pre-implementation. Repo is scaffolded; almost everything in `parser/src/` is a one-line stub. See @docs/plan.md for the day-by-day plan and @docs/todo.md for what's actually next.
-- **Bring-up status**: stack has never been started end-to-end on luv. Caddyfile entries from @deploy/INFRA-NOTES.md not yet applied; `.env` not yet created.
-- **Schema status**: no SQL committed yet.
-- **Frontend cleanup (2026-05-10)**: Removed an erroneous Svelte SPA scaffold + a stray `longexposure.vedanta.systems` Cloudflare route that the original scaffold introduced. Per-project repos do not host frontends; vedanta-systems is the unified portal. See @docs/decisions.md for the writeup.
+- **Phase**: post-TOPS-parser, **pivoting to DEEP+ as v1** (decision recorded 2026-05-11 in @docs/decisions.md). TOPS work stays as the validation oracle. Next session starts on the DEEP+ parser; see @docs/todo.md for the paste-ready startup checklist.
+- **Implementation status** (as of 2026-05-11):
+  - Parser stack done end-to-end for TOPS: pcap-ng reader, IEX-TP decoder, 7 admin decoders + sealed `AdminMessage`, 5 TOPS trading decoders + `TopsMessageRouter`, 48 passing JUnit tests
+  - Storage: `schema.sql` with 8 hypertables + continuous aggregate; `SchemaManager` + `TimescaleWriter` with COPY-based bulk insert
+  - End-to-end verified: 9.5 GB 2026-05-08 TOPS HIST → 294,790,405 messages → Postgres in 22:27 min
+  - Continuous aggregate `daily_volume_by_symbol` populated for 2026-05-08 (9,134 symbols, 770M shares, 7.75M trades)
+- **Bring-up status**: dev stack running on luv; prod stack on luv compose not yet started, Caddyfile entries for `*.luv` already applied earlier this week.
+- **DEEP+ status**: spec PDF at `~/workspace/data/long-exposure/specs/deep-plus-1.02.pdf` fully read. No data downloaded yet. No code written yet — that's tomorrow's first sprint.
+- **Frontend cleanup (2026-05-10)**: Removed an erroneous Svelte SPA scaffold; vedanta-systems is the unified portal. See @docs/decisions.md.
 
 ## Memory model (for me, the agent)
 
