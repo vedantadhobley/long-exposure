@@ -8,6 +8,8 @@ import com.longexposure.admin.ShortSalePriceTestStatus;
 import com.longexposure.admin.SystemEvent;
 import com.longexposure.admin.TradingStatus;
 import com.longexposure.pcap.PcapReader;
+import com.longexposure.storage.SchemaManager;
+import com.longexposure.storage.TimescaleWriter;
 import com.longexposure.tops.AuctionInformation;
 import com.longexposure.tops.OfficialPrice;
 import com.longexposure.tops.QuoteUpdate;
@@ -19,6 +21,8 @@ import com.longexposure.wire.Bytes;
 import com.longexposure.wire.IexMessage;
 
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -61,13 +65,17 @@ public final class Main {
         }
 
         int printLimit = parseIntOrDefault(System.getenv("IEX_PRINT_LIMIT"), DEFAULT_PRINT_LIMIT);
-        smokeTest(Path.of(filePath), printLimit);
+        long maxPackets = parseLongOrDefault(System.getenv("IEX_MAX_PACKETS"), Long.MAX_VALUE);
+        boolean writeDb = "true".equalsIgnoreCase(System.getenv("IEX_WRITE_DB"));
+        smokeTest(Path.of(filePath), printLimit, maxPackets, writeDb);
     }
 
-    private static void smokeTest(final Path path, final int printLimit) throws Exception {
+    private static void smokeTest(final Path path, final int printLimit, final long maxPackets, final boolean writeDb) throws Exception {
         System.out.println("== TOPS smoke test ==");
         System.out.println("file:        " + path);
         System.out.println("print limit: " + printLimit + " messages (after first non-heartbeat)");
+        System.out.println("max packets: " + (maxPackets == Long.MAX_VALUE ? "unlimited" : String.valueOf(maxPackets)));
+        System.out.println("write to DB: " + writeDb);
 
         long packetCount = 0;
         long heartbeatCount = 0;
@@ -75,6 +83,15 @@ public final class Main {
         int printed = 0;
         Map<Byte, Long> typeHistogram = new HashMap<>();
 
+        Connection conn = null;
+        TimescaleWriter writer = null;
+        if (writeDb) {
+            conn = openConnection();
+            SchemaManager.apply(conn);
+            writer = new TimescaleWriter(conn, "TOPS");
+        }
+
+        long startNanos = System.nanoTime();
         try (PcapReader reader = PcapReader.open(path)) {
             System.out.println("pcap:        format=" + reader.format()
                     + " byteOrder=" + reader.byteOrder()
@@ -84,6 +101,7 @@ public final class Main {
             byte[] payload;
             while ((payload = reader.nextUdpPayload()) != null) {
                 packetCount++;
+                if (packetCount > maxPackets) break;
                 if (payload.length < IexTpDecoder.HEADER_BYTES) continue;
                 IexTpDecoder.Header h = IexTpDecoder.decode(payload);
                 if (h.messageCount() == 0 || h.payloadLength() == 0) {
@@ -101,13 +119,18 @@ public final class Main {
                     messageCount++;
                     typeHistogram.merge(typeByte, 1L, Long::sum);
 
-                    if (printed < printLimit) {
-                        try {
-                            IexMessage m = TopsMessageRouter.decode(typeByte, payload, pos);
+                    try {
+                        IexMessage m = TopsMessageRouter.decode(typeByte, payload, pos);
+                        if (writer != null) {
+                            writer.writeMessage(m);
+                        }
+                        if (printed < printLimit) {
                             System.out.printf("[pkt %d msg %d] %s%n",
                                     packetCount, messageCount, format(m));
                             printed++;
-                        } catch (IllegalArgumentException e) {
+                        }
+                    } catch (IllegalArgumentException e) {
+                        if (printed < printLimit) {
                             System.err.printf("[pkt %d msg %d] decode failed type=0x%02x: %s%n",
                                     packetCount, messageCount, typeByte & 0xff, e.getMessage());
                             printed++;
@@ -118,8 +141,17 @@ public final class Main {
             }
         }
 
+        if (writer != null) {
+            writer.close();
+        }
+        if (conn != null) {
+            conn.close();
+        }
+
+        long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
         System.out.println();
         System.out.println("== summary ==");
+        System.out.println("elapsed:    " + elapsedMs + " ms");
         System.out.println("packets:    " + packetCount);
         System.out.println("heartbeats: " + heartbeatCount);
         System.out.println("messages:   " + messageCount);
@@ -130,6 +162,24 @@ public final class Main {
                         e.getKey() & 0xff,
                         printable(e.getKey()),
                         e.getValue()));
+        if (writer != null) {
+            System.out.println("rows written:");
+            writer.totalRows().entrySet().stream()
+                    .filter(e -> e.getValue() > 0)
+                    .sorted(Map.Entry.<TimescaleWriter.Table, Long>comparingByValue().reversed())
+                    .forEach(e -> System.out.printf("  %-16s %s%n", e.getKey().tableName, e.getValue()));
+        }
+    }
+
+    private static Connection openConnection() throws Exception {
+        String host = System.getenv().getOrDefault("POSTGRES_HOST", "localhost");
+        String port = System.getenv().getOrDefault("POSTGRES_PORT", "5432");
+        String db   = System.getenv().getOrDefault("POSTGRES_DB", "longexposure");
+        String user = System.getenv().getOrDefault("POSTGRES_USER", "leuser");
+        String pwd  = System.getenv().getOrDefault("POSTGRES_PASSWORD", "lepass");
+        String url = "jdbc:postgresql://" + host + ":" + port + "/" + db;
+        System.out.println("db:          " + url + " (user=" + user + ")");
+        return DriverManager.getConnection(url, user, pwd);
     }
 
     private static String format(final IexMessage m) {
@@ -190,6 +240,15 @@ public final class Main {
         if (s == null || s.isBlank()) return dflt;
         try {
             return Integer.parseInt(s.trim());
+        } catch (NumberFormatException e) {
+            return dflt;
+        }
+    }
+
+    private static long parseLongOrDefault(final String s, final long dflt) {
+        if (s == null || s.isBlank()) return dflt;
+        try {
+            return Long.parseLong(s.trim());
         } catch (NumberFormatException e) {
             return dflt;
         }

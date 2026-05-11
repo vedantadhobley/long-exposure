@@ -43,13 +43,12 @@ This plan is the agent-editable source of truth. The README has a condensed pros
 
 ## Days 8–10 — Postgres + TimescaleDB + storage
 
-- [ ] Write `parser/src/main/resources/schema.sql` defining:
-  - [ ] `events` table → `create_hypertable` on trade-time column
-  - [ ] `narratives` table keyed by event hash
-  - [ ] Continuous aggregates for the T-30 baselines (symbol × metric)
-- [ ] Apply schema on worker startup (or via a one-shot Temporal activity)
-- [ ] Implement `storage.TimescaleWriter` — JDBC `COPY` for bulk insert from the parser
-- [ ] Parse a full day's HIST file end-to-end and verify the data lands. Spot-check via Adminer.
+- [x] Write `parser/src/main/resources/schema.sql` — per-message-type hypertables (trades / trade_breaks / quotes / status_events / auction_info / official_prices / securities / retail_liquidity), narratives table keyed by event_hash, pipeline_runs for Temporal bookkeeping. Every event table stores both TIMESTAMPTZ (hypertable partition) and BIGINT nanos (preserves spec precision). `feed_source` column on every event row so phase-2 DEEP+ data lands alongside without schema churn.
+- [x] Continuous aggregate `daily_volume_by_symbol` plus a `symbol_baseline_30d` view doing the rolling 30-trading-day window — feeds the scorer's "is this event unusual?" comparisons.
+- [x] `SchemaManager.apply()` — JDBC, reads schema.sql from classpath, splits on `;`, executes idempotently (every DDL uses `IF NOT EXISTS` / `if_not_exists => TRUE`).
+- [x] `TimescaleWriter` — COPY-based bulk insert, one StringBuilder buffer per table, auto-flushes at 100K rows. ~50–200K rows/sec; row-by-row INSERT can't keep up with 300M messages/day.
+- [x] Wire into `Main.java` smoke test, gated by `IEX_WRITE_DB=true` env var.
+- [x] End-to-end run: 9.5 GB 2026-05-08 HIST → Postgres, **22:27 minutes**. All 294,790,405 messages written. Counts match parser histogram exactly across every table. Continuous aggregate refreshed and confirmed: 9,134 symbols traded, 770M shares total. Throughput ~219K rows/sec via COPY. Spot-checks in `docs/sql/spot-check.sql` confirm sensible top-volume tickers (TZA, BITO, NVD, NVDA, INTC, ...), 105 trading halts, 922 Reg SHO triggers, exact 6 SystemEvents bracketing the session.
 
 ## Days 11–13 — Baseline data + bootstrap
 
