@@ -147,16 +147,18 @@ Reframed 2026-05-11 — see `docs/decisions.md`. The TOPS work done today is rep
 - [ ] Compute aggregate book metrics (best-price size, depth at level)
 - [ ] `OrderBookManager` per symbol; route messages from the parser stream
 
-### Sprint C — Storage extensions
+### Sprint C — Storage extensions ✅ done 2026-05-12
 
-- [ ] New `orders` hypertable in `schema.sql` (or extended events table — TBD by design)
-- [ ] `TimescaleWriter` extensions for DEEP+ message types
-- [ ] End-to-end run: DEEP+ .pcap.gz → Postgres
+- [x] 5 new hypertables in `schema.sql`: `orders_add`, `orders_modify`, `orders_delete`, `orders_executed`, `clear_books`. DPLS Trade/TradeBreak share existing `trades`/`trade_breaks` via `feed_source='DPLS'`.
+- [x] `TimescaleWriter` extensions: 5 new Table enum entries, 7 new appenders, `IexMessage → DplsMessage` dispatch in `writeMessage()`.
+- [x] End-to-end run on 2026-05-08 DPLS: 364,098,518 rows written in 35:07 (~174 K rows/sec), zero loss, per-type counts match the parser histogram exactly.
+- [x] **Cross-feed trade-volume validation in SQL**: 9,134 / 9,134 symbols match, 0 share delta — reproducible from loaded DB, not just in-memory parser run.
 
-### Sprint D — Cross-validation against TOPS
+### Sprint D — Cross-validation against TOPS ✅ done 2026-05-11/12
 
-- [x] **Trade-level**: SUM(OrderExecuted.size + Trade.size) per symbol from DEEP+ == SUM(TradeReport.size) per symbol from TOPS. **Verified 2026-05-11 on the 2026-05-08 pair: 9,134/9,134 symbols match exactly, 0 mismatches, 0 share delta.** Throughput ~3.75M msg/sec across 364M DEEP+ messages.
-- [ ] **BBO-level**: per-second BBO derived from DEEP+ book state == TOPS Quote Update BBO for the same symbol/second. Blocked on Sprint B.
+- [x] **Trade-level**: SUM(OrderExecuted.size + Trade.size) per symbol from DPLS == SUM(TradeReport.size) per symbol from TOPS. 9,134/9,134 symbols match exactly, 0 mismatches, 0 share delta.
+- [x] **BBO-level**: per-symbol BBO derived from DPLS book state vs TOPS Quote Update BBO. **99.4184 % match across 2 trading days**; full analysis + residual root cause in @validation-results.md.
+- [x] **Triangle leg added**: DPLS↔DEEP price-level cross-check (TOPS-independent). 100.0000 % on both days. The load-bearing correctness claim.
 
 ### What's reused unchanged from today
 
@@ -170,7 +172,7 @@ Reframed 2026-05-11 — see `docs/decisions.md`. The TOPS work done today is rep
 
 ### Known open questions
 
-- **Schema design**: order-level events as their own `orders` hypertable, or extended `events`? Best decided after Sprint A so we can see the actual data volume distribution.
+- ~~**Schema design**: order-level events as their own `orders` hypertable, or extended `events`?~~ → Resolved Sprint C: separate per-event-type tables (`orders_add`/`orders_modify`/`orders_delete`/`orders_executed`/`clear_books`), matching the existing TOPS-side pattern.
 - **History depth**: DPLS in HIST only goes back to Jan 2025 (~16 months). 30-day baselines + last-N-day narrations are fine. Multi-year historical analysis would require TOPS+DEEP fallback.
 - **Book state validation**: cross-checking against TOPS works for the BBO-derivable subset. Deep-book metrics (depth at level 2+) have no external reference; we'd accept "internally consistent" as the bar for those.
 

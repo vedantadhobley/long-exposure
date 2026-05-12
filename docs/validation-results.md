@@ -58,7 +58,8 @@ round-lot from prior-day close).
 
 | Validation | Match rate | Elapsed |
 |---|---|---|
-| Trade aggregates (DPLS sum vs TOPS sum, per symbol) | **9,134 / 9,134 symbols, 0 share delta** | n/a |
+| Trade aggregates (DPLS sum vs TOPS sum, per symbol) — in-memory | **9,134 / 9,134 symbols, 0 share delta** | n/a |
+| Trade aggregates — reproducible from SQL on the loaded DB (post-Sprint C) | **9,134 / 9,134 symbols, 0 share delta** | n/a |
 | DPLS ↔ DEEP price-level | **100.0000 %** — 4 mismatched of 346,549,880 PLUs (~10⁻⁸ rate) | 11.7 min |
 | DPLS → TOPS BBO | **99.4184 %** — 1,658,391 mismatched of 285,154,349 QUs | 9.5 min |
 | DEEP → TOPS BBO | **99.4184 %** — identical numbers to DPLS→TOPS | 8.8 min |

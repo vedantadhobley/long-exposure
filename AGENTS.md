@@ -72,19 +72,19 @@ Mirror this pattern for any future personal-project work: per-project repos ship
 
 ## Active state
 
-- **Phase**: parsers + book reconstruction + cross-validation triangle done across two trading days. **Storage extensions for DPLS tables (Sprint C) is next** — schema needs `orders` hypertable plumbing; see @docs/todo.md.
+- **Phase**: parsers + book reconstruction + cross-validation triangle + DPLS storage all done across two trading days. **Temporal scaffolding is next** — wrap the existing parse-and-write loop into a Temporal workflow with retries / heartbeats / cron schedule; downstream activities (scoring, narration, storage of narratives) layer on top later. See @docs/todo.md for the paste-ready next-session checklist.
 - **Implementation status** (as of 2026-05-12):
   - Pcap-ng reader, IEX-TP decoder, 7 admin decoders + sealed `AdminMessage`, common `IexMessage` marker, shared `wire/` package.
   - **TOPS parser**: 5 trading decoders + `TopsMessageRouter`. 295 M messages loaded to Postgres in 22:27 for 2026-05-08.
-  - **DPLS parser**: 7 trading decoders + `DplsMessageRouter`, order-level `OrderBook` + manager. Throughput ≈ 3.75 M msg/sec.
+  - **DPLS parser**: 7 trading decoders + `DplsMessageRouter`, order-level `OrderBook` + manager. Throughput ≈ 3.75 M msg/sec parse-only; 364 M rows written to Postgres in 35:07 (~174 K rows/sec) end-to-end.
   - **DEEP parser**: `PriceLevelUpdate` decoder + `DeepMessageRouter`, price-level `PriceLevelBook` + manager. Reuses TOPS decoders for shared T/B/X/A trading types.
-  - **Cross-validation triangle**: DPLS↔DEEP (price-level), DPLS→TOPS BBO, DEEP→TOPS BBO. Results captured in @docs/validation-results.md — two consecutive days (2026-05-07 and 2026-05-08) with **100.000 % DPLS↔DEEP** (the load-bearing correctness claim) and **99.39 % BBO match**, parsers bug-equivalent down to the share. Residual ~0.6 % is a TOPS-side spec/data gap (per-symbol round-lot tier from prior close); fully documented, requires external data to close further.
+  - **Cross-validation triangle**: DPLS↔DEEP (price-level), DPLS→TOPS BBO, DEEP→TOPS BBO. Results captured in @docs/validation-results.md — two consecutive days (2026-05-07 and 2026-05-08) with **100.000 % DPLS↔DEEP** (the load-bearing correctness claim) and **99.4184 % BBO match**, parsers bug-equivalent down to the share. Residual ~0.6 % is a TOPS-side spec/data gap (per-symbol round-lot tier not in any published spec); fully documented, requires external data to close further.
   - **Tests**: full suite passing (`IexTpDecoder`, admin, TOPS, DPLS, DEEP, `wire/RoundLot` + `wire/ProtectedBbo` + book state-machine tests).
-  - **Storage**: 8 TOPS-side hypertables populated; DPLS / DEEP tables not yet added to schema (Sprint C work).
+  - **Storage**: 13 hypertables — 8 from TOPS-side (trades, trade_breaks, quotes, status_events, auction_info, official_prices, securities, retail_liquidity) plus 5 new DPLS-side (orders_add, orders_modify, orders_delete, orders_executed, clear_books). 2026-05-08 fully loaded for both feeds. Cross-feed trade volume validates from SQL: 9 134/9 134 symbols match, 0 share delta.
 - **Bring-up status**: dev stack running on luv; prod stack on luv compose not yet started, Caddyfile entries for `*.luv` applied last week.
 - **Data on disk** (`~/workspace/data/long-exposure/`):
   - `raw/` — 2026-05-07 + 2026-05-08 .pcap.gz for all three feeds (TOPS / DEEP / DPLS, ≈ 10–14 GB each).
-  - `specs/` — all 7 IEX spec PDFs.
+  - `specs/` — all 7 IEX wire-protocol spec PDFs plus the IEX Auction Process spec (added 2026-05-12 during residual investigation; confirms IEX auctions only apply to IEX-listed securities, so they don't drive our non-IEX-listed mismatch cluster).
   - `prior_close_20260507.csv` — per-symbol last-trade-on-IEX from 2026-05-07 TOPS, used as a per-symbol round-lot proxy for the 2026-05-08 BBO validation.
 - **Frontend cleanup (2026-05-10)**: removed Svelte SPA scaffold; vedanta-systems is the unified portal. See @docs/decisions.md.
 
