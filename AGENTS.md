@@ -72,17 +72,20 @@ Mirror this pattern for any future personal-project work: per-project repos ship
 
 ## Active state
 
-- **Phase**: DEEP+ parser done, trade-level cross-validation done, **order book state machine (Sprint B) is next**. See @docs/todo.md for the paste-ready startup checklist.
-- **Implementation status** (as of 2026-05-11 late session):
-  - Pcap-ng reader, IEX-TP decoder, 7 admin decoders + sealed `AdminMessage`, common `IexMessage` marker, shared `wire/` package
-  - **TOPS parser**: 5 trading decoders + `TopsMessageRouter`, 295M messages loaded to Postgres in 22:27 min, continuous aggregate populated (9,134 symbols, 770M shares, 7.75M trades for 2026-05-08)
-  - **DEEP+ parser**: 7 trading decoders + `DplsMessageRouter`, 364M messages decoded in 97 s, full file pass at ~3.75M msg/sec
-  - **Cross-feed validation (trade-level)**: 9,134 / 9,134 symbols match exactly between DEEP+ and TOPS for 2026-05-08, 0 mismatches, 0 share delta. Strong evidence the DEEP+ decoder is correct for trade-affecting messages.
-  - **Tests**: 45 passing across the suite (`IexTpDecoder` + admin + TOPS + DEEP+)
-  - **Storage**: 8 TOPS-side hypertables populated; DEEP+ tables not yet added to schema (Sprint C work)
-  - **Order book state machine**: not yet built (Sprint B)
+- **Phase**: parsers + book reconstruction + cross-validation triangle done across two trading days. **Storage extensions for DPLS tables (Sprint C) is next** — schema needs `orders` hypertable plumbing; see @docs/todo.md.
+- **Implementation status** (as of 2026-05-12):
+  - Pcap-ng reader, IEX-TP decoder, 7 admin decoders + sealed `AdminMessage`, common `IexMessage` marker, shared `wire/` package.
+  - **TOPS parser**: 5 trading decoders + `TopsMessageRouter`. 295 M messages loaded to Postgres in 22:27 for 2026-05-08.
+  - **DPLS parser**: 7 trading decoders + `DplsMessageRouter`, order-level `OrderBook` + manager. Throughput ≈ 3.75 M msg/sec.
+  - **DEEP parser**: `PriceLevelUpdate` decoder + `DeepMessageRouter`, price-level `PriceLevelBook` + manager. Reuses TOPS decoders for shared T/B/X/A trading types.
+  - **Cross-validation triangle**: DPLS↔DEEP (price-level), DPLS→TOPS BBO, DEEP→TOPS BBO. Results captured in @docs/validation-results.md — two consecutive days (2026-05-07 and 2026-05-08) with **100.000 % DPLS↔DEEP** (the load-bearing correctness claim) and **99.39 % BBO match**, parsers bug-equivalent down to the share. Residual ~0.6 % is a TOPS-side spec/data gap (per-symbol round-lot tier from prior close); fully documented, requires external data to close further.
+  - **Tests**: full suite passing (`IexTpDecoder`, admin, TOPS, DPLS, DEEP, `wire/RoundLot` + `wire/ProtectedBbo` + book state-machine tests).
+  - **Storage**: 8 TOPS-side hypertables populated; DPLS / DEEP tables not yet added to schema (Sprint C work).
 - **Bring-up status**: dev stack running on luv; prod stack on luv compose not yet started, Caddyfile entries for `*.luv` applied last week.
-- **Data on disk**: both 2026-05-08 .pcap.gz files at `~/workspace/data/long-exposure/raw/` (TOPS 10.2 GB, DPLS 10.4 GB). All 7 IEX spec PDFs at `~/workspace/data/long-exposure/specs/`.
+- **Data on disk** (`~/workspace/data/long-exposure/`):
+  - `raw/` — 2026-05-07 + 2026-05-08 .pcap.gz for all three feeds (TOPS / DEEP / DPLS, ≈ 10–14 GB each).
+  - `specs/` — all 7 IEX spec PDFs.
+  - `prior_close_20260507.csv` — per-symbol last-trade-on-IEX from 2026-05-07 TOPS, used as a per-symbol round-lot proxy for the 2026-05-08 BBO validation.
 - **Frontend cleanup (2026-05-10)**: removed Svelte SPA scaffold; vedanta-systems is the unified portal. See @docs/decisions.md.
 
 ## Memory model (for me, the agent)
