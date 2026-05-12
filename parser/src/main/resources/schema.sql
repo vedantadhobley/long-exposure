@@ -191,6 +191,107 @@ SELECT create_hypertable('retail_liquidity', 'ts',
 
 CREATE INDEX IF NOT EXISTS retail_liquidity_symbol_ts_idx ON retail_liquidity (symbol, ts DESC);
 
+-- ─── DPLS order-level events ────────────────────────────────────────────────
+-- DPLS publishes one record per displayed-order lifecycle event:
+--   * a  AddOrder       new displayed order on the book (issued Order ID)
+--   * M  OrderModify    size/price change (Modify Flags bit 0 = maintain priority)
+--   * R  OrderDelete    order removed
+--   * L  OrderExecuted  displayed order executes (carries Trade ID + sale flags)
+--   * C  ClearBook      drop the entire book for the symbol (halt / session boundary)
+--   * T  Trade          non-displayed × non-displayed execution → trades table (shared with TOPS)
+--   * B  TradeBreak     cancelled trade → trade_breaks table (shared with TOPS)
+-- The first five get their own tables here. Trade / TradeBreak reuse the
+-- existing TOPS hypertables via feed_source = 'DPLS'.
+--
+-- Volume: 2026-05-08 day produced ~364 M DPLS messages, of which Add and
+-- Delete dominate (~140 M each empirically), Executed ~7-8 M (matches trade
+-- count), Modify rare, ClearBook negligible. Hour-grained chunks for the
+-- two high-volume tables; day-grained for the rest.
+
+CREATE TABLE IF NOT EXISTS orders_add (
+    ts                          TIMESTAMPTZ NOT NULL,
+    ts_nanos                    BIGINT      NOT NULL,
+    feed_source                 TEXT        NOT NULL,
+    symbol                      TEXT        NOT NULL,
+    side                        CHAR(1)     NOT NULL,   -- '8' buy, '5' sell
+    order_id                    BIGINT      NOT NULL,
+    size                        INTEGER     NOT NULL,
+    price_raw                   BIGINT      NOT NULL
+);
+
+SELECT create_hypertable('orders_add', 'ts',
+    chunk_time_interval => INTERVAL '1 hour',
+    if_not_exists => TRUE);
+
+CREATE INDEX IF NOT EXISTS orders_add_symbol_ts_idx ON orders_add (symbol, ts DESC);
+CREATE INDEX IF NOT EXISTS orders_add_order_id_idx  ON orders_add (order_id);
+
+CREATE TABLE IF NOT EXISTS orders_modify (
+    ts                          TIMESTAMPTZ NOT NULL,
+    ts_nanos                    BIGINT      NOT NULL,
+    feed_source                 TEXT        NOT NULL,
+    symbol                      TEXT        NOT NULL,
+    order_id                    BIGINT      NOT NULL,
+    size                        INTEGER     NOT NULL,
+    price_raw                   BIGINT      NOT NULL,
+    modify_flags                SMALLINT    NOT NULL    -- bit 0: 1 = maintain priority, 0 = reset
+);
+
+SELECT create_hypertable('orders_modify', 'ts',
+    chunk_time_interval => INTERVAL '1 day',
+    if_not_exists => TRUE);
+
+CREATE INDEX IF NOT EXISTS orders_modify_symbol_ts_idx ON orders_modify (symbol, ts DESC);
+CREATE INDEX IF NOT EXISTS orders_modify_order_id_idx  ON orders_modify (order_id);
+
+CREATE TABLE IF NOT EXISTS orders_delete (
+    ts                          TIMESTAMPTZ NOT NULL,
+    ts_nanos                    BIGINT      NOT NULL,
+    feed_source                 TEXT        NOT NULL,
+    symbol                      TEXT        NOT NULL,
+    order_id                    BIGINT      NOT NULL
+);
+
+SELECT create_hypertable('orders_delete', 'ts',
+    chunk_time_interval => INTERVAL '1 hour',
+    if_not_exists => TRUE);
+
+CREATE INDEX IF NOT EXISTS orders_delete_symbol_ts_idx ON orders_delete (symbol, ts DESC);
+CREATE INDEX IF NOT EXISTS orders_delete_order_id_idx  ON orders_delete (order_id);
+
+CREATE TABLE IF NOT EXISTS orders_executed (
+    ts                          TIMESTAMPTZ NOT NULL,
+    ts_nanos                    BIGINT      NOT NULL,
+    feed_source                 TEXT        NOT NULL,
+    symbol                      TEXT        NOT NULL,
+    order_id                    BIGINT      NOT NULL,
+    size                        INTEGER     NOT NULL,
+    price_raw                   BIGINT      NOT NULL,
+    trade_id                    BIGINT      NOT NULL,
+    sale_condition_flags        SMALLINT    NOT NULL
+);
+
+SELECT create_hypertable('orders_executed', 'ts',
+    chunk_time_interval => INTERVAL '1 day',
+    if_not_exists => TRUE);
+
+CREATE INDEX IF NOT EXISTS orders_executed_symbol_ts_idx ON orders_executed (symbol, ts DESC);
+CREATE INDEX IF NOT EXISTS orders_executed_order_id_idx  ON orders_executed (order_id);
+CREATE INDEX IF NOT EXISTS orders_executed_trade_id_idx  ON orders_executed (trade_id);
+
+CREATE TABLE IF NOT EXISTS clear_books (
+    ts                          TIMESTAMPTZ NOT NULL,
+    ts_nanos                    BIGINT      NOT NULL,
+    feed_source                 TEXT        NOT NULL,
+    symbol                      TEXT        NOT NULL
+);
+
+SELECT create_hypertable('clear_books', 'ts',
+    chunk_time_interval => INTERVAL '1 day',
+    if_not_exists => TRUE);
+
+CREATE INDEX IF NOT EXISTS clear_books_symbol_ts_idx ON clear_books (symbol, ts DESC);
+
 -- ─── Continuous aggregates for rolling 30-day baselines ──────────────────────
 -- TimescaleDB continuous aggregates refresh incrementally as new events land,
 -- so the scorer doesn't recompute baselines from raw trades on every run.

@@ -8,6 +8,12 @@ import com.longexposure.admin.SecurityEvent;
 import com.longexposure.admin.ShortSalePriceTestStatus;
 import com.longexposure.admin.SystemEvent;
 import com.longexposure.admin.TradingStatus;
+import com.longexposure.dpls.AddOrder;
+import com.longexposure.dpls.ClearBook;
+import com.longexposure.dpls.DplsMessage;
+import com.longexposure.dpls.OrderDelete;
+import com.longexposure.dpls.OrderExecuted;
+import com.longexposure.dpls.OrderModify;
 import com.longexposure.tops.AuctionInformation;
 import com.longexposure.tops.OfficialPrice;
 import com.longexposure.tops.QuoteUpdate;
@@ -76,7 +82,17 @@ public final class TimescaleWriter implements AutoCloseable {
                 "ts, ts_nanos, feed_source, symbol, flags, round_lot_size, "
                 + "adjusted_poc_price_raw, luld_tier"),
         RETAIL_LIQUIDITY("retail_liquidity",
-                "ts, ts_nanos, feed_source, symbol, indicator");
+                "ts, ts_nanos, feed_source, symbol, indicator"),
+        ORDERS_ADD("orders_add",
+                "ts, ts_nanos, feed_source, symbol, side, order_id, size, price_raw"),
+        ORDERS_MODIFY("orders_modify",
+                "ts, ts_nanos, feed_source, symbol, order_id, size, price_raw, modify_flags"),
+        ORDERS_DELETE("orders_delete",
+                "ts, ts_nanos, feed_source, symbol, order_id"),
+        ORDERS_EXECUTED("orders_executed",
+                "ts, ts_nanos, feed_source, symbol, order_id, size, price_raw, trade_id, sale_condition_flags"),
+        CLEAR_BOOKS("clear_books",
+                "ts, ts_nanos, feed_source, symbol");
 
         public final String tableName;
         public final String columns;
@@ -122,6 +138,8 @@ public final class TimescaleWriter implements AutoCloseable {
             writeAdmin(am);
         } else if (m instanceof TopsMessage tm) {
             writeTops(tm);
+        } else if (m instanceof DplsMessage dm) {
+            writeDpls(dm);
         }
     }
 
@@ -155,6 +173,26 @@ public final class TimescaleWriter implements AutoCloseable {
             case TradeBreak b          -> appendTradeBreak(b);
             case OfficialPrice op      -> appendOfficialPrice(op);
             case AuctionInformation a  -> appendAuction(a);
+        }
+    }
+
+    /**
+     * DPLS dispatch — five DPLS-unique types get their own tables; Trade and
+     * TradeBreak share the existing {@link #appendTrade} / {@link #appendTradeBreak}
+     * paths (the wire shape is identical to TOPS, only {@code feed_source}
+     * differs).
+     */
+    private void writeDpls(final DplsMessage m) throws SQLException, IOException {
+        switch (m) {
+            case AddOrder a                -> appendAddOrder(a);
+            case OrderModify om            -> appendOrderModify(om);
+            case OrderDelete od            -> appendOrderDelete(od);
+            case OrderExecuted oe          -> appendOrderExecuted(oe);
+            case com.longexposure.dpls.Trade dt
+                                           -> appendDplsTrade(dt);
+            case com.longexposure.dpls.TradeBreak dtb
+                                           -> appendDplsTradeBreak(dtb);
+            case ClearBook cb              -> appendClearBook(cb);
         }
     }
 
@@ -283,6 +321,100 @@ public final class TimescaleWriter implements AutoCloseable {
         sb.append('\t').append(charOf(i.indicator().value));
         sb.append('\n');
         rowAdded(Table.RETAIL_LIQUIDITY);
+    }
+
+    // ─── DPLS per-table appenders ────────────────────────────────────────────
+
+    private void appendAddOrder(final AddOrder a) throws SQLException, IOException {
+        StringBuilder sb = buffers.get(Table.ORDERS_ADD);
+        appendTimestamp(sb, a.timestampNanos());
+        sb.append('\t').append(a.timestampNanos());
+        sb.append('\t').append(feedSource);
+        sb.append('\t'); appendEscaped(sb, a.symbol());
+        sb.append('\t').append(a.side() == AddOrder.Side.BUY ? '8' : '5');
+        sb.append('\t').append(a.orderId());
+        sb.append('\t').append(a.size());
+        sb.append('\t').append(a.priceRaw());
+        sb.append('\n');
+        rowAdded(Table.ORDERS_ADD);
+    }
+
+    private void appendOrderModify(final OrderModify m) throws SQLException, IOException {
+        StringBuilder sb = buffers.get(Table.ORDERS_MODIFY);
+        appendTimestamp(sb, m.timestampNanos());
+        sb.append('\t').append(m.timestampNanos());
+        sb.append('\t').append(feedSource);
+        sb.append('\t'); appendEscaped(sb, m.symbol());
+        sb.append('\t').append(m.orderId());
+        sb.append('\t').append(m.size());
+        sb.append('\t').append(m.priceRaw());
+        sb.append('\t').append(m.modifyFlags() & 0xff);
+        sb.append('\n');
+        rowAdded(Table.ORDERS_MODIFY);
+    }
+
+    private void appendOrderDelete(final OrderDelete d) throws SQLException, IOException {
+        StringBuilder sb = buffers.get(Table.ORDERS_DELETE);
+        appendTimestamp(sb, d.timestampNanos());
+        sb.append('\t').append(d.timestampNanos());
+        sb.append('\t').append(feedSource);
+        sb.append('\t'); appendEscaped(sb, d.symbol());
+        sb.append('\t').append(d.orderId());
+        sb.append('\n');
+        rowAdded(Table.ORDERS_DELETE);
+    }
+
+    private void appendOrderExecuted(final OrderExecuted oe) throws SQLException, IOException {
+        StringBuilder sb = buffers.get(Table.ORDERS_EXECUTED);
+        appendTimestamp(sb, oe.timestampNanos());
+        sb.append('\t').append(oe.timestampNanos());
+        sb.append('\t').append(feedSource);
+        sb.append('\t'); appendEscaped(sb, oe.symbol());
+        sb.append('\t').append(oe.orderId());
+        sb.append('\t').append(oe.size());
+        sb.append('\t').append(oe.priceRaw());
+        sb.append('\t').append(oe.tradeId());
+        sb.append('\t').append(oe.flags() & 0xff);
+        sb.append('\n');
+        rowAdded(Table.ORDERS_EXECUTED);
+    }
+
+    private void appendDplsTrade(final com.longexposure.dpls.Trade t) throws SQLException, IOException {
+        StringBuilder sb = buffers.get(Table.TRADES);
+        appendTimestamp(sb, t.timestampNanos());
+        sb.append('\t').append(t.timestampNanos());
+        sb.append('\t').append(feedSource);
+        sb.append('\t'); appendEscaped(sb, t.symbol());
+        sb.append('\t').append(t.size());
+        sb.append('\t').append(t.priceRaw());
+        sb.append('\t').append(t.tradeId());
+        sb.append('\t').append(t.flags() & 0xff);
+        sb.append('\n');
+        rowAdded(Table.TRADES);
+    }
+
+    private void appendDplsTradeBreak(final com.longexposure.dpls.TradeBreak b) throws SQLException, IOException {
+        StringBuilder sb = buffers.get(Table.TRADE_BREAKS);
+        appendTimestamp(sb, b.timestampNanos());
+        sb.append('\t').append(b.timestampNanos());
+        sb.append('\t').append(feedSource);
+        sb.append('\t'); appendEscaped(sb, b.symbol());
+        sb.append('\t').append(b.size());
+        sb.append('\t').append(b.priceRaw());
+        sb.append('\t').append(b.brokenTradeId());
+        sb.append('\t').append(b.flags() & 0xff);
+        sb.append('\n');
+        rowAdded(Table.TRADE_BREAKS);
+    }
+
+    private void appendClearBook(final ClearBook cb) throws SQLException, IOException {
+        StringBuilder sb = buffers.get(Table.CLEAR_BOOKS);
+        appendTimestamp(sb, cb.timestampNanos());
+        sb.append('\t').append(cb.timestampNanos());
+        sb.append('\t').append(feedSource);
+        sb.append('\t'); appendEscaped(sb, cb.symbol());
+        sb.append('\n');
+        rowAdded(Table.CLEAR_BOOKS);
     }
 
     // ─── buffer + flush plumbing ─────────────────────────────────────────────
