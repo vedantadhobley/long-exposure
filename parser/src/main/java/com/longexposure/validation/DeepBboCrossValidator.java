@@ -50,6 +50,9 @@ public final class DeepBboCrossValidator {
     private long totalQuotesCompared;
     private long matched;
     private long mismatched;
+    private long offHoursCompared;
+    private long offHoursMatched;
+    private long offHoursMismatched;
     private long depthEventsApplied;
     private long topsNonQuoteEventsSkipped;
 
@@ -99,6 +102,9 @@ public final class DeepBboCrossValidator {
                     totalQuotesCompared,
                     matched,
                     mismatched,
+                    offHoursCompared,
+                    offHoursMatched,
+                    offHoursMismatched,
                     bookManager.symbolCount(),
                     Map.copyOf(perSymbol),
                     List.copyOf(mismatchSamples),
@@ -125,6 +131,8 @@ public final class DeepBboCrossValidator {
 
     private void compareBbo(final QuoteUpdate qu) {
         totalQuotesCompared++;
+        boolean offHours = qu.isOffHoursSession();
+        if (offHours) offHoursCompared++;
         BboValidationResult.SymbolStats stats = perSymbol.computeIfAbsent(
                 qu.symbol(), BboValidationResult.SymbolStats::new);
 
@@ -139,9 +147,11 @@ public final class DeepBboCrossValidator {
         if (bidMatch && askMatch) {
             matched++;
             stats.matched++;
+            if (offHours) offHoursMatched++;
         } else {
             mismatched++;
             stats.mismatched++;
+            if (offHours) offHoursMismatched++;
             if (mismatchSamples.size() < MAX_SAMPLES) {
                 mismatchSamples.add(new BboValidationResult.MismatchSample(
                         qu.symbol(),

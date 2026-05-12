@@ -20,6 +20,9 @@ public record BboValidationResult(
         long totalQuotesCompared,
         long matched,
         long mismatched,
+        long offHoursCompared,
+        long offHoursMatched,
+        long offHoursMismatched,
         int symbolsTracked,
         Map<String, SymbolStats> perSymbol,
         List<MismatchSample> mismatchSamples,
@@ -28,6 +31,19 @@ public record BboValidationResult(
 
     public double matchRate() {
         return totalQuotesCompared == 0 ? 0.0 : (double) matched / totalQuotesCompared;
+    }
+
+    public long regularHoursCompared()  { return totalQuotesCompared - offHoursCompared; }
+    public long regularHoursMatched()   { return matched - offHoursMatched; }
+    public long regularHoursMismatched(){ return mismatched - offHoursMismatched; }
+
+    public double regularHoursMatchRate() {
+        long n = regularHoursCompared();
+        return n == 0 ? 0.0 : (double) regularHoursMatched() / n;
+    }
+
+    public double offHoursMatchRate() {
+        return offHoursCompared == 0 ? 0.0 : (double) offHoursMatched / offHoursCompared;
     }
 
     public List<SymbolStats> worstSymbols(final int n) {

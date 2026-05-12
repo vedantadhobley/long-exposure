@@ -203,6 +203,14 @@ public final class Main {
         System.out.printf("QuoteUpdates compared: %,d%n", r.totalQuotesCompared());
         System.out.printf("  matched:             %,d (%.4f%%)%n", r.matched(), r.matchRate() * 100);
         System.out.printf("  mismatched:          %,d%n", r.mismatched());
+        System.out.println();
+        System.out.println("split by session (TOPS QuoteUpdate flag bit 6 = off-hours):");
+        System.out.printf("  regular hours:       %,d compared  %,d matched (%.4f%%)  %,d mismatched%n",
+                r.regularHoursCompared(), r.regularHoursMatched(), r.regularHoursMatchRate() * 100,
+                r.regularHoursMismatched());
+        System.out.printf("  off-hours:           %,d compared  %,d matched (%.4f%%)  %,d mismatched%n",
+                r.offHoursCompared(), r.offHoursMatched(), r.offHoursMatchRate() * 100,
+                r.offHoursMismatched());
 
         if (r.mismatched() > 0) {
             System.out.println();
