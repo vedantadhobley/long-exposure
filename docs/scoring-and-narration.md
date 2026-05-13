@@ -61,6 +61,312 @@ These are the high-signal microstructure patterns that DEEP+ uniquely makes visi
 
 ---
 
+---
+
+## Scoring architecture
+
+How the pattern catalog above maps onto code. Three abstractions:
+
+```
+Raw events                  Derived events
+(hypertable rows)           (scored_events rows)
+─────────────────           ─────────────────────
+trades, orders_*,           one per "thing worth
+status_events, etc.         narrating"
+        │                            ▲
+        │   ┌─────────────────┐      │
+        ├──▶│ Intraday scorer │──────┤   (only needs today's data)
+        │   └─────────────────┘      │
+        │                            │
+        │   ┌─────────────────┐      │
+        └──▶│ Interday scorer │──────┘   (also reads BaselineProvider)
+            └─────────────────┘
+                    │
+                    ▼
+            BaselineProvider
+            (cagg / view query; returns empty if no history yet)
+```
+
+Raw events live in the existing 13 hypertables and don't move. Scored
+events are anything worth narrating — could be a single row (halt, large
+trade) or a synthesized pattern across many rows (sweep, post-cancel
+cluster). Scorers are the extension point.
+
+### The interfaces
+
+```java
+public interface EventScorer {
+    /** Stable id, e.g. "halt", "large_trade", "sweep", "post_cancel_cluster". */
+    String id();
+
+    /** Whether this scorer consults BaselineProvider. */
+    default boolean needsBaselines() { return false; }
+
+    /** Scan source data for the day and emit zero or more scored events. */
+    Stream<ScoredEvent> score(ScoringContext ctx);
+}
+
+public record ScoringContext(
+        LocalDate         tradingDate,
+        Connection        conn,
+        BaselineProvider  baselines       // EmptyBaselineProvider when no history exists
+) {}
+
+public record ScoredEvent(
+        LocalDate  tradingDate,
+        String     symbol,
+        Instant    ts,                    // event anchor time
+        Instant    tsEnd,                 // null for instantaneous; set for durational
+        String     scorerId,              // matches EventScorer.id()
+        double     score,
+        JsonNode   breakdown,             // transparency JSON — see "grounding contract"
+        JsonNode   sourceRefs             // array of {"table":...,"ts_nanos":...} pointers
+) {}
+
+public interface BaselineProvider {
+    Optional<Double>          dailyVolumeMedian(String symbol);
+    Optional<Double>          tradeCountMedian(String symbol);
+    Optional<Double>          averageSpreadMedian(String symbol);
+    Optional<HaltFrequency>   haltFrequency(String symbol);
+    // extends per metric as scorers need them
+}
+```
+
+Implementations live in `parser/src/main/java/com/longexposure/scoring/`:
+
+```
+scoring/
+  ├── EventScorer.java                   (interface)
+  ├── ScoredEvent.java                   (record)
+  ├── ScoringContext.java                (record)
+  ├── BaselineProvider.java              (interface)
+  ├── EmptyBaselineProvider.java         (used until history exists)
+  ├── CaggBaselineProvider.java          (backed by daily_volume_by_symbol cagg)
+  ├── EventScorerRegistry.java           (list of all registered scorers)
+  └── scorers/
+      ├── HaltScorer.java                (intraday)
+      ├── LargeTradeScorer.java          (intraday)
+      ├── SweepScorer.java               (intraday)
+      ├── PostCancelClusterScorer.java   (intraday)
+      ├── LayeringScorer.java            (intraday)
+      ├── IcebergScorer.java             (intraday)
+      ├── LiquidityWithdrawalScorer.java (intraday, baseline = rolling N-min window today)
+      ├── TimeInBookDriftScorer.java     (interday, BaselineProvider)
+      └── VolumeDeviationScorer.java     (interday, BaselineProvider)
+```
+
+### The schema
+
+```sql
+CREATE TABLE scored_events (
+    event_id      BIGSERIAL    PRIMARY KEY,
+    trading_date  DATE         NOT NULL,
+    symbol        TEXT         NOT NULL,
+    ts            TIMESTAMPTZ  NOT NULL,
+    ts_end        TIMESTAMPTZ,                       -- nullable for instantaneous
+    scorer_id     TEXT         NOT NULL,
+    score         DOUBLE PRECISION NOT NULL,
+    breakdown     JSONB        NOT NULL,
+    source_refs   JSONB        NOT NULL,
+    scored_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    pipeline_run  UUID                               -- nullable; ties back to pipeline_runs
+);
+CREATE INDEX scored_events_date_score_idx ON scored_events (trading_date, score DESC);
+CREATE INDEX scored_events_symbol_idx     ON scored_events (symbol, ts DESC);
+CREATE INDEX scored_events_scorer_idx     ON scored_events (scorer_id, trading_date);
+```
+
+Not a hypertable. Output volume is small (thousands per day across all
+scorers, not millions). Standard B-tree indexes are enough.
+
+Idempotency: scoring a date is re-runnable. `ScoreEventsActivity`
+pre-cleans with `DELETE FROM scored_events WHERE trading_date=?` before
+running — much faster than the parse pre-clean since rowcount is small.
+
+### Mapping the pattern catalog to scorers
+
+| Catalog # | Pattern | Type | Source tables | Detection sketch |
+|---|---|---|---|---|
+| (simple) | Halt | Intraday | `status_events` | `WHERE status='H'`. Score = halt_duration × liquidity_tier |
+| (simple) | Large trade | Intraday | `trades` | `notional > $1M` OR top 0.1% by notional today. Score = log(notional) |
+| 4 | Sweep | Intraday | `orders_executed` | Cluster ≥ 3 distinct price levels within 10 ms window from same incoming side |
+| 1 | Post-cancel cluster | Intraday | `orders_add`, `orders_delete` | Sliding-window count of (add → delete) pairs where lifetime < 50 ms, same side, concentrated in time |
+| 2 | Liquidity withdrawal | Intraday | `orders_delete` | Per-symbol per-second deletion rate at top 5 levels. Compare to rolling N-min today (later swap to interday) |
+| 3 | Layering | Intraday | `orders_add`, `orders_delete` | Group-add across price levels followed by group-cancel within ms |
+| 5 | Iceberg | Intraday | `orders_executed` | Repeated equal-size fills at same `(symbol, price)` over sustained period |
+| 6 | Time-in-book drift | Interday | all orders tables | Per-symbol-per-hour lifetime distribution diffed against baseline distribution |
+| (simple) | Volume × average | Interday | `trades` | Today's per-symbol volume vs `BaselineProvider.dailyVolumeMedian()` |
+
+Eight of nine planned scorers are intraday — meaning a fresh deploy with
+zero history can ship narrations on day 1. The two interday scorers
+degrade gracefully via `BaselineProvider.empty()` until the cagg
+window has enough days.
+
+### Temporal integration
+
+`ScoreEventsActivity` runs after `RecordValidationActivity`:
+
+```
+... Parse + Validate triangle (parallel) ─▶ RecordValidation ─▶ ScoreEvents ─▶ SelectTopN ─▶ Narrate ─▶ Store
+```
+
+The activity:
+
+1. Pre-cleans: `DELETE FROM scored_events WHERE trading_date = ?`
+2. Constructs a `ScoringContext` with the date, JDBC connection, and a
+   `BaselineProvider` (cagg-backed or empty depending on data availability)
+3. Iterates `EventScorerRegistry.ALL`, runs each scorer, COPY-writes
+   results in batches to `scored_events`
+4. Returns total count of scored events written
+
+For v1, scorers run sequentially in one activity. Output volume is
+small so this is cheap (typical day: thousands of scored events across
+all scorers). Can fan out to one-activity-per-scorer later if any
+single scorer becomes a long pole.
+
+### Extensibility — adding a new scorer
+
+1. Implement `EventScorer` in `com.longexposure.scoring.scorers.MyNewScorer`
+2. Add it to `EventScorerRegistry.ALL`
+3. No schema change. No workflow change. No retraining.
+
+---
+
+## Connecting intraday and interday through the LLM
+
+The architecture above produces `scored_events` rows. The narration step
+then turns rows into prose. **The interaction between intraday and
+interday data lives entirely in the `breakdown` JSON each scored event
+carries** — the narrator never reaches outside that JSON.
+
+### The grounding contract
+
+Every claim in the rendered narrative must trace to a field in the
+scored event's `breakdown` JSON. The narrator can't invent baselines
+or recall historical context from training data. If the breakdown
+doesn't have a number, the narration can't use it.
+
+This pushes the design decision back to the scorer: **at score time,
+the scorer decides which context goes into the breakdown.** Examples:
+
+- `HaltScorer` produces a small breakdown: halt duration, reason code,
+  symbol, liquidity tier. Self-contained. The resulting narration is
+  factual recital.
+
+  ```json
+  {
+    "halt_duration_s": 243,
+    "halt_reason": "T1",
+    "symbol": "AAPL",
+    "liquidity_tier": "mega_cap"
+  }
+  ```
+
+- `VolumeDeviationScorer` (interday) bakes both today's number and the
+  baseline into the breakdown. The narrator sees both as facts:
+
+  ```json
+  {
+    "todays_volume_shares":          287_400_000,
+    "baseline_30d_median_shares":     61_200_000,
+    "deviation_x":                   4.69,
+    "baseline_window_days":          22,
+    "baseline_window_status":        "partial"
+  }
+  ```
+
+This means **the narrator doesn't care whether a scorer is intraday or
+interday**. It treats the breakdown JSON as a sealed unit of facts and
+styles them into prose. Same prompt template, same verifier, different
+breakdown shapes.
+
+### Per-pattern breakdown contracts
+
+Each scorer defines its own breakdown shape, but they share a
+convention: every quantitative claim possible in the narration must
+appear in the breakdown. The verifier (the third activity in the
+two-pass design) enforces this — every number in the prose must trace
+back to a field name in `breakdown`.
+
+For interday scorers, this includes the baseline value the scorer used
+to score the event. The narrator can then phrase deviations in plain
+English ("4.7× the typical day") without inventing the baseline.
+
+### Daily-patterns narration — the cross-event synthesis
+
+The per-event narrator is constrained: one event at a time, one
+breakdown JSON, one paragraph out. But the day's output also includes a
+"Daily patterns" section that observes recurring shapes across all the
+day's scored events (see "Output structure" below).
+
+This is a second LLM pass that consumes:
+
+- The full list of scored events for the day
+- Each event's breakdown JSON
+- (Optional) day-level baseline context — e.g., today's total event
+  count vs typical day's count, today's halt count vs typical week
+
+The day-level context, when present, comes from a separate
+`DailyAggregateBaselineProvider` query — `Optional<Long>
+typicalScoredEventsPerDay()` or similar. Same degradation rule: empty
+when history is missing, narrator skips comparative language.
+
+### Why no tool-using / retrieval at narration time
+
+We considered (and explicitly rejected) giving the narrator a
+`lookup_baseline(symbol, metric)` tool. Reasons:
+
+- **Grounding gets harder.** Tool calls happen *inside* the LLM's loop;
+  the verifier can't cleanly attribute a claim to a deterministic
+  source. The two-pass + verifier model rests on the breakdown being a
+  finite, code-inspectable set of facts.
+- **Latency.** Each tool call is a round-trip. Per-event narration is
+  already 2 LLM calls; adding 1–2 tool calls per event 2–4× the per-day
+  LLM time budget.
+- **Hallucination surface grows.** The narrator could ask for a
+  baseline that doesn't exist and then fabricate something to fill the
+  gap.
+
+The cleaner pattern is "scorer pre-fetches baselines into the
+breakdown; narrator only sees breakdown." All the context the narrator
+needs is decided at score time, not at narration time. Trade-off: less
+flexibility, but a much stronger correctness story.
+
+### Open design questions (still TBD)
+
+These are intentionally not locked yet — surface them at the
+narration-implementation sprint:
+
+1. **Per-event breakdown size limits.** A breakdown that's too small
+   produces thin narrations. Too big and the LLM's attention spreads
+   thin. Rough cap: ~30 fields per breakdown. Adjust empirically.
+
+2. **Cross-pattern context.** If a halt and a sweep occur in the same
+   symbol within minutes, does either event's breakdown reference the
+   other? Argues for a "related event ids" array in breakdown.
+   Adds complexity to the verifier (a claim about another event must
+   trace into THAT event's breakdown).
+
+3. **Per-scorer narration templates.** Single universal narration prompt
+   vs one-prompt-per-scorer-id. Universal is simpler but probably
+   produces flatter prose. Per-scorer prompts are tighter but a
+   maintenance burden. Decide once we have 100+ narrated events to look
+   at.
+
+4. **Daily-patterns vs per-event sequencing.** Run daily-patterns
+   *before* per-event narration so it can inform per-event tone, or
+   *after* so it can summarize? After is simpler and matches the
+   "Output structure" doc — but it means per-event narrations can't say
+   "as discussed in today's overall pattern...". Probably fine for v1.
+
+5. **Interday context in per-event narration.** Right now the design
+   says "interday scorers bake baselines into their breakdown". But
+   intraday scorers (e.g. a halt) might *also* benefit from interday
+   context ("AAPL's 5th halt this month — typical is 0.2/month"). Do
+   we run an "enrich with interday context" pass on intraday scored
+   events before narration, or accept that intraday events stay
+   intraday-only in narration? Lean toward the latter for v1, revisit.
+
 ## Narration design principles
 
 The narrative layer is the LLM-driven prose generation. **Expected to be the hardest design work in the project** — every other piece is byte-shuffling or schema design; this one is fuzzy-output iteration where there's no test that says "this narrative is good."
@@ -160,7 +466,9 @@ The scorer feeds the first 5 sections (individual events, ranked). The **Daily p
 
 ## Cross-references in the codebase
 
-- `parser/src/main/java/com/longexposure/scoring/EventScorer.java` — currently a stub. Each pattern above gets its own scorer class implementing a shared interface.
-- `parser/src/main/resources/schema.sql` — `narratives` table is the output sink. JSONB `score_breakdown` column holds the structured input that the narration was grounded in.
-- `docs/plan.md` — sprint sequencing (DEEP+ parser first, then this work).
-- `docs/decisions.md` — the 2026-05-11 pivot to DEEP+ is what makes order-level patterns actually achievable; without it most of the patterns above are out of reach.
+- `parser/src/main/java/com/longexposure/scoring/` — scoring package (interfaces, registry, scorers/). `EventScorer.java` is the extension-point interface.
+- `parser/src/main/java/com/longexposure/temporal/activities/ScoreEventsActivity{,Impl}.java` — Temporal activity that wires the registry into the daily pipeline.
+- `parser/src/main/resources/schema.sql` — `scored_events` table (this design) + `narratives` table (narration output sink, JSONB `score_breakdown` column holds the input that grounded the narration).
+- `docs/temporal-design.md` — where `ScoreEventsActivity` slots into the workflow graph.
+- `docs/plan.md` — sprint sequencing.
+- `docs/decisions.md` — the 2026-05-11 pivot to DEEP+ is what makes order-level patterns achievable; without it most of the patterns above are out of reach.
