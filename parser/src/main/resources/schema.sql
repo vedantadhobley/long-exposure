@@ -354,8 +354,22 @@ CREATE INDEX IF NOT EXISTS narratives_event_ts_idx       ON narratives (event_ts
 
 -- ─── Pipeline runs (Temporal workflow bookkeeping) ───────────────────────────
 -- One row per workflow execution. Lets the API surface "this day's data is
--- verified vs unverified" and lets the validator flag a run as failed without
--- mutating individual event rows.
+-- verified vs unverified" and lets downstream activities (scoring, narration)
+-- decide whether to operate on a date.
+--
+-- Status values written by the daily pipeline workflow:
+--   'running'                  workflow has started, no terminal state yet
+--   'completed'                parse + validate succeeded; data is verified
+--   'unverified'               parse succeeded but validation match rates are
+--                              below threshold; data is in DB but downstream
+--                              activities should treat as suspect
+--   'parse_failed'             ParseAndWriteDpls retries exhausted
+--   'validation_failed_data_ok' ValidateTriangle retries exhausted but parse
+--                              succeeded; data is in DB
+--   'skipped_weekend'          short-circuit exit before any activity
+--   'skipped_no_data'          listing returned empty after polling budget
+--                              (likely holiday, possibly IEX outage)
+--   'skipped_already_ingested' date already in DB and force_reingest=false
 
 CREATE TABLE IF NOT EXISTS pipeline_runs (
     run_id                      UUID        PRIMARY KEY,
@@ -363,10 +377,33 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
     feed_source                 TEXT        NOT NULL,
     started_at                  TIMESTAMPTZ NOT NULL,
     completed_at                TIMESTAMPTZ,
-    status                      TEXT        NOT NULL,  -- 'running' | 'completed' | 'failed' | 'unverified'
+    status                      TEXT        NOT NULL,
     parser_message_count        BIGINT,
     validator_status            TEXT,
     notes                       JSONB
 );
 
 CREATE INDEX IF NOT EXISTS pipeline_runs_date_idx ON pipeline_runs (trading_date DESC);
+
+-- ─── Validation runs (one row per trading date) ──────────────────────────────
+-- Cross-feed triangle validation results. Written by ValidateTriangleActivity
+-- in the daily pipeline. PRIMARY KEY on trading_date — re-running validation
+-- for a date (e.g. after force_reingest) overwrites the prior row.
+--
+-- The load-bearing column is dpls_deep_match_pct: 100% on every trading day
+-- we've validated. Any drift below threshold flags the date as unverified
+-- and downstream narration skips it.
+
+CREATE TABLE IF NOT EXISTS validation_runs (
+    trading_date                DATE             PRIMARY KEY,
+    run_at                      TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
+    dpls_tops_match_pct         DOUBLE PRECISION,        -- DPLS-derived BBO vs TOPS QU
+    deep_tops_match_pct         DOUBLE PRECISION,        -- DEEP-derived BBO vs TOPS QU
+    dpls_deep_match_pct         DOUBLE PRECISION,        -- DPLS↔DEEP price-level (the 100% leg)
+    trade_volume_match          BOOLEAN,                  -- per-symbol DPLS vs TOPS, 0 share delta
+    elapsed_seconds             INTEGER,
+    status                      TEXT             NOT NULL,  -- 'passed' | 'below_threshold' | 'failed'
+    notes                       JSONB                    -- mismatch counts, sample mismatches, etc.
+);
+
+CREATE INDEX IF NOT EXISTS validation_runs_run_at_idx ON validation_runs (run_at DESC);
