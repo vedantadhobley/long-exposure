@@ -65,13 +65,58 @@ These are the high-signal microstructure patterns that DEEP+ uniquely makes visi
 
 The narrative layer is the LLM-driven prose generation. **Expected to be the hardest design work in the project** — every other piece is byte-shuffling or schema design; this one is fuzzy-output iteration where there's no test that says "this narrative is good."
 
+### Current working design: two-pass + verifier (subject to change)
+
+The first concrete shape we're building toward. Three Temporal activities per event, in series:
+
+```
+ExtractFactsActivity   (LLM call #1)
+   in:  score_breakdown JSON for one scored event
+   out: a "narrative blueprint" JSON —
+        { subject, what_happened, key_numbers[{value, label, source_field}],
+          angle, tone_notes }
+   The LLM enumerates the facts it'll use BEFORE writing prose, with each
+   number tied to a named source field in the input.
+
+RenderProseActivity    (LLM call #2)
+   in:  the blueprint from Pass 1
+   out: 2–3 sentences of prose (Bloomberg / FT register)
+   The LLM can only use facts from the blueprint. Style + tone is the job,
+   not fact selection. Same model, different prompt.
+
+GroundingVerifyActivity (pure code, no LLM)
+   Extracts every number/claim from the prose; asserts each appears in
+   key_numbers[]; asserts each key_numbers entry's source_field traces
+   to a real field in the original score_breakdown.
+   Two-layer grounding: prose ⊆ blueprint, blueprint ⊆ raw scored event.
+```
+
+A fourth activity (`StoreNarrativeActivity`) persists the result keyed by `event_hash` for caching. The full per-event chain is 2 LLM calls + 1 code check + 1 DB write.
+
+A separate **DailyPatternsActivity** does the cross-event synthesis once per trading day, consuming the full set of accepted narratives + their blueprints. Two LLM calls there too: extract themes → render the synthesis paragraph.
+
+**Why two-pass over single-call.** Three potential hallucination paths and where each gets caught:
+
+| Failure mode | Caught by |
+|---|---|
+| Pass 1 invents a fact not in `score_breakdown` | Blueprint verifier (source_field doesn't exist in input) → retry or refuse |
+| Pass 2 invents a number not in the blueprint | Prose verifier (number not in key_numbers[]) → retry or refuse |
+| Pass 2 misrenders a fact that IS in the blueprint | Out of scope for the verifier; relies on prompt iteration |
+
+Retry policies live in Temporal — extract retries on invalid JSON output (max 3 tries), render retries on verifier failure (max 2 tries), neither cascades indefinitely. Events that exhaust retries are dropped, not narrated.
+
+**This is the starting point, not the locked design.** Likely changes once we have real scored events to iterate against:
+- Single-call narration as a v0 for cheap baseline comparison (does two-pass actually move the needle on hallucination rate vs single-call on our specific event shapes?)
+- Per-event-type prompt templates (the halt narrative shape ≠ the sweep narrative shape; one prompt-per-pattern may produce tighter prose than one universal extract+render)
+- Whether the blueprint's `key_numbers[]` is enough grounding state or we also need explicit `time_anchors[]`, `quote_anchors[]`, etc.
+
+For 50 narrations/day × 2 LLM calls × ~150 tokens each at the joi llama.cpp throughput of ~23 tok/sec, total per-day LLM time is well under a minute. Cost isn't the constraint; quality is.
+
 ### Grounding — every claim traceable to EventScorer output
 
 The model must understand market-microstructure vocabulary and produce interpretation grounded *entirely* in the structured data fed to it. **Nothing hallucinated from training data.** Every claim in the output text — "volume 2.3× baseline", "spread widened to 3×", "halt occurred at 14:15", "spoof-shaped cluster of 8 orders" — must be derivable from a field in the EventScorer's output for that event.
 
-Operationally: the prompt template takes a structured event (JSON with score breakdown) and asks for a 2–3 sentence narrative. If a number or claim appears in the narrative that isn't in the structured input, that's a hallucination bug.
-
-Tooling implication: prompt engineering iteration should include an automated "are all numbers in the output present in the input?" check. Cheap to write, catches a class of failure that's invisible at a glance.
+The two-pass design above is how this gets enforced operationally: Pass 1 commits to a finite set of named facts, Pass 2 can only style those, the verifier confirms the prose introduced nothing new.
 
 ### Vocabulary calibration
 
