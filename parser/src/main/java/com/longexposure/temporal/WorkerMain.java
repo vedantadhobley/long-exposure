@@ -10,9 +10,11 @@ import com.longexposure.temporal.activities.PipelineRunRecorderActivityImpl;
 import com.longexposure.temporal.activities.RecordValidationActivityImpl;
 import com.longexposure.temporal.activities.ResolveUrlActivityImpl;
 import com.longexposure.temporal.activities.RetentionSweepActivityImpl;
+import com.longexposure.temporal.activities.ScoreEventsActivityImpl;
 import com.longexposure.temporal.workflows.DailyPipelineWorkflow;
 import com.longexposure.temporal.workflows.DailyPipelineWorkflowImpl;
 import com.longexposure.temporal.workflows.DailyPipelineWorkflowInput;
+import com.longexposure.temporal.workflows.ScoreOnlyWorkflow;
 import com.longexposure.temporal.workflows.ValidateOnlyWorkflow;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.schedules.Schedule;
@@ -71,7 +73,8 @@ public final class WorkerMain {
         Worker worker = factory.newWorker(DailyPipelineWorkflow.TASK_QUEUE);
         worker.registerWorkflowImplementationTypes(
                 DailyPipelineWorkflowImpl.class,
-                ValidateOnlyWorkflow.Impl.class);
+                ValidateOnlyWorkflow.Impl.class,
+                ScoreOnlyWorkflow.Impl.class);
         worker.registerActivitiesImplementations(
                 new ResolveUrlActivityImpl(),
                 new DownloadFileActivityImpl(),
@@ -80,6 +83,7 @@ public final class WorkerMain {
                 new DplsTopsValidatorActivityImpl(),
                 new DeepTopsValidatorActivityImpl(),
                 new RecordValidationActivityImpl(),
+                new ScoreEventsActivityImpl(),
                 new CleanupFilesActivityImpl(),
                 new RetentionSweepActivityImpl(),
                 new PipelineRunRecorderActivityImpl());

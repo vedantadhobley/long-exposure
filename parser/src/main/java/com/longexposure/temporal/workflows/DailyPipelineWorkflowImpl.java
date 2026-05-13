@@ -13,7 +13,9 @@ import com.longexposure.temporal.activities.PipelineRunRecorderActivity;
 import com.longexposure.temporal.activities.RecordValidationActivity;
 import com.longexposure.temporal.activities.ResolveUrlActivity;
 import com.longexposure.temporal.activities.RetentionSweepActivity;
+import com.longexposure.temporal.activities.ScoreEventsActivity;
 import com.longexposure.temporal.activities.ValidationLegResult;
+import java.util.UUID;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.common.RetryOptions;
 import io.temporal.failure.ActivityFailure;
@@ -125,6 +127,18 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
             ActivityOptions.newBuilder()
                     .setStartToCloseTimeout(Duration.ofMinutes(2))
                     .setRetryOptions(transientRetry(3))
+                    .build());
+
+    private final ScoreEventsActivity scoreEvents = Workflow.newActivityStub(
+            ScoreEventsActivity.class,
+            ActivityOptions.newBuilder()
+                    // Scoring reads from hypertables + writes thousands of
+                    // rows to scored_events. Should be quick for v1 (just
+                    // halts). Generous timeout so adding scorers doesn't
+                    // immediately require re-tuning.
+                    .setStartToCloseTimeout(Duration.ofMinutes(30))
+                    .setHeartbeatTimeout(Duration.ofMinutes(5))
+                    .setRetryOptions(transientRetry(2))
                     .build());
 
     private static ActivityOptions legOptions() {
@@ -257,6 +271,24 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
         String notes = buildNotes(parseError, validation, validateError);
 
         recorder.completeRun(runId, finalStatus, messageCount, validatorStatus, notes);
+
+        // Score: runs when parse succeeded, regardless of validation status.
+        // Unverified data is still queryable and scoreable — downstream
+        // narration will skip unverified dates per the design doc.
+        // Failure here doesn't fail the workflow; scoring can be re-run
+        // separately. UUID translates to NULL on parse failure path.
+        if (parseError == null) {
+            UUID runUuid = null;
+            try { runUuid = UUID.fromString(runId); } catch (IllegalArgumentException ignored) {}
+            try {
+                long scored = scoreEvents.scoreEvents(date, runUuid);
+                LOG.info("scoring done  date={} scored_events_written={}", date, scored);
+            } catch (ActivityFailure af) {
+                LOG.warn("scoring failed (workflow continues)  date={} err={}", date, causeMessage(af));
+            }
+        } else {
+            LOG.info("skipping scoring — parse failed  date={}", date);
+        }
 
         // Cleanup: only in cron mode AND when both parse + validate succeeded.
         // Ad-hoc runs ({@code runRetentionSweep=false}) preserve files so the

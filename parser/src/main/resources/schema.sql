@@ -407,3 +407,34 @@ CREATE TABLE IF NOT EXISTS validation_runs (
 );
 
 CREATE INDEX IF NOT EXISTS validation_runs_run_at_idx ON validation_runs (run_at DESC);
+
+-- ─── Scored events (per-event scoring output) ────────────────────────────────
+-- Written by ScoreEventsActivity after the validate triangle passes. Each row
+-- represents one "thing worth narrating" — could be a single source row
+-- (halt, large trade) or a synthesized pattern across many rows (sweep,
+-- post-cancel cluster). One row per (scorer × detection).
+--
+-- Not a hypertable — typical day produces hundreds-to-low-thousands of scored
+-- events across all scorers, well within standard B-tree range.
+--
+-- See docs/scoring-and-narration.md "Scoring architecture" for the full
+-- interface model. The breakdown JSONB is the grounding contract with the
+-- LLM narrator: every claim in narration must trace to a field here.
+
+CREATE TABLE IF NOT EXISTS scored_events (
+    event_id           BIGSERIAL        PRIMARY KEY,
+    trading_date       DATE             NOT NULL,
+    symbol             TEXT             NOT NULL,
+    ts                 TIMESTAMPTZ      NOT NULL,
+    ts_end             TIMESTAMPTZ,                       -- null for instantaneous events
+    scorer_id          TEXT             NOT NULL,          -- 'halt' | 'large_trade' | 'sweep' | ...
+    score              DOUBLE PRECISION NOT NULL,
+    breakdown          JSONB            NOT NULL,          -- transparency: facts the narrator can use
+    source_refs        JSONB            NOT NULL,          -- array of {"table":..., "ts_nanos":...}
+    scored_at          TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
+    pipeline_run       UUID                                -- nullable; ties to pipeline_runs.run_id
+);
+
+CREATE INDEX IF NOT EXISTS scored_events_date_score_idx ON scored_events (trading_date, score DESC);
+CREATE INDEX IF NOT EXISTS scored_events_symbol_idx     ON scored_events (symbol, ts DESC);
+CREATE INDEX IF NOT EXISTS scored_events_scorer_idx     ON scored_events (scorer_id, trading_date);

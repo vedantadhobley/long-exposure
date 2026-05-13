@@ -30,7 +30,7 @@ public final class ValidateOnlyWorkflow {
     public interface Iface {
         String TASK_QUEUE = "long-exposure-daily-pipeline";
 
-        @WorkflowMethod
+        @WorkflowMethod(name = "ValidateOnlyWorkflow")
         String run(LocalDate targetDate);
     }
 
