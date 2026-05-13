@@ -121,9 +121,10 @@ services:
     volumes:
       - ./parser:/app
       - long-exposure-dev-gradle-cache:/root/.gradle
-      # Read-only mount of the project's persistent data dir (HIST .pcap.gz
-      # files, specs, etc.). Convention: ~/workspace/data/<project> → /storage.
-      - ${HOME}/workspace/data/long-exposure:/storage:ro
+      # Project data dir (HIST .pcap.gz files, specs, etc.). The Temporal
+      # worker downloads to /storage/raw/, so this needs to be RW.
+      # Convention: ~/workspace/data/<project> → /storage.
+      - ${HOME}/workspace/data/long-exposure:/storage
     depends_on:
       postgres:
         condition: service_healthy

@@ -1,0 +1,163 @@
+package com.longexposure.temporal;
+
+import com.longexposure.temporal.activities.CleanupFilesActivityImpl;
+import com.longexposure.temporal.activities.DownloadFileActivityImpl;
+import com.longexposure.temporal.activities.ParseAndWriteDplsActivityImpl;
+import com.longexposure.temporal.activities.PipelineRunRecorderActivityImpl;
+import com.longexposure.temporal.activities.ResolveUrlActivityImpl;
+import com.longexposure.temporal.activities.RetentionSweepActivityImpl;
+import com.longexposure.temporal.activities.ValidateTriangleActivityImpl;
+import com.longexposure.temporal.workflows.DailyPipelineWorkflow;
+import com.longexposure.temporal.workflows.DailyPipelineWorkflowImpl;
+import com.longexposure.temporal.workflows.DailyPipelineWorkflowInput;
+import io.temporal.client.WorkflowClient;
+import io.temporal.client.schedules.Schedule;
+import io.temporal.client.schedules.ScheduleActionStartWorkflow;
+import io.temporal.client.schedules.ScheduleAlreadyRunningException;
+import io.temporal.client.schedules.ScheduleClient;
+import io.temporal.client.schedules.ScheduleOptions;
+import io.temporal.client.schedules.SchedulePolicy;
+import io.temporal.client.schedules.ScheduleSpec;
+import io.temporal.client.schedules.ScheduleState;
+import io.temporal.client.WorkflowOptions;
+import io.temporal.common.interceptors.ScheduleClientCallsInterceptor;
+import io.temporal.serviceclient.WorkflowServiceStubs;
+import io.temporal.serviceclient.WorkflowServiceStubsOptions;
+import io.temporal.worker.Worker;
+import io.temporal.worker.WorkerFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.util.List;
+
+/**
+ * Temporal worker entry point + schedule registration.
+ *
+ * <p>Run via {@code start()} when no smoke-test file is configured.
+ * Registers {@link DailyPipelineWorkflow} + every activity impl on
+ * {@link DailyPipelineWorkflow#TASK_QUEUE}, then registers a cron
+ * schedule that fires at 00:00 America/New_York on Tue–Sat (T+1 of
+ * a trading session).
+ */
+public final class WorkerMain {
+
+    private static final Logger LOG = LoggerFactory.getLogger(WorkerMain.class);
+
+    /** Schedule ID. Same name used by every worker — schedule is global. */
+    public static final String SCHEDULE_ID = "daily-pipeline-cron";
+
+    private WorkerMain() {}
+
+    public static void start() {
+        String temporalHost = System.getenv().getOrDefault("TEMPORAL_HOST", "long-exposure-dev-temporal:7233");
+        LOG.info("connecting to Temporal  host={}", temporalHost);
+
+        WorkflowServiceStubs service = WorkflowServiceStubs.newServiceStubs(
+                WorkflowServiceStubsOptions.newBuilder()
+                        .setTarget(temporalHost)
+                        .build());
+
+        WorkflowClient client = WorkflowClient.newInstance(service);
+        WorkerFactory factory = WorkerFactory.newInstance(client);
+
+        Worker worker = factory.newWorker(DailyPipelineWorkflow.TASK_QUEUE);
+        worker.registerWorkflowImplementationTypes(DailyPipelineWorkflowImpl.class);
+        worker.registerActivitiesImplementations(
+                new ResolveUrlActivityImpl(),
+                new DownloadFileActivityImpl(),
+                new ParseAndWriteDplsActivityImpl(),
+                new ValidateTriangleActivityImpl(),
+                new CleanupFilesActivityImpl(),
+                new RetentionSweepActivityImpl(),
+                new PipelineRunRecorderActivityImpl());
+
+        factory.start();
+        LOG.info("worker started  task_queue={}", DailyPipelineWorkflow.TASK_QUEUE);
+
+        // Schedule registration is best-effort: if it fails, the worker
+        // still runs and ad-hoc executions work.
+        try {
+            registerSchedule(client);
+        } catch (Exception e) {
+            LOG.warn("schedule registration failed (worker continues running)", e);
+        }
+
+        // Block forever — Temporal's worker threads keep running.
+        try {
+            Thread.currentThread().join();
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * Register the cron schedule (idempotent — if it already exists,
+     * skip and log).
+     *
+     * <p>Spec: 00:00 America/New_York, Tue–Sat. Tue–Sat because each run
+     * processes T-1's trading day (Mon's data on Tue, Fri's on Sat).
+     * Trading-day detection happens inside the workflow via
+     * {@code ResolveUrlActivity.NotATradingDay}, so a Sat run on a
+     * holiday Friday just short-circuits to {@code skipped_no_data}.
+     */
+    private static void registerSchedule(final WorkflowClient client) {
+        ScheduleClient scheduleClient = ScheduleClient.newInstance(client.getWorkflowServiceStubs());
+
+        // Workflow input: a stub date is built at fire time below via the
+        // Action's argument list — Temporal will pass an empty
+        // DailyPipelineWorkflowInput-shaped argument here unless we close
+        // over a concrete date. We hand it a placeholder and rely on a
+        // wrapper workflow approach: since we can't compute "yesterday"
+        // declaratively in the schedule, we register a self-contained
+        // schedule that produces a runnable starter workflow.
+        //
+        // Pragmatic Sprint 1 shape: use cron + a fixed-input action that
+        // passes a LocalDate.MIN placeholder; the workflow checks if its
+        // input is the placeholder and resolves "today_et - 1 day" at
+        // entry. (Future cleanup: a separate Cron schedule that calls a
+        // shim activity to compute the date.)
+        LocalDate placeholder = LocalDate.of(1970, 1, 1);
+        DailyPipelineWorkflowInput input = DailyPipelineWorkflowInput.cron(placeholder);
+
+        String workflowIdBase = DailyPipelineWorkflow.WORKFLOW_ID_PREFIX + "scheduled";
+        ScheduleActionStartWorkflow action = ScheduleActionStartWorkflow.newBuilder()
+                .setWorkflowType(DailyPipelineWorkflow.class)
+                .setArguments(input)
+                .setOptions(WorkflowOptions.newBuilder()
+                        .setWorkflowId(workflowIdBase)
+                        .setTaskQueue(DailyPipelineWorkflow.TASK_QUEUE)
+                        .build())
+                .build();
+
+        ScheduleSpec spec = ScheduleSpec.newBuilder()
+                .setCronExpressions(List.of("0 0 * * 2-6"))   // 00:00 Tue–Sat
+                .setTimeZoneName("America/New_York")
+                .build();
+
+        Schedule schedule = Schedule.newBuilder()
+                .setAction(action)
+                .setSpec(spec)
+                .setPolicy(SchedulePolicy.newBuilder()
+                        .setOverlap(io.temporal.api.enums.v1.ScheduleOverlapPolicy.SCHEDULE_OVERLAP_POLICY_SKIP)
+                        .build())
+                .setState(ScheduleState.newBuilder().setPaused(false).build())
+                .build();
+
+        try {
+            scheduleClient.createSchedule(SCHEDULE_ID, schedule, ScheduleOptions.newBuilder().build());
+            LOG.info("schedule registered  id={} spec='0 0 * * 2-6 America/New_York'", SCHEDULE_ID);
+        } catch (ScheduleAlreadyRunningException already) {
+            LOG.info("schedule already exists — leaving as-is  id={}", SCHEDULE_ID);
+        }
+    }
+
+    /** Returns the current trading-day target: previous calendar day in ET. */
+    public static LocalDate yesterdayInET() {
+        ZonedDateTime nowET = ZonedDateTime.now(ZoneId.of("America/New_York"));
+        return nowET.toLocalDate().minusDays(1);
+    }
+}

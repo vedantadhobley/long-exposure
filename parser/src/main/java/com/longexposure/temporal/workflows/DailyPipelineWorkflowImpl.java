@@ -21,6 +21,8 @@ import org.slf4j.Logger;
 
 import java.time.Duration;
 import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.List;
 
 /**
@@ -127,9 +129,21 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
 
     // ─── run() ───────────────────────────────────────────────────────────────
 
+    /** Placeholder date used by the cron schedule — workflow resolves to yesterday-ET at start. */
+    private static final LocalDate PLACEHOLDER_DATE = LocalDate.of(1970, 1, 1);
+
     @Override
     public String run(final DailyPipelineWorkflowInput input) {
-        LocalDate date = input.targetDate();
+        LocalDate resolved = input.targetDate();
+        if (PLACEHOLDER_DATE.equals(resolved)) {
+            // Scheduled run — resolve trading date as yesterday in ET.
+            ZonedDateTime nowET = ZonedDateTime.ofInstant(
+                    java.time.Instant.ofEpochMilli(Workflow.currentTimeMillis()),
+                    ZoneId.of("America/New_York"));
+            resolved = nowET.toLocalDate().minusDays(1);
+            LOG.info("scheduled run — resolved placeholder to date={}", resolved);
+        }
+        final LocalDate date = resolved;
         LOG.info("workflow start  date={} poll={} force={} sweep={}",
                 date, input.pollUntilReady(), input.forceReingest(), input.runRetentionSweep());
 

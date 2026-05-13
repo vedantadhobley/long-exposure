@@ -90,12 +90,11 @@ public final class Main {
                 System.getenv("IEX_PCAP_FILE"));
 
         if (filePath == null) {
-            System.out.println("long-exposure-parser starting (idle stub)");
-            System.out.println("Set IEX_PCAP_FILE or pass a path as args[0] to run the smoke test.");
+            System.out.println("long-exposure-parser starting in Temporal worker mode");
             System.out.println("TEMPORAL_HOST=" + System.getenv("TEMPORAL_HOST"));
             System.out.println("POSTGRES_HOST=" + System.getenv("POSTGRES_HOST"));
             System.out.println("LLAMA_URL=" + System.getenv("LLAMA_URL"));
-            Thread.currentThread().join();
+            com.longexposure.temporal.WorkerMain.start();
             return;
         }
 
