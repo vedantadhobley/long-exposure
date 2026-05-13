@@ -9,6 +9,6 @@ import io.temporal.activity.ActivityMethod;
  */
 @ActivityInterface
 public interface DplsDeepValidatorActivity {
-    @ActivityMethod
+    @ActivityMethod(name = "DplsDeepValidate")
     ValidationLegResult validate(String dplsFilePath, String deepFilePath);
 }

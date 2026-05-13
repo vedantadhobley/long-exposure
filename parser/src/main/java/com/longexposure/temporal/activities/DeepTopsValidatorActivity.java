@@ -6,6 +6,6 @@ import io.temporal.activity.ActivityMethod;
 /** DEEP-derived BBO vs TOPS QuoteUpdate cross-validation leg. */
 @ActivityInterface
 public interface DeepTopsValidatorActivity {
-    @ActivityMethod
+    @ActivityMethod(name = "DeepTopsValidate")
     ValidationLegResult validate(String deepFilePath, String topsFilePath);
 }

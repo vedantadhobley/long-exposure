@@ -2,7 +2,7 @@
 
 Project scratchpad, agent + human editable. Cross-references @plan.md for full context and @decisions.md for the reasoning behind structural choices.
 
-Last refresh: 2026-05-12. Sprints A–D done. **Temporal scaffolding is next.**
+Last refresh: 2026-05-13. Sprint 1 (Temporal scaffolding) done. **Bootstrap baselines + event scoring next.**
 
 ---
 
@@ -11,12 +11,15 @@ Last refresh: 2026-05-12. Sprints A–D done. **Temporal scaffolding is next.**
 State of the world:
 
 - TOPS + DEEP + DPLS .pcap.gz for both 2026-05-07 and 2026-05-08 sit at `~/workspace/data/long-exposure/raw/`.
-- Both days fully loaded into Postgres (TOPS: 295 M rows + DPLS: 364 M rows for 2026-05-08; same shape for 2026-05-07).
-- Triangle cross-validation done on both days (DPLS↔DEEP 100.0000 %, DPLS→TOPS 99.4184 %, DEEP→TOPS 99.4184 %). See @validation-results.md.
+- Both days fully loaded into Postgres for triangle validation purposes.
+- Triangle cross-validation done on both days (DPLS↔DEEP ≥ 99.99999 %, DPLS→TOPS 99.4017–99.4184 %, DEEP→TOPS identical to DPLS→TOPS to the share).
 - `prior_close_20260507.csv` derived and used for per-symbol round-lot tier.
-- `parser` Java module is fully wired through `Main` for: smoke-test, write-db, BBO cross-validation, prior-close extract, and trace tools.
+- **Temporal pipeline running**. `DailyPipelineWorkflow` + `ValidateOnlyWorkflow` registered on task queue `long-exposure-daily-pipeline`. Cron schedule paused — operator unpauses when ready.
+- `validation_runs` populated for 2026-05-08 with `status=passed`.
 
-Next thing to build: **Temporal scaffolding** — wraps the existing parse-and-write loop into a Temporal workflow with retries + heartbeating + cron schedule, so the daily HIST file gets ingested automatically.
+Next thing to build: **Bootstrap baselines** (30 trading days of historical HIST → load via the workflow → cagg populates → ready for scorer). Trivially scriptable as a loop of `temporal workflow start` calls.
+
+After bootstrap, the algorithmic core: **EventScorer** (per-event-type scoring with transparent JSON breakdowns — pattern catalog in @scoring-and-narration.md).
 
 1. **Verify the dev stack is still up**:
 
@@ -26,13 +29,23 @@ Next thing to build: **Temporal scaffolding** — wraps the existing parse-and-w
 
    Temporal containers (`long-exposure-dev-temporal`, `long-exposure-dev-temporal-postgres`, `long-exposure-dev-temporal-ui`) should all be healthy. Temporal UI is at `http://long-exposure-dev-temporal-ui.luv`.
 
-2. **Re-confirm latest commits** to know where we resume:
+2. **Re-confirm latest commits**:
 
    ```bash
    git log --oneline -10
    ```
 
-3. **Tell me "go" and I'll start on Temporal Sprint 1** — minimal workflow + activity registration: `WorkerMain` (replaces the current smoke-test `Main` loop), `IngestWorkflow`, three activity classes (`DownloadHistActivity`, `DecompressActivity`, `ParseAndWriteActivity`), retry policies per activity, heartbeats from the long-running parse, cron-scheduled at 6 AM ET. The 30-day baseline bootstrap and downstream activities (validation, scoring, narration, storage) layer on top later.
+3. **Trigger an ad-hoc workflow** for any historical date to verify the pipeline still works end-to-end before kicking off bootstrap:
+
+   ```bash
+   docker exec long-exposure-dev-temporal temporal workflow start \
+     --task-queue long-exposure-daily-pipeline \
+     --type DailyPipelineWorkflow \
+     --workflow-id daily-pipeline-test-YYYYMMDD \
+     --input '{"targetDate":[YYYY,M,D],"pollUntilReady":false,"forceReingest":false,"runRetentionSweep":false}'
+   ```
+
+4. **Then start on bootstrap** — script a loop that calls the above with `forceReingest=true` for the previous 30 trading days. Use the `validate-only` workflow shape (just `Iface`) for any reruns of just-validation.
 
 ---
 
@@ -85,10 +98,10 @@ Full layout in @plan.md. Quick status:
 
 ## After parser+storage ships — order of next work
 
-Pulled Temporal earlier than the original plan had it; once orchestration is in, the downstream activities slot in one by one. Full details in @plan.md.
+Full details in @plan.md.
 
-- [ ] **Temporal scaffolding** — convert the smoke-test loop into a Temporal workflow with retries + heartbeats. Three activities to start: `DownloadHistActivity`, `DecompressActivity`, `ParseAndWriteActivity`. Cron-scheduled nightly. Tomorrow's session.
-- [ ] **Bootstrap baselines** — run the workflow 30 times against historical HIST dates → continuous aggregate populates → ready for scorer. (Trivially scriptable once the workflow is in.)
+- [x] **Temporal scaffolding** ✅ done 2026-05-13. Two workflows + 10 activities + paused cron schedule. End-to-end verified on 2026-05-08. Full layout in @temporal-design.md.
+- [ ] **Bootstrap baselines** — run the workflow 30 times against historical HIST dates → continuous aggregate populates → ready for scorer. (Trivially scriptable now that the workflow is in.)
 - [ ] **Event scoring** (`com.longexposure.scoring.EventScorer`) — the algorithmic core. Per-event-type scoring with transparent JSON breakdown for "why this event scored high"
 - [ ] **LLM narration** — prompt engineering against `llama-large.joi`. Expected to be the hardest part of the project.
 - [ ] **FastAPI endpoints** — the read-only API consumed by vedanta-systems

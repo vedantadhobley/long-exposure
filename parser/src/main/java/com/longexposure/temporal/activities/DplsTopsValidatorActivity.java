@@ -6,6 +6,6 @@ import io.temporal.activity.ActivityMethod;
 /** DPLS-derived BBO vs TOPS QuoteUpdate cross-validation leg. */
 @ActivityInterface
 public interface DplsTopsValidatorActivity {
-    @ActivityMethod
+    @ActivityMethod(name = "DplsTopsValidate")
     ValidationLegResult validate(String dplsFilePath, String topsFilePath);
 }

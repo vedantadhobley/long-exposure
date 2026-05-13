@@ -1,356 +1,491 @@
-# Temporal pipeline design
+# Temporal pipeline — design and as-built
 
-What the nightly ingest workflow does, how it handles trading-day detection,
-retries, validation, and cleanup. Written before any Temporal code lands —
-this is the design we agreed on; the code will follow it.
+What the daily ingest pipeline does, how it's wired, what each activity is
+responsible for. Reflects what's actually running in `parser/src/main/java/com/longexposure/temporal/`.
 
-## Scope
+> Status: Sprint 1 complete (parse + validate + cleanup + retention).
+> Sprint 4+ activities (scoring, narration, cache invalidation) are
+> deferred; they live in a separate `DailyNarrationWorkflow` not yet built.
 
-One workflow class, two operating modes:
+## Workflows
 
-- **Cron mode** — fires nightly at midnight ET (Tue–Sat in `America/New_York`)
-  to ingest the previous trading day's data. Polls IEX HIST for files until
-  they're available.
-- **Ad-hoc mode** — manually invoked from Temporal UI with a target date.
-  Runs the same downstream steps but **skips the polling logic** (the file
-  either exists at IEX HIST already, or it doesn't — no point waiting).
+Two workflows registered on task queue `long-exposure-daily-pipeline`:
 
-Both modes share the same workflow code. The difference is a single
-`poll_until_ready: bool` flag on the workflow input.
+| Workflow | Trigger | What it does |
+|---|---|---|
+| `DailyPipelineWorkflow` | cron (midnight ET, paused) + ad-hoc | Full end-to-end: resolve URLs, download 3 feeds, parse DPLS, validate triangle, optionally clean files + sweep retention |
+| `ValidateOnlyWorkflow` (`Iface`) | ad-hoc only | Run the 3 validators in parallel against pcap.gz files already on disk; upsert `validation_runs`. Used to re-validate after a parse without re-ingesting |
 
-## Workflow input
+Both share the same activity registry — only the orchestration logic differs.
 
-```
-DailyPipelineWorkflowInput {
-    target_date:        LocalDate  // trading date to process
-    poll_until_ready:   boolean    // cron passes true; ad-hoc passes false
-    force_reingest:     boolean    // cron passes false; ad-hoc may pass true
-    run_retention_sweep: boolean   // cron passes true; ad-hoc passes false
-}
-```
+---
 
-Three independent flags, each defaulted differently by mode:
+## `DailyPipelineWorkflow`
 
-| Flag                  | Cron default | Ad-hoc default | What it controls                               |
-|-----------------------|--------------|----------------|------------------------------------------------|
-| `poll_until_ready`    | `true`       | `false`        | Polling-retry on `FilesNotReady`               |
-| `force_reingest`      | `false`      | (caller's choice) | Drop + re-parse if date already in DB        |
-| `run_retention_sweep` | `true`       | `false`        | Drop Postgres chunks older than retention floor |
+### Input
 
-Ad-hoc runs are **purely additive** by default: they ingest the requested
-date, never touch existing data outside that date, and never run the
-retention sweep. The only destructive action they can take is re-ingesting
-the requested date, and only when `force_reingest=true`.
-
-## What gets downloaded vs stored
-
-Daily we download **all three feeds** (DPLS, DEEP, TOPS), validate the
-triangle, and **drop all three raw files after success**. Steady-state
-disk usage for raw files: 0 bytes.
-
-Only DPLS is parsed into Postgres. DEEP and TOPS are read in-memory by the
-validators and discarded. The product runs on DPLS-derived data; DEEP and
-TOPS exist solely as ongoing correctness oracles.
-
-## Dependency graph
-
-```
-[ pre-check: weekend → exit clean ]
-[ pre-check: already-ingested + !force_reingest → exit clean ]
-
-                  ┌─→ ParseAndWriteDpls ─┐
-DPLS_download ───┤                       │
-                  └─→                    │
-                                         ├─→ CleanupFiles ─→ [if cron] RetentionSweep
-                  ┌─→                    │
-DEEP_download ───┼─→ ValidateTriangle ──┘
-                  │
-TOPS_download ───┘
+```java
+DailyPipelineWorkflowInput(
+    LocalDate targetDate,           // trading date (1970-01-01 = "yesterday-ET" placeholder for cron)
+    boolean   pollUntilReady,       // true: long-poll on FilesNotReady (15-min, 3-hr budget). false: fail fast.
+    boolean   forceReingest,        // true: pre-clean + re-parse even if status='ok' row exists.
+    boolean   runRetentionSweep)    // true: drop chunks older than 30 days at end. Also gates CleanupFiles.
 ```
 
-Three concurrent download branches. As soon as DPLS download finishes,
-`ParseAndWriteDpls` starts. As soon as **all three** downloads finish,
-`ValidateTriangle` starts. `CleanupFiles` runs after both parse and
-validation have completed.
+Helpers: `cron(date)` → `(date, true, false, true)`. `adHoc(date)` → `(date, false, false, false)`.
+`adHocForceReingest(date)` → `(date, false, true, false)`.
 
-`ParseAndWriteDpls` and `ValidateTriangle` run in parallel — they don't
-depend on each other.
+### Flow
 
-The `RetentionSweep` step runs only when `run_retention_sweep=true` (cron).
-Ad-hoc runs end at `CleanupFiles`.
+```mermaid
+flowchart TD
+    Start([Workflow start]) --> Resolved{targetDate ==<br/>placeholder<br/>1970-01-01?}
+    Resolved -->|yes| ResolveDate[date := yesterday-ET]
+    Resolved -->|no| UseInput[date := input.targetDate]
+    ResolveDate --> Already
+    UseInput --> Already
 
-## Idempotency / force-reingest model
+    Already{isAlreadyIngested?<br/>and !forceReingest}
+    Already -->|yes| SkipAlready[recordSkipped:<br/>skipped_already_ingested]
+    SkipAlready --> EndA([end])
 
-A pre-check at workflow start:
+    Already -->|no| StartRun[recorder.startRun → runId]
+    StartRun --> ResolveAll
 
+    ResolveAll[Resolve URLs<br/>3 parallel] --> ResolveDPLS[ResolveUrl DPLS]
+    ResolveAll --> ResolveDEEP[ResolveUrl DEEP]
+    ResolveAll --> ResolveTOPS[ResolveUrl TOPS]
+
+    ResolveDPLS --> AwaitR{All three<br/>resolved?}
+    ResolveDEEP --> AwaitR
+    ResolveTOPS --> AwaitR
+
+    AwaitR -->|NotATradingDay| SkipNoData[completeRun:<br/>skipped_no_data]
+    SkipNoData --> EndB([end])
+
+    AwaitR -->|all ok| Downloads
+    Downloads[Download files<br/>3 parallel<br/>resume short-circuit] --> DownloadDPLS[DownloadFile DPLS]
+    Downloads --> DownloadDEEP[DownloadFile DEEP]
+    Downloads --> DownloadTOPS[DownloadFile TOPS]
+
+    DownloadDPLS --> Parse[ParseAndWriteDpls<br/>pre-clean + COPY]
+    DownloadDPLS --> ValDDe
+    DownloadDEEP --> ValDDe[DplsDeepValidate]
+    DownloadDPLS --> ValDT[DplsTopsValidate]
+    DownloadTOPS --> ValDT
+    DownloadDEEP --> ValDeT[DeepTopsValidate]
+    DownloadTOPS --> ValDeT
+
+    Parse --> AwaitAll
+    ValDDe --> AwaitAll
+    ValDT --> AwaitAll
+    ValDeT --> AwaitAll
+
+    AwaitAll{All four<br/>complete?} --> Record[RecordValidation<br/>upsert validation_runs]
+    Record --> Status[computeFinalStatus<br/>from parse + record results]
+    Status --> CompleteRun[recorder.completeRun]
+
+    CompleteRun --> CleanupGate{runRetentionSweep<br/>AND status=ok?}
+    CleanupGate -->|yes| Cleanup[CleanupFiles<br/>delete 3 .pcap.gz]
+    CleanupGate -->|no| Skip[skip cleanup<br/>files retained]
+    Cleanup --> SweepGate
+    Skip --> SweepGate
+
+    SweepGate{runRetentionSweep?}
+    SweepGate -->|yes| Sweep[RetentionSweep<br/>drop_chunks older<br/>than 30 days]
+    SweepGate -->|no| EndC
+    Sweep --> EndC([end])
 ```
-existing = SELECT status FROM pipeline_runs
-           WHERE trading_date = target_date
-             AND status IN ('completed', 'validation_failed_data_ok')
 
-if existing AND NOT input.force_reingest:
-    log "date already ingested, skipping (use force_reingest=true to override)"
-    write pipeline_runs row with status='skipped_already_ingested'
-    exit clean
+### Status values
+
+Written to `pipeline_runs.status`:
+
+| Value | Meaning |
+|---|---|
+| `running` | Set by `startRun`, replaced on completion |
+| `ok` | Parse + all 3 validation legs passed thresholds |
+| `unverified` | Parse ok, validation below threshold (e.g. DPLS↔DEEP dropped below 99.99%) |
+| `validation_failed_data_ok` | Parse ok, validation activity threw (NOT a real correctness failure) |
+| `parse_failed` | Parse activity exhausted retries |
+| `skipped_already_ingested` | `isAlreadyIngested(date)` returned true; no work done |
+| `skipped_no_data` | `ResolveUrlActivity` threw `NotATradingDay` (weekend/holiday) |
+| `terminated` | Reconciled by the operator after a `temporal workflow terminate` |
+
+---
+
+## `ValidateOnlyWorkflow`
+
+A thin workflow that runs just the 3 validators in parallel against
+already-downloaded `.pcap.gz` files. Skips the 30-40 min parse phase when
+DB data exists from a prior partial run.
+
+### Input
+
+`LocalDate targetDate` — only argument. Files must exist at
+`/storage/raw/YYYYMMDD_IEXTP1_{DPLS1.0,DEEP1.0,TOPS1.6}.pcap.gz`.
+
+### Flow
+
+```mermaid
+flowchart TD
+    Start([Workflow start]) --> Paths[Resolve 3 file paths<br/>from date]
+    Paths --> Fanout
+
+    Fanout[Dispatch 3 legs<br/>concurrently] --> DD[DplsDeepValidate]
+    Fanout --> DT[DplsTopsValidate]
+    Fanout --> DeT[DeepTopsValidate]
+
+    DD --> AwaitAll
+    DT --> AwaitAll
+    DeT --> AwaitAll
+
+    AwaitAll{All 3<br/>complete?} --> Record[RecordValidation<br/>upsert validation_runs]
+    Record --> End([return status])
 ```
 
-If `force_reingest=true`, the pre-clean step in `ParseAndWriteDpls`
-deletes all DPLS rows for `target_date` across every event table before
-re-parsing. The new run replaces the old one.
+Trigger via Temporal CLI:
 
-`pipeline_runs` is the system-of-record for "have we processed this
-date." `trades.feed_source='DPLS' AND ts::date=X` is the data-of-record.
-In normal operation the two agree; if they diverge, the data tables are
-authoritative and a row gets recorded in `pipeline_runs` reflecting that.
+```bash
+docker exec long-exposure-dev-temporal temporal workflow start \
+  --task-queue long-exposure-daily-pipeline \
+  --type Iface --workflow-id validate-YYYYMMDD \
+  --input '[YYYY,M,D]'
+```
+
+---
 
 ## Activities
 
-| Activity | Purpose | Retry policy |
+Ten activity classes total. All share the same `long-exposure-daily-pipeline`
+task queue and are registered together in `WorkerMain.start()`.
+
+### `ResolveUrlActivity`
+
+**What.** Hits `https://iextrading.com/api/1.0/hist?date=YYYYMMDD`, parses
+the JSON listing, returns the GCS-signed download URL for the requested
+`Feed` (DPLS / DEEP / TOPS).
+
+**Failure modes.**
+
+| Condition | Exception | Behavior |
 |---|---|---|
-| `ResolveUrlActivity(date, feed)` | Fetch the IEX HIST listing for the date; return the download URL for the given feed. | **Polling-retry on `FilesNotReady`** when `poll_until_ready=true`: 15-min interval, 3-hr total budget. **Non-retriable** when `poll_until_ready=false`. **Transient-retry on `NetworkError`** always: 30-sec × 5. |
-| `DownloadFileActivity(url, dest_path)` | HTTPS pull a .pcap.gz from GCS to local disk. Heartbeats every few seconds during the multi-GB pull. | Transient-retry on `NetworkError`, `HttpServerError`: 30-sec × 5. Non-retriable on `FileNotFoundAtUrl` (means our resolve gave a bad URL — bug) or `DiskFull`. |
-| `ParseAndWriteDplsActivity(path, target_date)` | Idempotent. Pre-clean: deletes existing rows for `(feed_source='DPLS', date=target_date)` across all DPLS tables. Then parses + COPY-writes the file. Heartbeats every 100 K rows. | Transient-retry on `PostgresTransientError`: 30-sec × 3. Non-retriable on `DecodeError(strict)`. |
-| `ValidateTriangleActivity(dpls_path, deep_path, tops_path, target_date)` | Runs all three validators in-memory (`DplsBboCrossValidator`, `DeepBboCrossValidator`, `DeepVsDplsValidator`). Writes one row to `validation_runs`. **Validation failure does NOT block parse or cleanup.** | Transient-retry on `PostgresTransientError`: 30-sec × 3. Non-retriable on a real validation mismatch (we WANT the failure visible). |
-| `CleanupFilesActivity(paths, parse_status, validation_status)` | Deletes the .pcap.gz files for this run **only if BOTH parse and validation succeeded**. On either failure, files are kept for forensic debugging. | None — best-effort. Failure to delete a file is logged and ignored. |
-| `RetentionSweepActivity(today, retain_days=30)` | Runs only in cron mode (gated by `run_retention_sweep` flag). Drops TimescaleDB chunks older than `today - retain_days` across all DPLS event tables (and the DPLS feed-source rows in shared tables). Idempotent — re-running on the same day is a no-op. | Transient-retry on `PostgresTransientError`: 30-sec × 3. Failure is logged but does NOT fail the workflow (already-completed parse/validate are real wins; retention is opportunistic). |
+| HTTP listing returns `"Not Found"` / empty | `NotATradingDay` | Non-retriable. Workflow → `skipped_no_data` |
+| Listing has entries but missing the requested feed | `FilesNotReady` | Retriable in cron mode (15-min interval, 3-hr budget). Non-retriable in ad-hoc mode |
+| HTTP 5xx, timeout, DNS failure | `RuntimeException` | Transient-retry (30s × 3) |
 
-## Trading-day detection
+**Timeouts.** start-to-close 30s. schedule-to-close 3hr (cron) or 1min (ad-hoc).
 
-The IEX HIST bare listing endpoint (`/api/1.0/hist`) returns a dict keyed
-by every trading day IEX has data for. We use **presence/absence in this
-dict as our calendar**.
+### `DownloadFileActivity`
 
-- Date present → trading day → ingest.
-- Date absent at trigger time AND `poll_until_ready=true` → could be (a) not yet
-  uploaded, or (b) a non-trading day. Polling-retry over 3 hours resolves
-  it: trading days reliably have files by 12:11 AM ET worst observed, so a
-  3-hour budget from midnight is comfortable.
-- Date absent after polling budget exhausted → non-trading day (or rare
-  IEX outage on a real trading day). Workflow exits cleanly with a
-  `skipped_no_data` row in `pipeline_runs`.
+**What.** HTTP GET the GCS-signed URL, stream to `destPath`. Heartbeats
+every 50 MB streamed. Resume short-circuit: if `destPath` already exists
+at the expected content-length, skip the download.
 
-No hardcoded holiday list. No external calendar API. The HIST listing IS
-our calendar.
+**Timeouts.** start-to-close 1hr, heartbeat 2min.
 
-Cheap weekend short-circuit before the API call: if
-`target_date.dayOfWeek` is Saturday or Sunday, exit immediately without
-polling. Saves 12 useless API calls 2 days a week.
+**Retry.** Transient retry × 5 on `IOException`. Partial file deleted
+before retry to keep the activity idempotent.
 
-## Retention
+### `ParseAndWriteDplsActivity`
 
-Two distinct retention concerns, both governed by the cron workflow only:
+**What.**
+1. **Pre-clean.** `DELETE FROM <table> WHERE feed_source='DPLS' AND ts >= <date> AND ts < <date>+1` across all 13 DPLS-affected tables. Makes the activity **idempotent** — running it twice gives the same result whether or not there's residual data from a prior failed attempt.
+2. **Apply schema** via `SchemaManager.apply()` (idempotent: every DDL is `IF NOT EXISTS`).
+3. **Parse + write.** Open the `.pcap.gz`, walk IEX-TP packets, decode via `DplsMessageRouter`, write rows via `TimescaleWriter` (COPY-based, 100 K-row flush). Heartbeats every 100 K messages.
 
-**Raw .pcap.gz files on disk.** Dropped per-pipeline-run, after parse +
-validate both succeed. Steady-state usage: 0 bytes. No rolling-window
-file retention — every file is processed-and-deleted on the same workflow
-run that downloaded it.
+**Tables touched by pre-clean.**
 
-**Postgres event data.** **30-day rolling window.** The scorer's
-baseline needs ≥ 30 trading days; this matches that floor exactly. Each
-cron workflow run's last activity is `RetentionSweepActivity`, which
-drops TimescaleDB chunks where the max date is older than `today - 30 days`
-across all DPLS event tables (`orders_add`, `orders_modify`,
-`orders_delete`, `orders_executed`, `clear_books`, plus the rows with
-`feed_source='DPLS'` in shared tables like `trades`, `trade_breaks`,
-`status_events`, `retail_liquidity`, `securities`).
+```
+DPLS-only:  orders_add, orders_modify, orders_delete, orders_executed, clear_books
+Shared w/ TOPS (DPLS rows only): trades, trade_breaks, quotes, status_events,
+                                  auction_info, official_prices, securities,
+                                  retail_liquidity
+```
 
-Ad-hoc runs **never** trigger the retention sweep (the workflow input
-flag is defaulted to false). Old historical loads (e.g. the 2026-05-07
-and 2026-05-08 TOPS data we hand-loaded for the initial cross-validation)
-are unaffected by cron retention since their feed_source isn't DPLS.
+**Timeouts.** start-to-close 2hr, heartbeat 15min (covers the worst-case
+DELETE of a full day's residual rows + COPY-write of 364M rows).
 
-`narratives`, `validation_runs`, and `pipeline_runs` are retained
-indefinitely — small tables, valuable for retrospective analysis.
+**Retry.** Transient retry × 3 on `RuntimeException`.
+
+### `DplsDeepValidatorActivity`
+
+**What.** Runs `DeepVsDplsValidator` — derives a price-level book from DPLS
+order events, compares to DEEP's PLU(transaction-complete) at every
+transaction boundary. Independent of TOPS. The load-bearing 100%-match leg.
+
+**Returns.** `ValidationLegResult{compared, matched, mismatched, matchRate, elapsedMs}`.
+
+**Timeouts.** start-to-close 30min. No heartbeat (validator's inner loop
+doesn't surface heartbeat points).
+
+### `DplsTopsValidatorActivity`
+
+**What.** Runs `DplsBboCrossValidator` — derives round-lot-protected BBO from
+DPLS book state, compares to every TOPS QuoteUpdate. Round-lots from
+`IEX_PRIOR_CLOSE_CSV` env if set, else falls back to Reg-NMS tier defaults.
+
+**Timeouts.** Same as DPLS↔DEEP.
+
+### `DeepTopsValidatorActivity`
+
+**What.** Same shape as DPLS→TOPS but the book is DEEP's price-level
+aggregate. Should match DPLS→TOPS to the share if both parsers are
+bug-equivalent (empirically confirmed: identical match/mismatch counts).
+
+**Timeouts.** Same as DPLS↔DEEP.
+
+### `RecordValidationActivity`
+
+**What.** Takes the three `ValidationLegResult`s, classifies overall status
+(see thresholds below), upserts a row to `validation_runs` keyed by
+`trading_date`.
+
+**Thresholds.**
+
+| Leg | Threshold | Rationale |
+|---|---|---|
+| DPLS↔DEEP | ≥ 99.99% | Should be ~100% modulo same-ns multi-txn (10⁻⁸ rate) |
+| DPLS→TOPS | ≥ 99% | Empirical floor is ~99.4% — residual is TOPS's internal per-symbol round-lot table |
+| DEEP→TOPS | ≥ 99% | Same as DPLS→TOPS |
+
+**Status returned.** `passed` if all three pass. `below_threshold` if any
+falls below. `failed` if any leg result is null (its activity threw).
+
+### `CleanupFilesActivity`
+
+**What.** Deletes the 3 `.pcap.gz` files from `/storage/raw/`. Best-effort:
+per-file errors logged at WARN, swallowed.
+
+**When called.** Workflow gates on `runRetentionSweep=true AND status=passed`.
+Ad-hoc runs (`runRetentionSweep=false`) preserve files for re-run / forensics.
+
+**Retry.** None — single attempt.
+
+### `RetentionSweepActivity`
+
+**What.** Drops chunks older than `cutoffDate - retainDays` (30 days) from
+DPLS-only hypertables via TimescaleDB's `drop_chunks()`. For tables shared
+with TOPS, per-row `DELETE WHERE feed_source='DPLS' AND ts < cutoff` so the
+TOPS validation oracle survives.
+
+**When called.** Only when `input.runRetentionSweep=true` (cron mode).
+Failure logged but does NOT fail the workflow (already-completed
+parse + validate are real wins; retention is opportunistic).
+
+**Idempotency.** `drop_chunks()` silently skips already-dropped chunks.
+Running twice on the same `cutoffDate` is a no-op.
+
+### `PipelineRunRecorderActivity`
+
+**What.** DB-only lifecycle activity. Three methods:
+
+| Method | Effect |
+|---|---|
+| `isAlreadyIngested(date)` | `SELECT 1 FROM pipeline_runs WHERE trading_date=? AND status='ok'` — used by the workflow's idempotency short-circuit |
+| `startRun(date)` | INSERT row with `status='running'`, returns the new `run_id` (UUID) |
+| `completeRun(runId, status, parserMessageCount, validatorStatus, notesJson)` | UPDATE the row with completion details |
+
+Fast (no parsing, no IO beyond JDBC), so default retry policy applies.
+
+---
 
 ## Schedule
 
+Registered by `WorkerMain.registerSchedule()` on first worker boot:
+
 ```
-Cron: 0 0 * * 2-6
-Timezone: America/New_York
-Workflow: DailyPipelineWorkflow
-Input: { target_date: <yesterday in ET>, poll_until_ready: true }
+ID:        daily-pipeline-cron
+Spec:      '0 0 * * 2-6' America/New_York
+Action:    Start DailyPipelineWorkflow with input.cron(PLACEHOLDER_DATE)
+Overlap:   SKIP (don't double-fire)
+State:     paused (operator unpauses explicitly)
 ```
 
-Tue–Sat fires at midnight ET. Each fire processes the previous calendar
-day's data. Sun and Mon don't fire (no Saturday or Sunday data exists).
-Holidays are handled at runtime via the listing-absent path.
+The workflow detects `targetDate == 1970-01-01` (`PLACEHOLDER_DATE`) and
+resolves to "yesterday in ET" at run time. This is the standard Temporal
+pattern for "compute the date at fire time."
 
-Temporal `Schedule` is set up idempotently at `WorkerMain` startup,
-following the found-footy pattern: re-running the worker re-applies the
-schedule but doesn't duplicate it.
+**Why paused-by-default.** Avoids dev-time surprises: an in-flight manual
+workflow getting doubled by a cron fire at midnight ET (this happened
+during Sprint 1 testing). Operator unpauses when ready for nightly
+ingestion:
 
-## Tables
+```bash
+docker exec long-exposure-dev-temporal temporal schedule toggle \
+  --schedule-id daily-pipeline-cron --unpause --reason "go live"
+```
 
-New table for this design:
+---
+
+## Pre-clean — why and how
+
+This is the load-bearing idempotency mechanism. Worth its own section.
+
+### Why
+
+A Temporal activity can be replayed after a transient failure (network
+glitch, heartbeat miss, worker restart). Without pre-clean, the second
+attempt would write 364 M rows on top of the 200 M rows the first
+attempt managed before dying — corrupting the dataset.
+
+With pre-clean, the activity is **truly idempotent**: every attempt
+starts from a clean slate for the target date and produces the same
+final state. Temporal's retry semantics work as advertised.
+
+### How
+
+`ParseAndWriteDplsActivityImpl.preClean(date)` does:
 
 ```sql
-CREATE TABLE validation_runs (
-    trading_date          DATE PRIMARY KEY,
-    run_at                TIMESTAMPTZ NOT NULL,
-    dpls_tops_match_pct   DOUBLE PRECISION,
-    deep_tops_match_pct   DOUBLE PRECISION,
-    dpls_deep_match_pct   DOUBLE PRECISION,   -- the load-bearing 100% leg
-    trade_volume_match    BOOLEAN,             -- 9134/9134 symbols, 0 share delta?
-    elapsed_seconds       INTEGER,
-    notes                 JSONB
-);
+DELETE FROM orders_add        WHERE feed_source='DPLS' AND ts >= '<date>' AND ts < '<date>+1';
+DELETE FROM orders_modify     WHERE feed_source='DPLS' AND ts >= '<date>' AND ts < '<date>+1';
+DELETE FROM orders_delete     WHERE feed_source='DPLS' AND ts >= '<date>' AND ts < '<date>+1';
+DELETE FROM orders_executed   WHERE feed_source='DPLS' AND ts >= '<date>' AND ts < '<date>+1';
+DELETE FROM clear_books       WHERE feed_source='DPLS' AND ts >= '<date>' AND ts < '<date>+1';
+DELETE FROM trades            WHERE feed_source='DPLS' AND ts >= '<date>' AND ts < '<date>+1';
+DELETE FROM trade_breaks      WHERE feed_source='DPLS' AND ts >= '<date>' AND ts < '<date>+1';
+DELETE FROM quotes            WHERE feed_source='DPLS' AND ts >= '<date>' AND ts < '<date>+1';
+DELETE FROM status_events     WHERE feed_source='DPLS' AND ts >= '<date>' AND ts < '<date>+1';
+DELETE FROM auction_info      WHERE feed_source='DPLS' AND ts >= '<date>' AND ts < '<date>+1';
+DELETE FROM official_prices   WHERE feed_source='DPLS' AND ts >= '<date>' AND ts < '<date>+1';
+DELETE FROM securities        WHERE feed_source='DPLS' AND ts >= '<date>' AND ts < '<date>+1';
+DELETE FROM retail_liquidity  WHERE feed_source='DPLS' AND ts >= '<date>' AND ts < '<date>+1';
 ```
 
-Existing `pipeline_runs` table gets new status values: `skipped_weekend`,
-`skipped_no_data` (= holiday or outage), `parse_failed`, `validation_failed`.
+Worst case: ~5 min to delete 364 M residual rows on a clean run after a
+prior failed attempt. Common case (fresh date): all 13 DELETEs run
+in < 1 sec because the rows don't exist.
 
-## Activity-level error model
+Pre-clean never touches TOPS or DEEP rows. The shared tables hold both,
+and TOPS rows are the validation oracle — clobbering them would break
+the validation triangle.
 
-Three exception categories, each maps to a different retry behavior:
+### When the workflow short-circuits pre-clean
 
-1. **`Transient*` exceptions** (`TransientNetworkError`,
-   `PostgresTransientError`, `IOException`, `HttpServerError`) — always
-   retriable, short backoff. Same idea across all activities.
+`isAlreadyIngested(date)` returns true if `pipeline_runs` has a
+`status='ok'` row for that date. With `forceReingest=false` (the default),
+the workflow doesn't even call `ParseAndWriteDplsActivity` — it returns
+`skipped_already_ingested` immediately. Cheap, correct, default-safe.
 
-2. **`FilesNotReady`** — retriable only when polling is enabled.
-   Long backoff (15 min × 3 hr).
+With `forceReingest=true` the check is bypassed; the activity runs and
+pre-cleans normally before re-writing.
 
-3. **Permanent failures** (`NotATradingDay`, `FileNotFoundAtUrl`,
-   `DiskFull`, `DecodeError`) — non-retriable. Workflow fails with the
-   activity's exception bubbling up. Some are exit-clean (NotATradingDay
-   doesn't fail the workflow, just terminates it). Others fail loudly
-   (DecodeError surfaces in Temporal UI as a real anomaly).
+---
 
-## Decisions locked in
+## Retry semantics summary
 
-(was "open questions" — these are now answered.)
+| Activity | start-to-close | heartbeat | retry policy |
+|---|---|---|---|
+| `ResolveUrl` (cron) | 30s | — | unlimited × 15-min interval, 3-hr schedule-to-close |
+| `ResolveUrl` (ad-hoc) | 30s | — | 3 × 15s, no retry on `FilesNotReady` or `NotATradingDay` |
+| `DownloadFile` | 1hr | 2min | transient × 5 |
+| `ParseAndWriteDpls` | 2hr | 15min | transient × 3 |
+| `DplsDeepValidate` | 30min | — | transient × 2 |
+| `DplsTopsValidate` | 30min | — | transient × 2 |
+| `DeepTopsValidate` | 30min | — | transient × 2 |
+| `RecordValidation` | 2min | — | transient × 3 |
+| `CleanupFiles` | 5min | — | none (best-effort) |
+| `RetentionSweep` | 15min | — | transient × 3 |
+| `PipelineRunRecorder` | 30s | — | default × 3 |
 
-- ✅ **Postgres retention period: 30 days.** Matches scorer's baseline floor.
-- ✅ **Validation-failure semantics:** validation failure does NOT block
-  parse; product data still lands. On validation failure, raw .pcap.gz
-  files are KEPT for forensic debugging (manual cleanup if needed).
-- ✅ **Idempotency / force-reingest:** ad-hoc runs default to skipping a
-  date that's already in `pipeline_runs` as 'completed'. Pass
-  `force_reingest=true` to drop and re-parse.
-- ✅ **Ad-hoc retention behavior:** ad-hoc workflows NEVER run the
-  retention sweep. Only cron mode does.
+`NotATradingDay` is in every activity's `setDoNotRetry` so it always
+short-circuits the workflow regardless of which leg threw it.
 
-## Still open (to be resolved before / during coding)
+---
 
-1. **`add_retention_policy()` vs `RetentionSweepActivity`.** Both implement
-   the 30-day Postgres retention. TimescaleDB's native policy runs in the
-   background asynchronously, no Temporal visibility. The explicit activity
-   runs at the end of each cron workflow, observable in Temporal UI.
-   Currently leaning explicit activity — more observable, gated by the
-   `run_retention_sweep` input flag (which honors ad-hoc-doesn't-touch-it).
-   Confirm.
+## Where things live
 
-2. **Validation-runs row written even on validation failure?** If
-   validation activity fails partway through, do we write a partial row
-   (with the metrics we got + status='failed'), or write nothing? Default
-   plan: write a row with `status='failed'` so the daily timeline shows
-   the gap explicitly.
-
-3. **Re-ingest behavior on partial-state failure.** If `force_reingest=true`
-   runs the pre-clean (drops existing rows) then the parse crashes
-   partway, you've LOST the previous data for that date. Acceptable risk
-   for ad-hoc backfills (you can re-trigger), or do we want a transactional
-   parse-to-temp-table-then-swap? My recommendation: accept the risk;
-   transactional swap is significant code for an edge case.
-
-4. **Worker container deployment.** The Temporal worker runs inside the
-   existing `long-exposure-dev-worker` container. `Dockerfile.dev`
-   switches its entry point from the current smoke-test `Main` to the
-   new `WorkerMain`. Confirm this is the right host (probably yes — no
-   reason to add a new container).
-
-5. **Backfill workflow.** Bootstrap will eventually need 30 days of
-   historical ingests for baseline computation. Options: (a) trigger 30
-   ad-hoc workflows manually, (b) build a `BatchBackfillWorkflow` that
-   fans out to 30 child workflows. The fan-out version is ~50 LOC and
-   more observable. Worth doing — but NOT Sprint 1.
-
-6. **Failure notifications.** Out of scope for Sprint 1; Temporal UI is
-   sufficient. Revisit once the monitoring stack matures.
-
-## Net Sprint 1 file list
-
-1. `WorkerMain` — entry point; **applies schema via `SchemaManager.apply()`
-   first** (idempotent, picks up the new `validation_runs` table); then
-   registers activities + workflow; connects to Temporal; sets up
-   schedules; blocks on the worker. Schema apply MUST run before
-   `Worker.start()` — otherwise activities referencing new tables fail
-   on the first run after a migration.
-2. `DailyPipelineWorkflow` + input dataclass.
-3. `ResolveUrlActivity` impl.
-4. `DownloadFileActivity` impl.
-5. `ParseAndWriteDplsActivity` impl (wraps existing parse loop with
-   pre-clean step).
-6. `ValidateTriangleActivity` impl (orchestrates the three validators).
-7. `CleanupFilesActivity` impl.
-8. `RetentionSweepActivity` impl.
-9. Schema migration: add `validation_runs` table, update `pipeline_runs`
-   status enum to include `skipped_weekend`, `skipped_no_data`,
-   `skipped_already_ingested`, `parse_failed`, `validation_failed_data_ok`,
-   `unverified`.
-10. Schedule registration in `WorkerMain.setupSchedules()`.
-
-Code shape: ~600–900 LOC of Java. One focused day of work.
+| File | Role |
+|---|---|
+| `parser/src/main/java/com/longexposure/temporal/WorkerMain.java` | Worker bootstrap: connect to Temporal, register workflows + activities, register cron schedule (paused) |
+| `parser/src/main/java/com/longexposure/temporal/workflows/DailyPipelineWorkflow{,Impl,Input}.java` | The cron + ad-hoc workflow |
+| `parser/src/main/java/com/longexposure/temporal/workflows/ValidateOnlyWorkflow.java` | Validate-only workflow |
+| `parser/src/main/java/com/longexposure/temporal/activities/*.java` | 10 activity interfaces + impls |
+| `parser/src/main/resources/schema.sql` | `pipeline_runs` + `validation_runs` table DDL |
+| `docs/temporal-design.md` (this file) | What's running and why |
 
 ---
 
 ## Reconciliation with `README.md` and `docs/architecture.md`
 
-Both docs were written before any Temporal code existed and describe a
-9-activity pipeline. This section explicitly maps every activity they
-list to our actual design — what we're building, what we're substituting,
-what we're deferring.
+The README and architecture doc were written before any Temporal code
+existed and describe a 9-activity serial pipeline. Mapping the
+README/arch list to what was actually built:
 
-| README/arch.md activity   | Status in this design                                              |
-|---------------------------|--------------------------------------------------------------------|
-| `DownloadHistActivity`    | ✓ Sprint 1, as `ResolveUrlActivity` + `DownloadFileActivity` (split). |
-| `DecompressActivity`      | ✗ Not needed. Our `PcapReader` streams from `.pcap.gz` directly via gzip input stream — no separate gunzip step. README/arch are stale on this point. |
-| `ParseTopsActivity`       | ✓ Sprint 1, as `ParseAndWriteDplsActivity`. README calls it "ParseTops" because it was written before the DEEP+ pivot; we parse DPLS, not TOPS. |
-| `ValidateDailyTotalsActivity` | ✗ Substituted. We use `ValidateTriangleActivity` (Sprint 1) instead — a stronger correctness check (parser-to-parser equivalence) than IEX's daily-totals comparison would be. The IEX `/stats` endpoint daily-totals validator remains a deferred backlog item; not blocking. |
-| `RefreshBaselinesActivity`| ✗ Sprint 4+. The TimescaleDB continuous aggregate (`daily_volume_by_symbol`) already refreshes hourly via policy. The scorer needs current baselines, so when the scorer ships we either (a) add an explicit refresh-after-parse activity, or (b) tighten the policy interval. Decide at scorer-sprint time. |
-| `ScoreEventsActivity`     | ✗ Sprint 4+ (the algorithmic core; in `DailyNarrationWorkflow`, not `DailyPipelineWorkflow`). |
-| `SelectTopEventsActivity` | ✗ Sprint 4+ (same). |
-| `NarrateEventsActivity`   | ✗ Sprint 4+ (decomposed in our design into `ExtractFactsActivity` + `RenderProseActivity` + `GroundingVerifyActivity` per the two-pass model in `scoring-and-narration.md`). |
-| `StoreNarrativesActivity` | ✗ Sprint 4+ (in `DailyNarrationWorkflow`). |
-| (not listed)              | ✓ `InvalidateCacheActivity` — README pipeline mentions it. Signals the API container to refresh. Sprint 4+ companion to narration. |
-| (not listed)              | ✓ `CleanupFilesActivity` — explicit raw-file delete after success. Sprint 1. |
-| (not listed)              | ✓ `RetentionSweepActivity` — explicit Postgres retention drop after success on cron runs. Sprint 1. |
+| README/arch activity | Status |
+|---|---|
+| `DownloadHistActivity` | ✓ Built — split into `ResolveUrlActivity` + `DownloadFileActivity` |
+| `DecompressActivity` | ✗ Skipped — `PcapReader` streams `.pcap.gz` directly via `GZIPInputStream` |
+| `ParseTopsActivity` | ✓ Built as `ParseAndWriteDplsActivity` (DPLS, not TOPS — pivoted 2026-05-11) |
+| `ValidateDailyTotalsActivity` | ✗ Replaced — triangle validation via 3 leg activities + `RecordValidationActivity` is a stronger correctness check |
+| `RefreshBaselinesActivity` | ✗ Sprint 4+ — `daily_volume_by_symbol` cagg refreshes via policy already |
+| `ScoreEventsActivity` | ✗ Sprint 4+ — lives in `DailyNarrationWorkflow` (not built) |
+| `SelectTopEventsActivity` | ✗ Sprint 4+ — same |
+| `NarrateEventsActivity` | ✗ Sprint 4+ — decomposed per `scoring-and-narration.md` two-pass model |
+| `StoreNarrativesActivity` | ✗ Sprint 4+ — same |
+| `InvalidateCacheActivity` | ✗ Sprint 4+ — companion to narration |
+| `CleanupFilesActivity` | ✓ Built |
+| `RetentionSweepActivity` | ✓ Built |
 
-**Other doc-vs-design drift to clean up later** (after Sprint 1 ships,
-when we refresh the docs):
+**Doc drift to clean up later:**
 
-- README and architecture.md say the trigger time is **6:00 AM ET**; we
-  agreed on **midnight ET**. Updated rationale: empirical SLA from the
-  IEX HIST listing shows files reliably available between 22:32 and
-  00:11 ET; midnight gives us aggressive parallel downloads + 3-hour
-  retry budget without slipping into morning.
-- README and architecture.md describe a serial activity chain
-  (`Download → Decompress → Parse → Validate → ...`). Our design is
-  fan-out (3 concurrent download branches, then parallel
-  parse + validate). The README diagram is stale.
-- `operations.md` mentions a `ReplayDay` CLI for ad-hoc replay. With
-  Temporal in place, replay is just an ad-hoc workflow trigger via
-  Temporal UI or a thin CLI shim that calls the Temporal client. The
-  CLI doc reference needs updating.
+- README and architecture.md mention **6:00 AM ET** as the trigger time.
+  As-built is **midnight ET** (Tue-Sat). Rationale: empirical SLA from
+  the IEX HIST listing shows files reliably available between 22:32 and
+  00:11 ET; midnight gives aggressive parallel downloads + 3-hour retry
+  budget without slipping into morning.
+- README/arch describe a serial activity chain
+  (`Download → Decompress → Parse → Validate → ...`). As-built is fan-out:
+  3 concurrent download branches, then parse + 3 validators in parallel.
+- `operations.md` mentions a `ReplayDay` CLI. With Temporal in place,
+  replay is just an ad-hoc workflow trigger via Temporal UI or
+  `temporal workflow start --type DailyPipelineWorkflow ...`.
+
+These three points are minor and will be folded into the README on the
+next pass.
+
+---
+
+## Sprint 1 lessons learned (kept for future-me)
+
+Three things bit during Sprint 1 testing; the as-built reflects the fixes
+but the lessons are worth keeping.
+
+1. **Heartbeat timeouts must cover the slowest non-heartbeating SQL or pcap
+   pass.** Initial values (parse: 2 min, validate: 5 min) were too tight.
+   A pre-clean DELETE of 364 M rows or a 5-min validator inner loop will
+   not voluntarily heartbeat; Temporal kills the activity even though the
+   work is progressing. Tuned to parse=15 min, validate=no heartbeat
+   (start-to-close 30 min is sufficient).
+
+2. **Cron schedules should register paused by default.** A cron fire at
+   midnight ET while a manual workflow is mid-parse on the same date is
+   a real foot-gun. Schedules now register with `setPaused(true)` and a
+   `Note` explaining how to unpause.
+
+3. **`@ActivityMethod` activity-type names default to the capitalized
+   method name.** Three different activity interfaces each having
+   `validate()` produces three registrations of activity type `"Validate"`
+   — Temporal refuses to register them. Fix: explicit
+   `@ActivityMethod(name = "...")` per interface.
+
+---
 
 ## Unverified-data semantics (Sprint 4+ relevance)
 
 `architecture.md` describes the conservative model: validation failure
 flags the date as **unverified**, and downstream activities (scoring,
-narration, publishing) refuse to act on unverified data. Adopting this:
+narration, publishing) refuse to act on unverified data. Adopting this
+in `DailyNarrationWorkflow` when it ships:
 
-- `ParseAndWriteDplsActivity` succeeding → `pipeline_runs.status='completed'`.
-- `ValidateTriangleActivity` succeeding with match rates above some
-  threshold (say, ≥ 99% DPLS↔DEEP, ≥ 95% DPLS→TOPS) → status stays
-  `completed`.
-- `ValidateTriangleActivity` succeeding but match rates below threshold
-  → status set to `unverified`. Data is still in Postgres and queryable;
-  drill-down API can serve it; but `DailyNarrationWorkflow` skips
-  unverified dates by default.
-- `ValidateTriangleActivity` crashing (genuine error, retries exhausted)
-  → status `validation_failed_data_ok`. Data is in Postgres; downstream
-  treats this the same as `unverified` (skip narration).
+- `pipeline_runs.status='ok'` → narration eligible
+- `pipeline_runs.status='unverified'` → narration skips by default; can be
+  forced via a manual flag
+- `pipeline_runs.status='validation_failed_data_ok'` → same treatment as
+  `unverified` (data is queryable but not narratable)
+- Any other status → not narratable
 
-This is Sprint 4+ wiring; for Sprint 1, we just record the validation
-result accurately. The downstream skip-on-unverified behavior lives in
+This is Sprint 4+ wiring. For Sprint 1, the validation result is recorded
+accurately; the downstream skip-on-unverified behavior lives in
 `DailyNarrationWorkflow` when we build it.
