@@ -1,15 +1,19 @@
 package com.longexposure.temporal.workflows;
 
 import com.longexposure.temporal.activities.CleanupFilesActivity;
+import com.longexposure.temporal.activities.DeepTopsValidatorActivity;
 import com.longexposure.temporal.activities.DownloadFileActivity;
+import com.longexposure.temporal.activities.DplsDeepValidatorActivity;
+import com.longexposure.temporal.activities.DplsTopsValidatorActivity;
 import com.longexposure.temporal.activities.Feed;
 import com.longexposure.temporal.activities.FilesNotReady;
 import com.longexposure.temporal.activities.NotATradingDay;
 import com.longexposure.temporal.activities.ParseAndWriteDplsActivity;
 import com.longexposure.temporal.activities.PipelineRunRecorderActivity;
+import com.longexposure.temporal.activities.RecordValidationActivity;
 import com.longexposure.temporal.activities.ResolveUrlActivity;
 import com.longexposure.temporal.activities.RetentionSweepActivity;
-import com.longexposure.temporal.activities.ValidateTriangleActivity;
+import com.longexposure.temporal.activities.ValidationLegResult;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.common.RetryOptions;
 import io.temporal.failure.ActivityFailure;
@@ -109,17 +113,31 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
                     .setRetryOptions(transientRetry(3))
                     .build());
 
-    private final ValidateTriangleActivity validator = Workflow.newActivityStub(
-            ValidateTriangleActivity.class,
+    private final DplsDeepValidatorActivity dplsDeepLeg = Workflow.newActivityStub(
+            DplsDeepValidatorActivity.class, legOptions());
+    private final DplsTopsValidatorActivity dplsTopsLeg = Workflow.newActivityStub(
+            DplsTopsValidatorActivity.class, legOptions());
+    private final DeepTopsValidatorActivity deepTopsLeg = Workflow.newActivityStub(
+            DeepTopsValidatorActivity.class, legOptions());
+
+    private final RecordValidationActivity recordValidation = Workflow.newActivityStub(
+            RecordValidationActivity.class,
             ActivityOptions.newBuilder()
-                    .setStartToCloseTimeout(Duration.ofMinutes(45))
-                    // Each leg can take 8–15 min walking both pcap streams; we
-                    // only heartbeat between legs (the validators themselves
-                    // are inner loops we don't instrument). 20 min covers the
-                    // worst observed (DPLS→TOPS at ~14 min on day 2).
-                    .setHeartbeatTimeout(Duration.ofMinutes(20))
-                    .setRetryOptions(transientRetry(2))
+                    .setStartToCloseTimeout(Duration.ofMinutes(2))
+                    .setRetryOptions(transientRetry(3))
                     .build());
+
+    private static ActivityOptions legOptions() {
+        // Each leg runs in its own activity; heartbeat timeout only has to
+        // cover that one leg's inner loop (8-15 min observed). Validators
+        // don't heartbeat internally, so we set start-to-close generously
+        // and skip heartbeat config — Temporal infers liveness from the
+        // activity's task-queue poll.
+        return ActivityOptions.newBuilder()
+                .setStartToCloseTimeout(Duration.ofMinutes(30))
+                .setRetryOptions(transientRetry(2))
+                .build();
+    }
 
     private final CleanupFilesActivity cleanup = Workflow.newActivityStub(
             CleanupFilesActivity.class,
@@ -198,10 +216,14 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
         Promise<Long> parseP = dplsDownP.thenCompose(p ->
                 Async.function(parser::parseAndWrite, p, date, input.forceReingest()));
 
-        // Validate runs only when all three downloads are done.
-        Promise<ValidateTriangleActivity.Result> validateP =
-                Promise.allOf(dplsDownP, deepDownP, topsDownP).thenCompose(v ->
-                        Async.function(validator::validate, dplsPath, deepPath, topsPath, date));
+        // Three validator legs run concurrently as soon as the right two
+        // downloads finish (each leg only needs its own pair of files).
+        Promise<ValidationLegResult> dplsDeepP = Promise.allOf(dplsDownP, deepDownP)
+                .thenCompose(v -> Async.function(dplsDeepLeg::validate, dplsPath, deepPath));
+        Promise<ValidationLegResult> dplsTopsP = Promise.allOf(dplsDownP, topsDownP)
+                .thenCompose(v -> Async.function(dplsTopsLeg::validate, dplsPath, topsPath));
+        Promise<ValidationLegResult> deepTopsP = Promise.allOf(deepDownP, topsDownP)
+                .thenCompose(v -> Async.function(deepTopsLeg::validate, deepPath, topsPath));
 
         // Await both parse + validate. Each may fail independently — we
         // want both signals before deciding final status.
@@ -214,13 +236,19 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
             LOG.error("parse failed  date={} err={}", date, parseError);
         }
 
-        ValidateTriangleActivity.Result validation = null;
+        ValidationLegResult dplsDeep = tryGet(dplsDeepP, "DPLS↔DEEP");
+        ValidationLegResult dplsTops = tryGet(dplsTopsP, "DPLS→TOPS");
+        ValidationLegResult deepTops = tryGet(deepTopsP, "DEEP→TOPS");
+
+        // Persist validation_runs row.
+        RecordValidationActivity.Result validation;
         String validateError = null;
         try {
-            validation = validateP.get();
+            validation = recordValidation.record(date, dplsDeep, dplsTops, deepTops);
         } catch (ActivityFailure af) {
             validateError = causeMessage(af);
-            LOG.error("validate failed  date={} err={}", date, validateError);
+            LOG.error("recordValidation failed  date={} err={}", date, validateError);
+            validation = null;
         }
 
         // Decide final status.
@@ -237,6 +265,7 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
                 && parseError == null
                 && validation != null
                 && "passed".equals(validation.status());
+        // (used below)
         if (cleanupEligible) {
             cleanup.cleanup(List.of(dplsPath, deepPath, topsPath));
         } else {
@@ -274,7 +303,7 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
      * </ul>
      */
     private String computeFinalStatus(final String parseError,
-                                      final ValidateTriangleActivity.Result validation,
+                                      final RecordValidationActivity.Result validation,
                                       final String validateError) {
         if (parseError != null) return "parse_failed";
         if (validateError != null) return "validation_failed_data_ok";
@@ -286,8 +315,19 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
         };
     }
 
+    /** Resolve a leg promise; log + return null instead of throwing if the activity failed. */
+    private static ValidationLegResult tryGet(final Promise<ValidationLegResult> p, final String legName) {
+        try {
+            return p.get();
+        } catch (ActivityFailure af) {
+            Workflow.getLogger(DailyPipelineWorkflowImpl.class).error(
+                    "validator leg failed  leg={} err={}", legName, causeMessage(af));
+            return null;
+        }
+    }
+
     private String buildNotes(final String parseError,
-                              final ValidateTriangleActivity.Result validation,
+                              final RecordValidationActivity.Result validation,
                               final String validateError) {
         StringBuilder sb = new StringBuilder("{");
         boolean first = true;
@@ -300,7 +340,7 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
             sb.append("\"validate_error\":").append(jsonString(validateError));
             first = false;
         }
-        if (validation != null && validation.notesJson() != null) {
+        if (validation != null && validation.notesJson() != null && !validation.notesJson().isBlank()) {
             if (!first) sb.append(",");
             sb.append("\"validation_notes\":").append(validation.notesJson());
         }

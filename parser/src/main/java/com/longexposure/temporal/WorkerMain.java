@@ -1,15 +1,19 @@
 package com.longexposure.temporal;
 
 import com.longexposure.temporal.activities.CleanupFilesActivityImpl;
+import com.longexposure.temporal.activities.DeepTopsValidatorActivityImpl;
 import com.longexposure.temporal.activities.DownloadFileActivityImpl;
+import com.longexposure.temporal.activities.DplsDeepValidatorActivityImpl;
+import com.longexposure.temporal.activities.DplsTopsValidatorActivityImpl;
 import com.longexposure.temporal.activities.ParseAndWriteDplsActivityImpl;
 import com.longexposure.temporal.activities.PipelineRunRecorderActivityImpl;
+import com.longexposure.temporal.activities.RecordValidationActivityImpl;
 import com.longexposure.temporal.activities.ResolveUrlActivityImpl;
 import com.longexposure.temporal.activities.RetentionSweepActivityImpl;
-import com.longexposure.temporal.activities.ValidateTriangleActivityImpl;
 import com.longexposure.temporal.workflows.DailyPipelineWorkflow;
 import com.longexposure.temporal.workflows.DailyPipelineWorkflowImpl;
 import com.longexposure.temporal.workflows.DailyPipelineWorkflowInput;
+import com.longexposure.temporal.workflows.ValidateOnlyWorkflow;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.schedules.Schedule;
 import io.temporal.client.schedules.ScheduleActionStartWorkflow;
@@ -65,12 +69,17 @@ public final class WorkerMain {
         WorkerFactory factory = WorkerFactory.newInstance(client);
 
         Worker worker = factory.newWorker(DailyPipelineWorkflow.TASK_QUEUE);
-        worker.registerWorkflowImplementationTypes(DailyPipelineWorkflowImpl.class);
+        worker.registerWorkflowImplementationTypes(
+                DailyPipelineWorkflowImpl.class,
+                ValidateOnlyWorkflow.Impl.class);
         worker.registerActivitiesImplementations(
                 new ResolveUrlActivityImpl(),
                 new DownloadFileActivityImpl(),
                 new ParseAndWriteDplsActivityImpl(),
-                new ValidateTriangleActivityImpl(),
+                new DplsDeepValidatorActivityImpl(),
+                new DplsTopsValidatorActivityImpl(),
+                new DeepTopsValidatorActivityImpl(),
+                new RecordValidationActivityImpl(),
                 new CleanupFilesActivityImpl(),
                 new RetentionSweepActivityImpl(),
                 new PipelineRunRecorderActivityImpl());
