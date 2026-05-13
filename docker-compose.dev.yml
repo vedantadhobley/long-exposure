@@ -113,9 +113,10 @@ services:
       TEMPORAL_HOST: long-exposure-dev-temporal:7233
       POSTGRES_HOST: long-exposure-dev-postgres
       POSTGRES_PORT: "5432"
-      # Day 1-3 smoke test — set on the host or override here to point Main.java
-      # at a real HIST file. /storage is the workspace convention bind mount.
-      IEX_PCAP_FILE: ${IEX_PCAP_FILE:-/storage/raw/20260508_IEXTP1_TOPS1.6.pcap.gz}
+      # When IEX_PCAP_FILE is unset the worker boots into Temporal worker
+      # mode. Set on the host (or `docker compose run -e ...`) to drop
+      # back to the smoke-test / cross-validation CLI in Main.java.
+      IEX_PCAP_FILE: ${IEX_PCAP_FILE:-}
       IEX_PRINT_LIMIT: ${IEX_PRINT_LIMIT:-20}
       IEX_WRITE_DB: ${IEX_WRITE_DB:-false}
     volumes:

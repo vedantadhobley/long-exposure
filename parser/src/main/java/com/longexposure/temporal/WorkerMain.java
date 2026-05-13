@@ -144,7 +144,16 @@ public final class WorkerMain {
                 .setPolicy(SchedulePolicy.newBuilder()
                         .setOverlap(io.temporal.api.enums.v1.ScheduleOverlapPolicy.SCHEDULE_OVERLAP_POLICY_SKIP)
                         .build())
-                .setState(ScheduleState.newBuilder().setPaused(false).build())
+                // Register paused. Operator unpauses via
+                //   docker exec long-exposure-dev-temporal \
+                //     temporal schedule toggle --schedule-id daily-pipeline-cron --unpause
+                // when ready to start nightly ingestion. Avoids dev-time
+                // surprises (e.g. an in-flight manual workflow getting
+                // doubled up by a cron fire at midnight ET).
+                .setState(ScheduleState.newBuilder()
+                        .setPaused(true)
+                        .setNote("paused by default at registration — operator unpauses to enable nightly cron")
+                        .build())
                 .build();
 
         try {

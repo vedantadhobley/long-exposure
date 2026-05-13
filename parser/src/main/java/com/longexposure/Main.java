@@ -89,7 +89,7 @@ public final class Main {
                 args.length > 0 ? args[0] : null,
                 System.getenv("IEX_PCAP_FILE"));
 
-        if (filePath == null) {
+        if (filePath == null || filePath.isBlank()) {
             System.out.println("long-exposure-parser starting in Temporal worker mode");
             System.out.println("TEMPORAL_HOST=" + System.getenv("TEMPORAL_HOST"));
             System.out.println("POSTGRES_HOST=" + System.getenv("POSTGRES_HOST"));

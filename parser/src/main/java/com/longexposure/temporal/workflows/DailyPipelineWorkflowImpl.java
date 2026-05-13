@@ -101,7 +101,11 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
             ParseAndWriteDplsActivity.class,
             ActivityOptions.newBuilder()
                     .setStartToCloseTimeout(Duration.ofHours(2))
-                    .setHeartbeatTimeout(Duration.ofMinutes(2))
+                    // 15 min is wide enough to cover the pre-clean DELETE of a
+                    // full day's DPLS rows (~5 min for 364M rows observed) plus
+                    // headroom; parse-loop heartbeats fire every 100K messages
+                    // (sub-second cadence) so this only matters for the SQL stages.
+                    .setHeartbeatTimeout(Duration.ofMinutes(15))
                     .setRetryOptions(transientRetry(3))
                     .build());
 
@@ -109,7 +113,11 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
             ValidateTriangleActivity.class,
             ActivityOptions.newBuilder()
                     .setStartToCloseTimeout(Duration.ofMinutes(45))
-                    .setHeartbeatTimeout(Duration.ofMinutes(5))
+                    // Each leg can take 8–15 min walking both pcap streams; we
+                    // only heartbeat between legs (the validators themselves
+                    // are inner loops we don't instrument). 20 min covers the
+                    // worst observed (DPLS→TOPS at ~14 min on day 2).
+                    .setHeartbeatTimeout(Duration.ofMinutes(20))
                     .setRetryOptions(transientRetry(2))
                     .build());
 
@@ -222,15 +230,18 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
 
         recorder.completeRun(runId, finalStatus, messageCount, validatorStatus, notes);
 
-        // Cleanup: only if BOTH parse and validate succeeded.
-        boolean cleanupEligible = parseError == null
+        // Cleanup: only in cron mode AND when both parse + validate succeeded.
+        // Ad-hoc runs ({@code runRetentionSweep=false}) preserve files so the
+        // operator can rerun, debug, or compare without re-downloading.
+        boolean cleanupEligible = input.runRetentionSweep()
+                && parseError == null
                 && validation != null
                 && "passed".equals(validation.status());
         if (cleanupEligible) {
             cleanup.cleanup(List.of(dplsPath, deepPath, topsPath));
         } else {
-            LOG.info("skipping cleanup — files retained for forensics  date={} status={}",
-                    date, finalStatus);
+            LOG.info("skipping cleanup — files retained  date={} status={} cron_mode={}",
+                    date, finalStatus, input.runRetentionSweep());
         }
 
         // Retention sweep (cron mode only). Failure here doesn't fail the workflow.
