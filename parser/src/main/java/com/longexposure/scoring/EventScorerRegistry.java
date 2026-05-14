@@ -2,6 +2,7 @@ package com.longexposure.scoring;
 
 import com.longexposure.scoring.scorers.HaltScorer;
 import com.longexposure.scoring.scorers.LargeTradeScorer;
+import com.longexposure.scoring.scorers.SweepScorer;
 
 import java.util.List;
 
@@ -20,9 +21,9 @@ public final class EventScorerRegistry {
 
     public static final List<EventScorer> ALL = List.of(
             new HaltScorer(),
-            new LargeTradeScorer()
+            new LargeTradeScorer(),
+            new SweepScorer()
             // add intraday scorers here as we build them:
-            //   new SweepScorer(),
             //   new PostCancelClusterScorer(),
             //   new LayeringScorer(),
             //   new IcebergScorer(),
