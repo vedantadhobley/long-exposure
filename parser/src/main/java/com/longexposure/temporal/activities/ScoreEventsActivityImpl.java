@@ -22,6 +22,10 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 public final class ScoreEventsActivityImpl implements ScoreEventsActivity {
 
@@ -41,6 +45,23 @@ public final class ScoreEventsActivityImpl implements ScoreEventsActivity {
         long totalWritten = 0;
         ObjectMapper json = new ObjectMapper();
 
+        // Background heartbeat thread: keeps the activity alive while
+        // long-running SQL (e.g. the PostCancelCluster join over 78M × 78M
+        // rows) is executing on the Postgres side and the JDBC stream
+        // hasn't yielded any rows yet — so the per-row heartbeats inside
+        // each scorer wouldn't fire.
+        ScheduledExecutorService keepAlive = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "score-events-heartbeat");
+            t.setDaemon(true);
+            return t;
+        });
+        AtomicReference<String> currentStage = new AtomicReference<>("starting");
+        keepAlive.scheduleAtFixedRate(
+                () -> {
+                    try { actx.heartbeat("keep_alive:" + currentStage.get()); } catch (Exception ignored) {}
+                },
+                60, 60, TimeUnit.SECONDS);
+
         try (Connection conn = openConnection()) {
             // Idempotent — ensures scored_events table exists when this
             // activity runs without a preceding parse activity (e.g. via
@@ -57,10 +78,13 @@ public final class ScoreEventsActivityImpl implements ScoreEventsActivity {
             LOG.info("score pre-clean  date={} rows_deleted={}", tradingDate, deleted);
             actx.heartbeat("preclean_done:" + deleted);
 
-            ScoringContext sctx = new ScoringContext(tradingDate, conn, pipelineRunId, json);
+            ScoringContext sctx = new ScoringContext(
+                    tradingDate, conn, pipelineRunId, json,
+                    detail -> actx.heartbeat("scorer_progress:" + detail));
             CopyManager copyManager = conn.unwrap(PGConnection.class).getCopyAPI();
 
             for (EventScorer scorer : EventScorerRegistry.ALL) {
+                currentStage.set(scorer.id());
                 long scoredHere = runOne(scorer, sctx, copyManager);
                 totalWritten += scoredHere;
                 LOG.info("scorer done  id={} rows_written={} running_total={}",
@@ -69,6 +93,8 @@ public final class ScoreEventsActivityImpl implements ScoreEventsActivity {
             }
         } catch (Exception e) {
             throw new RuntimeException("scoreEvents failed for date=" + tradingDate, e);
+        } finally {
+            keepAlive.shutdownNow();
         }
 
         long elapsedMs = (System.nanoTime() - t0) / 1_000_000L;

@@ -1,0 +1,227 @@
+package com.longexposure.scoring.scorers;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.longexposure.scoring.EventScorer;
+import com.longexposure.scoring.ScoredEvent;
+import com.longexposure.scoring.ScoringContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Stream;
+
+/**
+ * Iceberg detector. Looks for sustained repeated fills of similar size at
+ * the same {@code (symbol, price)} — the shape of a hidden displayed
+ * order being worked. From the public feed we only see the executions
+ * against the displayed tip; the reserve is invisible by design. So
+ * "many ~equal-sized fills at one price over minutes" is the inferential
+ * signal.
+ *
+ * <p>Detection:
+ * <ol>
+ *   <li>Stream {@code orders_executed} ordered by
+ *       {@code (symbol, price_raw, ts_nanos)}.
+ *   <li>Group consecutive runs by {@code (symbol, price_raw)}.
+ *   <li>Within each run, require:
+ *       <ul>
+ *         <li>≥ {@link #MIN_FILLS} executions
+ *         <li>Duration ≥ {@link #MIN_DURATION_NANOS}
+ *         <li>Size coefficient of variation ≤ {@link #MAX_SIZE_CV} — fills
+ *             are "similar size"
+ *       </ul>
+ * </ol>
+ *
+ * <p>Score = log10(total_filled_shares) × fillCount.
+ *
+ * <p>Breakdown JSON shape:
+ * <pre>
+ *   {
+ *     "fills":              28,
+ *     "total_shares":       28_000,
+ *     "price_dollars":      247.83,
+ *     "median_fill_size":   1_000,
+ *     "size_cv":            0.06,
+ *     "duration_seconds":   840,
+ *     "start_iso":          "...",
+ *     "end_iso":            "..."
+ *   }
+ * </pre>
+ */
+public final class IcebergScorer implements EventScorer {
+
+    private static final Logger LOG = LoggerFactory.getLogger(IcebergScorer.class);
+
+    /** Min consecutive fills at the same price to qualify. */
+    private static final int MIN_FILLS = 8;
+
+    /** Min sustained duration (start of first fill → start of last fill). */
+    private static final long MIN_DURATION_NANOS = 30L * 1_000_000_000L; // 30 sec
+
+    /** Max coefficient of variation of fill sizes (= stddev / mean). Smaller means more uniform. */
+    private static final double MAX_SIZE_CV = 0.20;
+
+    /** Reset the run when the gap between consecutive fills exceeds this. */
+    private static final long RUN_GAP_NANOS = 600L * 1_000_000_000L;     // 10 min
+
+    private static final int MAX_SOURCE_REFS = 32;
+
+    @Override
+    public String id() { return "iceberg"; }
+
+    @Override
+    public Stream<ScoredEvent> score(final ScoringContext ctx) {
+        String sql = """
+                SELECT ts, ts_nanos, symbol, price_raw, size, order_id, trade_id
+                FROM orders_executed
+                WHERE feed_source = 'DPLS'
+                  AND ts >= ? AND ts < ?
+                ORDER BY symbol, price_raw, ts_nanos
+                """;
+
+        Timestamp from = Timestamp.from(ctx.tradingDate().atStartOfDay().toInstant(ZoneOffset.UTC));
+        Timestamp to   = Timestamp.from(ctx.tradingDate().plusDays(1).atStartOfDay().toInstant(ZoneOffset.UTC));
+
+        List<ScoredEvent> out = new ArrayList<>();
+        try (PreparedStatement st = ctx.conn().prepareStatement(sql)) {
+            st.setFetchSize(50_000);
+            st.setTimestamp(1, from);
+            st.setTimestamp(2, to);
+            try (ResultSet rs = st.executeQuery()) {
+                RunBuilder rb = new RunBuilder(ctx);
+                long rowsRead = 0;
+                while (rs.next()) {
+                    rb.consume(rs, out);
+                    if (++rowsRead % 100_000 == 0) ctx.heartbeat().send("iceberg:" + rowsRead);
+                }
+                rb.flush(out);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("IcebergScorer query failed for date=" + ctx.tradingDate(), e);
+        }
+
+        LOG.info("IcebergScorer  date={} icebergs_emitted={}", ctx.tradingDate(), out.size());
+        return out.stream();
+    }
+
+    private static final class RunBuilder {
+        private final ScoringContext ctx;
+        private final List<Fill> current = new ArrayList<>(16);
+
+        RunBuilder(final ScoringContext ctx) { this.ctx = ctx; }
+
+        void consume(final ResultSet rs, final List<ScoredEvent> out) throws Exception {
+            Fill f = new Fill(
+                    rs.getTimestamp("ts").toInstant(),
+                    rs.getLong("ts_nanos"),
+                    rs.getString("symbol"),
+                    rs.getLong("price_raw"),
+                    rs.getInt("size"),
+                    rs.getLong("order_id"),
+                    rs.getLong("trade_id"));
+
+            if (!current.isEmpty()) {
+                Fill last = current.get(current.size() - 1);
+                boolean sameKey  = last.symbol.equals(f.symbol) && last.priceRaw == f.priceRaw;
+                boolean inWindow = (f.tsNanos - last.tsNanos) <= RUN_GAP_NANOS;
+                if (!sameKey || !inWindow) {
+                    flush(out);
+                }
+            }
+            current.add(f);
+        }
+
+        void flush(final List<ScoredEvent> out) {
+            if (current.size() < MIN_FILLS) { current.clear(); return; }
+
+            Fill first = current.get(0);
+            Fill last  = current.get(current.size() - 1);
+            long durationNanos = last.tsNanos - first.tsNanos;
+            if (durationNanos < MIN_DURATION_NANOS) { current.clear(); return; }
+
+            // Coefficient of variation = stddev / mean. Low CV means similar-size fills.
+            double mean = current.stream().mapToInt(x -> x.size).average().orElse(0);
+            if (mean <= 0) { current.clear(); return; }
+            double variance = current.stream()
+                    .mapToDouble(x -> (x.size - mean) * (x.size - mean))
+                    .sum() / current.size();
+            double cv = Math.sqrt(variance) / mean;
+            if (cv > MAX_SIZE_CV) { current.clear(); return; }
+
+            out.add(buildEvent(ctx, current, cv));
+            current.clear();
+        }
+    }
+
+    private static ScoredEvent buildEvent(final ScoringContext ctx, final List<Fill> run, final double cv) {
+        Fill first = run.get(0);
+        Fill last  = run.get(run.size() - 1);
+
+        long totalShares = 0;
+        int[] sizes = new int[run.size()];
+        for (int i = 0; i < run.size(); i++) {
+            totalShares += run.get(i).size;
+            sizes[i] = run.get(i).size;
+        }
+        java.util.Arrays.sort(sizes);
+        int medianSize = sizes[sizes.length / 2];
+
+        ObjectMapper json = ctx.json();
+        ObjectNode breakdown = json.createObjectNode();
+        breakdown.put("fills",            run.size());
+        breakdown.put("total_shares",     totalShares);
+        breakdown.put("price_dollars",    first.priceRaw / 10_000.0);
+        breakdown.put("median_fill_size", medianSize);
+        breakdown.put("size_cv",          cv);
+        breakdown.put("duration_seconds", (last.tsNanos - first.tsNanos) / 1_000_000_000L);
+        breakdown.put("start_iso",        first.ts.toString());
+        breakdown.put("end_iso",          last.ts.toString());
+
+        ArrayNode sourceRefs = json.createArrayNode();
+        int refsToEmit = Math.min(run.size(), MAX_SOURCE_REFS);
+        for (int i = 0; i < refsToEmit; i++) {
+            Fill f = run.get(i);
+            ObjectNode ref = json.createObjectNode();
+            ref.put("table",    "orders_executed");
+            ref.put("symbol",   f.symbol);
+            ref.put("ts_nanos", f.tsNanos);
+            ref.put("order_id", f.orderId);
+            ref.put("trade_id", f.tradeId);
+            sourceRefs.add(ref);
+        }
+        if (run.size() > MAX_SOURCE_REFS) {
+            ObjectNode trunc = json.createObjectNode();
+            trunc.put("truncated_count", run.size() - MAX_SOURCE_REFS);
+            sourceRefs.add(trunc);
+        }
+
+        double score = Math.log10(Math.max(totalShares, 1)) * run.size();
+
+        return new ScoredEvent(
+                ctx.tradingDate(),
+                first.symbol,
+                first.ts,
+                last.ts,
+                "iceberg",
+                score,
+                breakdown,
+                sourceRefs);
+    }
+
+    private record Fill(
+            Instant ts,
+            long    tsNanos,
+            String  symbol,
+            long    priceRaw,
+            int     size,
+            long    orderId,
+            long    tradeId) {}
+}

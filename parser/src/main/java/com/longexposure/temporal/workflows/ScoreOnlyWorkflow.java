@@ -38,8 +38,8 @@ public final class ScoreOnlyWorkflow {
         private final ScoreEventsActivity scoreEvents = Workflow.newActivityStub(
                 ScoreEventsActivity.class,
                 ActivityOptions.newBuilder()
-                        .setStartToCloseTimeout(Duration.ofMinutes(30))
-                        .setHeartbeatTimeout(Duration.ofMinutes(5))
+                        .setStartToCloseTimeout(Duration.ofMinutes(90))
+                        .setHeartbeatTimeout(Duration.ofMinutes(15))
                         .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(1).build())
                         .build());
 

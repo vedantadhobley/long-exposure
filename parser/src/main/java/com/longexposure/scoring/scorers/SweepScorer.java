@@ -98,8 +98,10 @@ public final class SweepScorer implements EventScorer {
             st.setTimestamp(2, to);
             try (ResultSet rs = st.executeQuery()) {
                 ClusterBuilder cb = new ClusterBuilder(ctx);
+                long rowsRead = 0;
                 while (rs.next()) {
                     cb.consume(rs, out);
+                    if (++rowsRead % 100_000 == 0) ctx.heartbeat().send("sweep:" + rowsRead);
                 }
                 cb.flush(out);
             }

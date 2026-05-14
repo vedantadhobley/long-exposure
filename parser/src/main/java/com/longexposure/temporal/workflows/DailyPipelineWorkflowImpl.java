@@ -132,12 +132,13 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
     private final ScoreEventsActivity scoreEvents = Workflow.newActivityStub(
             ScoreEventsActivity.class,
             ActivityOptions.newBuilder()
-                    // Scoring reads from hypertables + writes thousands of
-                    // rows to scored_events. Should be quick for v1 (just
-                    // halts). Generous timeout so adding scorers doesn't
-                    // immediately require re-tuning.
-                    .setStartToCloseTimeout(Duration.ofMinutes(30))
-                    .setHeartbeatTimeout(Duration.ofMinutes(5))
+                    // Scoring activity runs all scorers sequentially. The
+                    // heaviest currently (post-cancel JOIN over 78M × 78M
+                    // rows) takes minutes; per-row heartbeats keep the
+                    // activity alive but the overall start-to-close still
+                    // needs to be wide.
+                    .setStartToCloseTimeout(Duration.ofMinutes(90))
+                    .setHeartbeatTimeout(Duration.ofMinutes(15))
                     .setRetryOptions(transientRetry(2))
                     .build());
 

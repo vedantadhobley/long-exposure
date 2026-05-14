@@ -1,7 +1,11 @@
 package com.longexposure.scoring;
 
 import com.longexposure.scoring.scorers.HaltScorer;
+import com.longexposure.scoring.scorers.IcebergScorer;
 import com.longexposure.scoring.scorers.LargeTradeScorer;
+import com.longexposure.scoring.scorers.LayeringScorer;
+import com.longexposure.scoring.scorers.LiquidityWithdrawalScorer;
+import com.longexposure.scoring.scorers.PostCancelClusterScorer;
 import com.longexposure.scoring.scorers.SweepScorer;
 
 import java.util.List;
@@ -22,12 +26,11 @@ public final class EventScorerRegistry {
     public static final List<EventScorer> ALL = List.of(
             new HaltScorer(),
             new LargeTradeScorer(),
-            new SweepScorer()
-            // add intraday scorers here as we build them:
-            //   new PostCancelClusterScorer(),
-            //   new LayeringScorer(),
-            //   new IcebergScorer(),
-            //   new LiquidityWithdrawalScorer(),
+            new SweepScorer(),
+            new PostCancelClusterScorer(),
+            new LayeringScorer(),
+            new IcebergScorer(),
+            new LiquidityWithdrawalScorer()
             // interday scorers (Sprint 3+):
             //   new VolumeDeviationScorer(),
             //   new TimeInBookDriftScorer()
