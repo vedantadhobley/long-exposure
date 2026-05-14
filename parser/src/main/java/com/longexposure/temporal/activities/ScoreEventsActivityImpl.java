@@ -63,10 +63,21 @@ public final class ScoreEventsActivityImpl implements ScoreEventsActivity {
                 60, 60, TimeUnit.SECONDS);
 
         try (Connection conn = openConnection()) {
+            // CRITICAL: Postgres's JDBC driver silently ignores setFetchSize()
+            // when autoCommit=true (the default) and instead buffers the
+            // ENTIRE result set into Java memory before yielding the first
+            // row. With multi-million-row joins (PostCancelCluster) that's
+            // an instant OOM. Setting autoCommit=false enables cursor-based
+            // streaming and the per-statement fetchSize starts working.
+            // We commit explicitly after pre-clean and after each scorer's
+            // COPY so the writes are durable.
+            conn.setAutoCommit(false);
+
             // Idempotent — ensures scored_events table exists when this
             // activity runs without a preceding parse activity (e.g. via
             // ScoreOnlyWorkflow).
             SchemaManager.apply(conn);
+            conn.commit();
 
             // Pre-clean: scored_events for this date.
             long deleted;
@@ -75,6 +86,7 @@ public final class ScoreEventsActivityImpl implements ScoreEventsActivity {
                 st.setObject(1, tradingDate);
                 deleted = st.executeLargeUpdate();
             }
+            conn.commit();
             LOG.info("score pre-clean  date={} rows_deleted={}", tradingDate, deleted);
             actx.heartbeat("preclean_done:" + deleted);
 
@@ -131,6 +143,9 @@ public final class ScoreEventsActivityImpl implements ScoreEventsActivity {
 
         String sql = "COPY scored_events (" + COPY_COLUMNS + ") FROM STDIN WITH (FORMAT text)";
         copyManager.copyIn(sql, new StringReader(buf.toString()));
+        // We're in autoCommit=false mode — commit so the rows are durable
+        // before the next scorer starts.
+        ctx.conn().commit();
         return count[0];
     }
 
