@@ -16,7 +16,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Stream;
+import java.util.function.Consumer;
 
 /**
  * Liquidity withdrawal detector. Finds bursts of {@code orders_delete}
@@ -67,7 +67,7 @@ public final class LiquidityWithdrawalScorer implements EventScorer {
     public String id() { return "liquidity_withdrawal"; }
 
     @Override
-    public Stream<ScoredEvent> score(final ScoringContext ctx) {
+    public void score(final ScoringContext ctx, final Consumer<ScoredEvent> emit) {
         String sql = """
                 SELECT ts, ts_nanos, symbol, order_id
                 FROM orders_delete
@@ -79,7 +79,8 @@ public final class LiquidityWithdrawalScorer implements EventScorer {
         Timestamp from = Timestamp.from(ctx.tradingDate().atStartOfDay().toInstant(ZoneOffset.UTC));
         Timestamp to   = Timestamp.from(ctx.tradingDate().plusDays(1).atStartOfDay().toInstant(ZoneOffset.UTC));
 
-        List<ScoredEvent> out = new ArrayList<>();
+        long[] emitted = {0};
+        Consumer<ScoredEvent> counting = se -> { emit.accept(se); emitted[0]++; };
         try (PreparedStatement st = ctx.conn().prepareStatement(sql)) {
             st.setFetchSize(50_000);
             st.setTimestamp(1, from);
@@ -88,17 +89,16 @@ public final class LiquidityWithdrawalScorer implements EventScorer {
                 ClusterBuilder cb = new ClusterBuilder(ctx);
                 long rowsRead = 0;
                 while (rs.next()) {
-                    cb.consume(rs, out);
+                    cb.consume(rs, counting);
                     if (++rowsRead % 100_000 == 0) ctx.heartbeat().send("liquidity:" + rowsRead);
                 }
-                cb.flush(out);
+                cb.flush(counting);
             }
         } catch (Exception e) {
             throw new RuntimeException("LiquidityWithdrawalScorer query failed for date=" + ctx.tradingDate(), e);
         }
 
-        LOG.info("LiquidityWithdrawalScorer  date={} bursts_emitted={}", ctx.tradingDate(), out.size());
-        return out.stream();
+        LOG.info("LiquidityWithdrawalScorer  date={} bursts_emitted={}", ctx.tradingDate(), emitted[0]);
     }
 
     private static final class ClusterBuilder {
@@ -107,7 +107,7 @@ public final class LiquidityWithdrawalScorer implements EventScorer {
 
         ClusterBuilder(final ScoringContext ctx) { this.ctx = ctx; }
 
-        void consume(final ResultSet rs, final List<ScoredEvent> out) throws Exception {
+        void consume(final ResultSet rs, final Consumer<ScoredEvent> emit) throws Exception {
             Cancel c = new Cancel(
                     rs.getTimestamp("ts").toInstant(),
                     rs.getLong("ts_nanos"),
@@ -119,17 +119,17 @@ public final class LiquidityWithdrawalScorer implements EventScorer {
                 boolean sameSymbol = last.symbol.equals(c.symbol);
                 boolean withinGap  = (c.tsNanos - last.tsNanos) <= CLUSTER_GAP_NANOS;
                 if (!sameSymbol || !withinGap) {
-                    flush(out);
+                    flush(emit);
                 } else if (current.size() >= MAX_CLUSTER_SIZE) {
-                    flush(out);
+                    flush(emit);
                 }
             }
             current.add(c);
         }
 
-        void flush(final List<ScoredEvent> out) {
+        void flush(final Consumer<ScoredEvent> emit) {
             if (current.size() >= MIN_DELETES) {
-                out.add(buildEvent(ctx, current));
+                emit.accept(buildEvent(ctx, current));
             }
             current.clear();
         }

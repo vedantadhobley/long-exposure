@@ -14,9 +14,7 @@ import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.ZoneOffset;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.stream.Stream;
+import java.util.function.Consumer;
 
 /**
  * Halt detector. Reads {@code status_events} for {@code event_kind='H'}
@@ -53,7 +51,7 @@ public final class HaltScorer implements EventScorer {
     public String id() { return "halt"; }
 
     @Override
-    public Stream<ScoredEvent> score(final ScoringContext ctx) {
+    public void score(final ScoringContext ctx, final Consumer<ScoredEvent> emit) {
         // Window-function pairing of halt rows with their resume rows
         // (next non-'H' status for the same symbol). NULL halt_end means
         // the halt was still open at the next session boundary; for v1
@@ -87,21 +85,21 @@ public final class HaltScorer implements EventScorer {
         Timestamp from = Timestamp.from(ctx.tradingDate().atStartOfDay().toInstant(ZoneOffset.UTC));
         Timestamp to   = Timestamp.from(ctx.tradingDate().plusDays(1).atStartOfDay().toInstant(ZoneOffset.UTC));
 
-        List<ScoredEvent> out = new ArrayList<>();
+        long emitted = 0;
         try (PreparedStatement st = ctx.conn().prepareStatement(sql)) {
             st.setTimestamp(1, from);
             st.setTimestamp(2, to);
             try (ResultSet rs = st.executeQuery()) {
                 while (rs.next()) {
-                    out.add(buildEvent(ctx, rs));
+                    emit.accept(buildEvent(ctx, rs));
+                    emitted++;
                 }
             }
         } catch (Exception e) {
             throw new RuntimeException("HaltScorer query failed for date=" + ctx.tradingDate(), e);
         }
 
-        LOG.info("HaltScorer  date={} halts_emitted={}", ctx.tradingDate(), out.size());
-        return out.stream();
+        LOG.info("HaltScorer  date={} halts_emitted={}", ctx.tradingDate(), emitted);
     }
 
     private static ScoredEvent buildEvent(final ScoringContext ctx, final ResultSet rs) throws Exception {

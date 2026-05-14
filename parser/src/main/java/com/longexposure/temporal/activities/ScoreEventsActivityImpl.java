@@ -6,6 +6,7 @@ import com.longexposure.scoring.EventScorerRegistry;
 import com.longexposure.scoring.ScoredEvent;
 import com.longexposure.scoring.ScoringContext;
 import com.longexposure.storage.SchemaManager;
+import java.util.function.Consumer;
 import io.temporal.activity.Activity;
 import io.temporal.activity.ActivityExecutionContext;
 import org.postgresql.PGConnection;
@@ -128,22 +129,37 @@ public final class ScoreEventsActivityImpl implements ScoreEventsActivity {
         return totalWritten;
     }
 
-    private long runOne(final EventScorer scorer, final ScoringContext ctx, final CopyManager copyManager) throws Exception {
-        // Buffer this scorer's output and COPY it in one shot. Output
-        // volume per scorer is small (typically hundreds, not millions),
-        // so one buffer per scorer is fine.
-        StringBuilder buf = new StringBuilder();
-        long[] count = {0};
+    /** Flush COPY every N rows to keep the buffer bounded. */
+    private static final long COPY_FLUSH_EVERY = 10_000L;
 
-        scorer.score(ctx).forEach(se -> {
+    private long runOne(final EventScorer scorer, final ScoringContext ctx, final CopyManager copyManager) throws Exception {
+        // Push model: scorer emits events one at a time via the Consumer
+        // we pass in. We accumulate at most COPY_FLUSH_EVERY rows of COPY
+        // text before draining to Postgres, then reset. Memory is bounded
+        // regardless of how many events the scorer produces over the day.
+        final StringBuilder buf = new StringBuilder();
+        final long[] count = {0};
+        final String sql = "COPY scored_events (" + COPY_COLUMNS + ") FROM STDIN WITH (FORMAT text)";
+
+        Consumer<ScoredEvent> emit = se -> {
             appendCopyRow(buf, se, ctx.pipelineRunId());
             count[0]++;
-        });
+            if (count[0] % COPY_FLUSH_EVERY == 0) {
+                try {
+                    copyManager.copyIn(sql, new StringReader(buf.toString()));
+                    buf.setLength(0);
+                } catch (Exception e) {
+                    throw new RuntimeException("incremental COPY flush failed", e);
+                }
+            }
+        };
 
-        if (count[0] == 0) return 0;
+        scorer.score(ctx, emit);
 
-        String sql = "COPY scored_events (" + COPY_COLUMNS + ") FROM STDIN WITH (FORMAT text)";
-        copyManager.copyIn(sql, new StringReader(buf.toString()));
+        // Final flush — whatever's left in the buffer.
+        if (buf.length() > 0) {
+            copyManager.copyIn(sql, new StringReader(buf.toString()));
+        }
         // We're in autoCommit=false mode — commit so the rows are durable
         // before the next scorer starts.
         ctx.conn().commit();

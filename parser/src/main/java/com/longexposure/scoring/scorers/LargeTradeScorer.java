@@ -14,9 +14,7 @@ import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.ZoneOffset;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.stream.Stream;
+import java.util.function.Consumer;
 
 /**
  * Large-trade detector. Reads {@code trades} for DPLS rows on the trading
@@ -59,7 +57,7 @@ public final class LargeTradeScorer implements EventScorer {
     public String id() { return "large_trade"; }
 
     @Override
-    public Stream<ScoredEvent> score(final ScoringContext ctx) {
+    public void score(final ScoringContext ctx, final Consumer<ScoredEvent> emit) {
         // size × price_raw / 10_000 = notional in dollars. We filter in
         // raw units (size * price_raw) > cutoff × 10_000 to avoid float
         // ops in the WHERE clause.
@@ -75,14 +73,15 @@ public final class LargeTradeScorer implements EventScorer {
         Timestamp from = Timestamp.from(ctx.tradingDate().atStartOfDay().toInstant(ZoneOffset.UTC));
         Timestamp to   = Timestamp.from(ctx.tradingDate().plusDays(1).atStartOfDay().toInstant(ZoneOffset.UTC));
 
-        List<ScoredEvent> out = new ArrayList<>();
+        long emitted = 0;
         try (PreparedStatement st = ctx.conn().prepareStatement(sql)) {
             st.setTimestamp(1, from);
             st.setTimestamp(2, to);
             st.setLong(3, NOTIONAL_CUTOFF_RAW);
             try (ResultSet rs = st.executeQuery()) {
                 while (rs.next()) {
-                    out.add(buildEvent(ctx, rs));
+                    emit.accept(buildEvent(ctx, rs));
+                    emitted++;
                 }
             }
         } catch (Exception e) {
@@ -90,8 +89,7 @@ public final class LargeTradeScorer implements EventScorer {
         }
 
         LOG.info("LargeTradeScorer  date={} cutoff=${} trades_emitted={}",
-                ctx.tradingDate(), NOTIONAL_CUTOFF_DOLLARS, out.size());
-        return out.stream();
+                ctx.tradingDate(), NOTIONAL_CUTOFF_DOLLARS, emitted);
     }
 
     private static ScoredEvent buildEvent(final ScoringContext ctx, final ResultSet rs) throws Exception {

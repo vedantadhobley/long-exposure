@@ -16,7 +16,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Stream;
+import java.util.function.Consumer;
 
 /**
  * Post-cancel cluster detector. Finds bursts of orders that were posted
@@ -62,11 +62,21 @@ public final class PostCancelClusterScorer implements EventScorer {
     /** Max lifetime (add → delete) for an order to count as "short-lived". */
     private static final long MAX_LIFETIME_NANOS = 50_000_000L;       // 50 ms
 
-    /** Max gap between consecutive short-lived orders to be in the same cluster. */
-    private static final long CLUSTER_GAP_NANOS = 500_000_000L;       // 500 ms
+    /**
+     * Max gap between consecutive short-lived orders to be in the same
+     * cluster. Tightened from 500 ms → 50 ms after observing that the
+     * looser gap produced 3.6 M clusters on a single day — effectively
+     * "every continuous activity stream" rather than rapid bursts.
+     */
+    private static final long CLUSTER_GAP_NANOS = 50_000_000L;        // 50 ms
 
-    /** Minimum number of short-lived orders in a cluster to emit a scored event. */
-    private static final int MIN_ORDERS_PER_CLUSTER = 5;
+    /**
+     * Minimum number of short-lived orders in a cluster to emit a scored
+     * event. Raised from 5 → 20 alongside the tighter gap; 20+ orders
+     * all rapid-cancelled within 50-ms-apart windows is a real burst
+     * shape, not background noise.
+     */
+    private static final int MIN_ORDERS_PER_CLUSTER = 20;
 
     /**
      * Cap on cluster buffer size. When a cluster exceeds this, we emit it
@@ -82,7 +92,7 @@ public final class PostCancelClusterScorer implements EventScorer {
     public String id() { return "post_cancel_cluster"; }
 
     @Override
-    public Stream<ScoredEvent> score(final ScoringContext ctx) {
+    public void score(final ScoringContext ctx, final Consumer<ScoredEvent> emit) {
         // Join add ⨝ delete on order_id, filter to short-lived pairs.
         // The order_id index on both tables makes this a merge/hash join;
         // postgres picks the right plan based on cardinality.
@@ -109,7 +119,8 @@ public final class PostCancelClusterScorer implements EventScorer {
         Timestamp from = Timestamp.from(ctx.tradingDate().atStartOfDay().toInstant(ZoneOffset.UTC));
         Timestamp to   = Timestamp.from(ctx.tradingDate().plusDays(1).atStartOfDay().toInstant(ZoneOffset.UTC));
 
-        List<ScoredEvent> out = new ArrayList<>();
+        long[] emitted = {0};
+        Consumer<ScoredEvent> counting = se -> { emit.accept(se); emitted[0]++; };
         long pairsExamined = 0;
         try (PreparedStatement st = ctx.conn().prepareStatement(sql)) {
             st.setFetchSize(50_000);
@@ -122,18 +133,17 @@ public final class PostCancelClusterScorer implements EventScorer {
                 ClusterBuilder cb = new ClusterBuilder(ctx);
                 while (rs.next()) {
                     pairsExamined++;
-                    cb.consume(rs, out);
+                    cb.consume(rs, counting);
                     if (pairsExamined % 100_000 == 0) ctx.heartbeat().send("post_cancel:" + pairsExamined);
                 }
-                cb.flush(out);
+                cb.flush(counting);
             }
         } catch (Exception e) {
             throw new RuntimeException("PostCancelClusterScorer query failed for date=" + ctx.tradingDate(), e);
         }
 
         LOG.info("PostCancelClusterScorer  date={} short_lived_pairs={} clusters_emitted={}",
-                ctx.tradingDate(), pairsExamined, out.size());
-        return out.stream();
+                ctx.tradingDate(), pairsExamined, emitted[0]);
     }
 
     private static final class ClusterBuilder {
@@ -142,7 +152,7 @@ public final class PostCancelClusterScorer implements EventScorer {
 
         ClusterBuilder(final ScoringContext ctx) { this.ctx = ctx; }
 
-        void consume(final ResultSet rs, final List<ScoredEvent> out) throws Exception {
+        void consume(final ResultSet rs, final Consumer<ScoredEvent> emit) throws Exception {
             ShortLivedOrder o = new ShortLivedOrder(
                     rs.getString("symbol"),
                     rs.getString("side"),
@@ -158,19 +168,19 @@ public final class PostCancelClusterScorer implements EventScorer {
                 boolean sameKey   = last.symbol.equals(o.symbol) && last.side.equals(o.side);
                 boolean withinGap = (o.addNanos - last.addNanos) <= CLUSTER_GAP_NANOS;
                 if (!sameKey || !withinGap) {
-                    flush(out);
+                    flush(emit);
                 } else if (current.size() >= MAX_CLUSTER_SIZE) {
                     // Bounded buffer: emit-and-reset before the buffer
                     // grows without limit on continuous-activity symbols.
-                    flush(out);
+                    flush(emit);
                 }
             }
             current.add(o);
         }
 
-        void flush(final List<ScoredEvent> out) {
+        void flush(final Consumer<ScoredEvent> emit) {
             if (current.size() >= MIN_ORDERS_PER_CLUSTER) {
-                out.add(buildEvent(ctx, current));
+                emit.accept(buildEvent(ctx, current));
             }
             current.clear();
         }

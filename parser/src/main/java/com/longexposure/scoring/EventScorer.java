@@ -1,6 +1,6 @@
 package com.longexposure.scoring;
 
-import java.util.stream.Stream;
+import java.util.function.Consumer;
 
 /**
  * Extension point for the scoring layer. One class per pattern; see
@@ -37,9 +37,12 @@ public interface EventScorer {
     String id();
 
     /**
-     * Scan source data for the day and emit zero or more scored events.
-     * The stream is consumed once by {@link com.longexposure.temporal.activities.ScoreEventsActivity}
-     * and written to {@code scored_events} via COPY.
+     * Scan source data for the day and emit zero or more scored events via
+     * the {@code emit} callback. The host activity writes each emitted
+     * event to the {@code scored_events} COPY stream incrementally — so
+     * memory is bounded by per-cluster state inside the scorer regardless
+     * of how many events fire over the day. Scorers must NOT accumulate
+     * events into a list before emitting.
      */
-    Stream<ScoredEvent> score(ScoringContext ctx);
+    void score(ScoringContext ctx, Consumer<ScoredEvent> emit);
 }

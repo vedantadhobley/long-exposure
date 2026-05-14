@@ -16,7 +16,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Stream;
+import java.util.function.Consumer;
 
 /**
  * Iceberg detector. Looks for sustained repeated fills of similar size at
@@ -81,7 +81,7 @@ public final class IcebergScorer implements EventScorer {
     public String id() { return "iceberg"; }
 
     @Override
-    public Stream<ScoredEvent> score(final ScoringContext ctx) {
+    public void score(final ScoringContext ctx, final Consumer<ScoredEvent> emit) {
         String sql = """
                 SELECT ts, ts_nanos, symbol, price_raw, size, order_id, trade_id
                 FROM orders_executed
@@ -93,7 +93,8 @@ public final class IcebergScorer implements EventScorer {
         Timestamp from = Timestamp.from(ctx.tradingDate().atStartOfDay().toInstant(ZoneOffset.UTC));
         Timestamp to   = Timestamp.from(ctx.tradingDate().plusDays(1).atStartOfDay().toInstant(ZoneOffset.UTC));
 
-        List<ScoredEvent> out = new ArrayList<>();
+        long[] emitted = {0};
+        Consumer<ScoredEvent> counting = se -> { emit.accept(se); emitted[0]++; };
         try (PreparedStatement st = ctx.conn().prepareStatement(sql)) {
             st.setFetchSize(50_000);
             st.setTimestamp(1, from);
@@ -102,17 +103,16 @@ public final class IcebergScorer implements EventScorer {
                 RunBuilder rb = new RunBuilder(ctx);
                 long rowsRead = 0;
                 while (rs.next()) {
-                    rb.consume(rs, out);
+                    rb.consume(rs, counting);
                     if (++rowsRead % 100_000 == 0) ctx.heartbeat().send("iceberg:" + rowsRead);
                 }
-                rb.flush(out);
+                rb.flush(counting);
             }
         } catch (Exception e) {
             throw new RuntimeException("IcebergScorer query failed for date=" + ctx.tradingDate(), e);
         }
 
-        LOG.info("IcebergScorer  date={} icebergs_emitted={}", ctx.tradingDate(), out.size());
-        return out.stream();
+        LOG.info("IcebergScorer  date={} icebergs_emitted={}", ctx.tradingDate(), emitted[0]);
     }
 
     private static final class RunBuilder {
@@ -121,7 +121,7 @@ public final class IcebergScorer implements EventScorer {
 
         RunBuilder(final ScoringContext ctx) { this.ctx = ctx; }
 
-        void consume(final ResultSet rs, final List<ScoredEvent> out) throws Exception {
+        void consume(final ResultSet rs, final Consumer<ScoredEvent> emit) throws Exception {
             Fill f = new Fill(
                     rs.getTimestamp("ts").toInstant(),
                     rs.getLong("ts_nanos"),
@@ -136,15 +136,15 @@ public final class IcebergScorer implements EventScorer {
                 boolean sameKey  = last.symbol.equals(f.symbol) && last.priceRaw == f.priceRaw;
                 boolean inWindow = (f.tsNanos - last.tsNanos) <= RUN_GAP_NANOS;
                 if (!sameKey || !inWindow) {
-                    flush(out);
+                    flush(emit);
                 } else if (current.size() >= MAX_RUN_SIZE) {
-                    flush(out);
+                    flush(emit);
                 }
             }
             current.add(f);
         }
 
-        void flush(final List<ScoredEvent> out) {
+        void flush(final Consumer<ScoredEvent> emit) {
             if (current.size() < MIN_FILLS) { current.clear(); return; }
 
             Fill first = current.get(0);
@@ -161,7 +161,7 @@ public final class IcebergScorer implements EventScorer {
             double cv = Math.sqrt(variance) / mean;
             if (cv > MAX_SIZE_CV) { current.clear(); return; }
 
-            out.add(buildEvent(ctx, current, cv));
+            emit.accept(buildEvent(ctx, current, cv));
             current.clear();
         }
     }

@@ -18,7 +18,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.stream.Stream;
+import java.util.function.Consumer;
 
 /**
  * Layering detector. Looks for clusters of orders that were posted and
@@ -56,9 +56,12 @@ public final class LayeringScorer implements EventScorer {
     private static final Logger LOG = LoggerFactory.getLogger(LayeringScorer.class);
 
     private static final long MAX_LIFETIME_NANOS = 50_000_000L;       // 50 ms
-    private static final long CLUSTER_GAP_NANOS  = 500_000_000L;      // 500 ms
-    private static final int  MIN_ORDERS         = 5;
-    private static final int  MIN_DISTINCT_LEVELS = 3;
+    /** Tightened from 500 ms — same reason as PostCancelClusterScorer. */
+    private static final long CLUSTER_GAP_NANOS  = 50_000_000L;       // 50 ms
+    /** Raised from 5 — alongside tighter gap. */
+    private static final int  MIN_ORDERS          = 20;
+    /** Raised from 3 — layering should span more than just adjacent levels. */
+    private static final int  MIN_DISTINCT_LEVELS = 5;
     private static final int  MAX_CLUSTER_SIZE    = 10_000;     // bounded buffer
     private static final int  MAX_SOURCE_REFS     = 32;
 
@@ -66,7 +69,7 @@ public final class LayeringScorer implements EventScorer {
     public String id() { return "layering"; }
 
     @Override
-    public Stream<ScoredEvent> score(final ScoringContext ctx) {
+    public void score(final ScoringContext ctx, final Consumer<ScoredEvent> emit) {
         String sql = """
                 SELECT a.symbol,
                        a.side,
@@ -90,7 +93,8 @@ public final class LayeringScorer implements EventScorer {
         Timestamp from = Timestamp.from(ctx.tradingDate().atStartOfDay().toInstant(ZoneOffset.UTC));
         Timestamp to   = Timestamp.from(ctx.tradingDate().plusDays(1).atStartOfDay().toInstant(ZoneOffset.UTC));
 
-        List<ScoredEvent> out = new ArrayList<>();
+        long[] emitted = {0};
+        Consumer<ScoredEvent> counting = se -> { emit.accept(se); emitted[0]++; };
         try (PreparedStatement st = ctx.conn().prepareStatement(sql)) {
             st.setFetchSize(50_000);
             st.setTimestamp(1, from);
@@ -102,17 +106,16 @@ public final class LayeringScorer implements EventScorer {
                 ClusterBuilder cb = new ClusterBuilder(ctx);
                 long rowsRead = 0;
                 while (rs.next()) {
-                    cb.consume(rs, out);
+                    cb.consume(rs, counting);
                     if (++rowsRead % 100_000 == 0) ctx.heartbeat().send("layering:" + rowsRead);
                 }
-                cb.flush(out);
+                cb.flush(counting);
             }
         } catch (Exception e) {
             throw new RuntimeException("LayeringScorer query failed for date=" + ctx.tradingDate(), e);
         }
 
-        LOG.info("LayeringScorer  date={} layered_clusters={}", ctx.tradingDate(), out.size());
-        return out.stream();
+        LOG.info("LayeringScorer  date={} layered_clusters={}", ctx.tradingDate(), emitted[0]);
     }
 
     private static final class ClusterBuilder {
@@ -121,7 +124,7 @@ public final class LayeringScorer implements EventScorer {
 
         ClusterBuilder(final ScoringContext ctx) { this.ctx = ctx; }
 
-        void consume(final ResultSet rs, final List<ScoredEvent> out) throws Exception {
+        void consume(final ResultSet rs, final Consumer<ScoredEvent> emit) throws Exception {
             ShortLivedOrder o = new ShortLivedOrder(
                     rs.getString("symbol"),
                     rs.getString("side"),
@@ -137,15 +140,15 @@ public final class LayeringScorer implements EventScorer {
                 boolean sameKey   = last.symbol.equals(o.symbol) && last.side.equals(o.side);
                 boolean withinGap = (o.addNanos - last.addNanos) <= CLUSTER_GAP_NANOS;
                 if (!sameKey || !withinGap) {
-                    flush(out);
+                    flush(emit);
                 } else if (current.size() >= MAX_CLUSTER_SIZE) {
-                    flush(out);
+                    flush(emit);
                 }
             }
             current.add(o);
         }
 
-        void flush(final List<ScoredEvent> out) {
+        void flush(final Consumer<ScoredEvent> emit) {
             if (current.size() < MIN_ORDERS) {
                 current.clear();
                 return;
@@ -153,7 +156,7 @@ public final class LayeringScorer implements EventScorer {
             Set<Long> levels = new HashSet<>();
             for (ShortLivedOrder o : current) levels.add(o.priceRaw);
             if (levels.size() >= MIN_DISTINCT_LEVELS) {
-                out.add(buildEvent(ctx, current, levels.size()));
+                emit.accept(buildEvent(ctx, current, levels.size()));
             }
             current.clear();
         }

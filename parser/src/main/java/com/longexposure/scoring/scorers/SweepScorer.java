@@ -16,7 +16,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Stream;
+import java.util.function.Consumer;
 
 /**
  * Sweep detector — finds clusters of {@code orders_executed} rows on the
@@ -78,7 +78,7 @@ public final class SweepScorer implements EventScorer {
     public String id() { return "sweep"; }
 
     @Override
-    public Stream<ScoredEvent> score(final ScoringContext ctx) {
+    public void score(final ScoringContext ctx, final Consumer<ScoredEvent> emit) {
         // Pull every execution for the day, ordered by (symbol, ts_nanos).
         // Cluster logic runs in-app — easier to reason about than a
         // gaps-and-islands SQL query and avoids window functions over a
@@ -94,7 +94,8 @@ public final class SweepScorer implements EventScorer {
         Timestamp from = Timestamp.from(ctx.tradingDate().atStartOfDay().toInstant(ZoneOffset.UTC));
         Timestamp to   = Timestamp.from(ctx.tradingDate().plusDays(1).atStartOfDay().toInstant(ZoneOffset.UTC));
 
-        List<ScoredEvent> out = new ArrayList<>();
+        long[] emitted = {0};
+        Consumer<ScoredEvent> counting = se -> { emit.accept(se); emitted[0]++; };
         try (PreparedStatement st = ctx.conn().prepareStatement(sql)) {
             st.setFetchSize(50_000);
             st.setTimestamp(1, from);
@@ -103,17 +104,16 @@ public final class SweepScorer implements EventScorer {
                 ClusterBuilder cb = new ClusterBuilder(ctx);
                 long rowsRead = 0;
                 while (rs.next()) {
-                    cb.consume(rs, out);
+                    cb.consume(rs, counting);
                     if (++rowsRead % 100_000 == 0) ctx.heartbeat().send("sweep:" + rowsRead);
                 }
-                cb.flush(out);
+                cb.flush(counting);
             }
         } catch (Exception e) {
             throw new RuntimeException("SweepScorer query failed for date=" + ctx.tradingDate(), e);
         }
 
-        LOG.info("SweepScorer  date={} sweeps_emitted={}", ctx.tradingDate(), out.size());
-        return out.stream();
+        LOG.info("SweepScorer  date={} sweeps_emitted={}", ctx.tradingDate(), emitted[0]);
     }
 
     /**
@@ -129,7 +129,7 @@ public final class SweepScorer implements EventScorer {
 
         ClusterBuilder(final ScoringContext ctx) { this.ctx = ctx; }
 
-        void consume(final ResultSet rs, final List<ScoredEvent> out) throws Exception {
+        void consume(final ResultSet rs, final Consumer<ScoredEvent> emit) throws Exception {
             Execution e = new Execution(
                     rs.getTimestamp("ts").toInstant(),
                     rs.getLong("ts_nanos"),
@@ -144,21 +144,21 @@ public final class SweepScorer implements EventScorer {
                 boolean sameSymbol = last.symbol.equals(e.symbol);
                 boolean withinGap  = (e.tsNanos - last.tsNanos) <= CLUSTER_GAP_NANOS;
                 if (!sameSymbol || !withinGap) {
-                    flush(out);
+                    flush(emit);
                 } else if (current.size() >= MAX_CLUSTER_SIZE) {
-                    flush(out);
+                    flush(emit);
                 }
             }
             current.add(e);
         }
 
-        void flush(final List<ScoredEvent> out) {
+        void flush(final Consumer<ScoredEvent> emit) {
             if (current.isEmpty()) return;
 
             // Count distinct prices first — fast reject for the common case
             long distinctLevels = current.stream().mapToLong(x -> x.priceRaw).distinct().count();
             if (distinctLevels >= MIN_DISTINCT_LEVELS) {
-                out.add(buildEvent(ctx, current, distinctLevels));
+                emit.accept(buildEvent(ctx, current, distinctLevels));
             }
             current.clear();
         }
