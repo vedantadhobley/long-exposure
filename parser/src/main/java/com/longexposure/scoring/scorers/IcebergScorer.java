@@ -72,6 +72,9 @@ public final class IcebergScorer implements EventScorer {
     /** Reset the run when the gap between consecutive fills exceeds this. */
     private static final long RUN_GAP_NANOS = 600L * 1_000_000_000L;     // 10 min
 
+    /** Bounded buffer to prevent unbounded growth on heavy traded names. */
+    private static final int MAX_RUN_SIZE = 10_000;
+
     private static final int MAX_SOURCE_REFS = 32;
 
     @Override
@@ -133,6 +136,8 @@ public final class IcebergScorer implements EventScorer {
                 boolean sameKey  = last.symbol.equals(f.symbol) && last.priceRaw == f.priceRaw;
                 boolean inWindow = (f.tsNanos - last.tsNanos) <= RUN_GAP_NANOS;
                 if (!sameKey || !inWindow) {
+                    flush(out);
+                } else if (current.size() >= MAX_RUN_SIZE) {
                     flush(out);
                 }
             }

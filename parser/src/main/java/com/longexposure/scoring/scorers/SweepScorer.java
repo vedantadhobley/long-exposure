@@ -68,6 +68,9 @@ public final class SweepScorer implements EventScorer {
     /** Minimum distinct prices in a cluster for it to be a sweep. */
     private static final int MIN_DISTINCT_LEVELS = 3;
 
+    /** Bounded buffer to defend against runaway clusters on busy names. */
+    private static final int MAX_CLUSTER_SIZE = 10_000;
+
     /** Cap on source_refs array length so breakdown stays bounded. */
     private static final int MAX_SOURCE_REFS = 32;
 
@@ -141,6 +144,8 @@ public final class SweepScorer implements EventScorer {
                 boolean sameSymbol = last.symbol.equals(e.symbol);
                 boolean withinGap  = (e.tsNanos - last.tsNanos) <= CLUSTER_GAP_NANOS;
                 if (!sameSymbol || !withinGap) {
+                    flush(out);
+                } else if (current.size() >= MAX_CLUSTER_SIZE) {
                     flush(out);
                 }
             }

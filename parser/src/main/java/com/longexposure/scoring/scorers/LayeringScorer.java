@@ -59,7 +59,8 @@ public final class LayeringScorer implements EventScorer {
     private static final long CLUSTER_GAP_NANOS  = 500_000_000L;      // 500 ms
     private static final int  MIN_ORDERS         = 5;
     private static final int  MIN_DISTINCT_LEVELS = 3;
-    private static final int  MAX_SOURCE_REFS    = 32;
+    private static final int  MAX_CLUSTER_SIZE    = 10_000;     // bounded buffer
+    private static final int  MAX_SOURCE_REFS     = 32;
 
     @Override
     public String id() { return "layering"; }
@@ -136,6 +137,8 @@ public final class LayeringScorer implements EventScorer {
                 boolean sameKey   = last.symbol.equals(o.symbol) && last.side.equals(o.side);
                 boolean withinGap = (o.addNanos - last.addNanos) <= CLUSTER_GAP_NANOS;
                 if (!sameKey || !withinGap) {
+                    flush(out);
+                } else if (current.size() >= MAX_CLUSTER_SIZE) {
                     flush(out);
                 }
             }

@@ -68,6 +68,14 @@ public final class PostCancelClusterScorer implements EventScorer {
     /** Minimum number of short-lived orders in a cluster to emit a scored event. */
     private static final int MIN_ORDERS_PER_CLUSTER = 5;
 
+    /**
+     * Cap on cluster buffer size. When a cluster exceeds this, we emit it
+     * as a scored event and reset — prevents unbounded growth on busy
+     * symbols where consecutive short-lived orders never break the
+     * 500-ms gap window.
+     */
+    private static final int MAX_CLUSTER_SIZE = 10_000;
+
     private static final int MAX_SOURCE_REFS = 32;
 
     @Override
@@ -150,6 +158,10 @@ public final class PostCancelClusterScorer implements EventScorer {
                 boolean sameKey   = last.symbol.equals(o.symbol) && last.side.equals(o.side);
                 boolean withinGap = (o.addNanos - last.addNanos) <= CLUSTER_GAP_NANOS;
                 if (!sameKey || !withinGap) {
+                    flush(out);
+                } else if (current.size() >= MAX_CLUSTER_SIZE) {
+                    // Bounded buffer: emit-and-reset before the buffer
+                    // grows without limit on continuous-activity symbols.
                     flush(out);
                 }
             }

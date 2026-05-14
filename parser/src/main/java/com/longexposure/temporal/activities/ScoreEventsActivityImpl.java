@@ -85,11 +85,24 @@ public final class ScoreEventsActivityImpl implements ScoreEventsActivity {
 
             for (EventScorer scorer : EventScorerRegistry.ALL) {
                 currentStage.set(scorer.id());
-                long scoredHere = runOne(scorer, sctx, copyManager);
-                totalWritten += scoredHere;
-                LOG.info("scorer done  id={} rows_written={} running_total={}",
-                        scorer.id(), scoredHere, totalWritten);
-                actx.heartbeat("scorer_done:" + scorer.id() + ":" + scoredHere);
+                try {
+                    long scoredHere = runOne(scorer, sctx, copyManager);
+                    totalWritten += scoredHere;
+                    LOG.info("scorer done  id={} rows_written={} running_total={}",
+                            scorer.id(), scoredHere, totalWritten);
+                    actx.heartbeat("scorer_done:" + scorer.id() + ":" + scoredHere);
+                } catch (OutOfMemoryError oom) {
+                    // Critical — re-throw so the JVM's -XX:+ExitOnOutOfMemoryError
+                    // fires and the activity fails cleanly. Other scorers
+                    // can't safely continue with the heap exhausted.
+                    LOG.error("OOM in scorer {} — re-throwing for clean activity fail", scorer.id(), oom);
+                    throw oom;
+                } catch (Exception e) {
+                    // Per-scorer isolation: one failed scorer shouldn't kill the run.
+                    LOG.error("scorer failed  id={} err={} — continuing with next scorer",
+                            scorer.id(), e.getMessage(), e);
+                    actx.heartbeat("scorer_failed:" + scorer.id());
+                }
             }
         } catch (Exception e) {
             throw new RuntimeException("scoreEvents failed for date=" + tradingDate, e);

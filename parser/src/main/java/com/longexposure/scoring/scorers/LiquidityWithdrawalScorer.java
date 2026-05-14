@@ -58,6 +58,9 @@ public final class LiquidityWithdrawalScorer implements EventScorer {
     /** Minimum number of cancellations in a cluster to call it a withdrawal. */
     private static final int  MIN_DELETES = 50;
 
+    /** Bounded buffer for very-high-rate withdrawal bursts. */
+    private static final int  MAX_CLUSTER_SIZE = 10_000;
+
     private static final int MAX_SOURCE_REFS = 16;
 
     @Override
@@ -116,6 +119,8 @@ public final class LiquidityWithdrawalScorer implements EventScorer {
                 boolean sameSymbol = last.symbol.equals(c.symbol);
                 boolean withinGap  = (c.tsNanos - last.tsNanos) <= CLUSTER_GAP_NANOS;
                 if (!sameSymbol || !withinGap) {
+                    flush(out);
+                } else if (current.size() >= MAX_CLUSTER_SIZE) {
                     flush(out);
                 }
             }

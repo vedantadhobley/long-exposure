@@ -42,6 +42,17 @@ dependencies {
 
 application {
     mainClass.set("com.longexposure.Main")
+    // Hard heap cap so a runaway scorer's buffer can't OOM the host.
+    // 4 GB is generous for the workloads we have (cluster buffers are
+    // capped at 10K records per scorer; typical COPY buffer is a few MB).
+    // -XX:+ExitOnOutOfMemoryError fails the JVM fast instead of
+    // thrashing GC indefinitely when we do hit the cap.
+    applicationDefaultJvmArgs = listOf(
+            "-Xmx4g",
+            "-XX:+ExitOnOutOfMemoryError",
+            "-XX:+HeapDumpOnOutOfMemoryError",
+            "-XX:HeapDumpPath=/tmp"
+    )
 }
 
 tasks.withType<JavaCompile> {
