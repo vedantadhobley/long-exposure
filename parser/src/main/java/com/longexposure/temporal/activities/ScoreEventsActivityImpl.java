@@ -63,6 +63,13 @@ public final class ScoreEventsActivityImpl implements ScoreEventsActivity {
                 60, 60, TimeUnit.SECONDS);
 
         try (Connection conn = openConnection()) {
+            // Idempotent — ensures scored_events table exists when this
+            // activity runs without a preceding parse activity (e.g. via
+            // ScoreOnlyWorkflow). SchemaManager.apply internally flips
+            // autoCommit=true (DDL wants per-statement commits), so we
+            // set our autoCommit=false AFTER it completes.
+            SchemaManager.apply(conn);
+
             // CRITICAL: Postgres's JDBC driver silently ignores setFetchSize()
             // when autoCommit=true (the default) and instead buffers the
             // ENTIRE result set into Java memory before yielding the first
@@ -72,12 +79,6 @@ public final class ScoreEventsActivityImpl implements ScoreEventsActivity {
             // We commit explicitly after pre-clean and after each scorer's
             // COPY so the writes are durable.
             conn.setAutoCommit(false);
-
-            // Idempotent — ensures scored_events table exists when this
-            // activity runs without a preceding parse activity (e.g. via
-            // ScoreOnlyWorkflow).
-            SchemaManager.apply(conn);
-            conn.commit();
 
             // Pre-clean: scored_events for this date.
             long deleted;
