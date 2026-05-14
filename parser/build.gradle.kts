@@ -43,12 +43,14 @@ dependencies {
 application {
     mainClass.set("com.longexposure.Main")
     // Hard heap cap so a runaway scorer's buffer can't OOM the host.
-    // 4 GB is generous for the workloads we have (cluster buffers are
-    // capped at 10K records per scorer; typical COPY buffer is a few MB).
-    // -XX:+ExitOnOutOfMemoryError fails the JVM fast instead of
-    // thrashing GC indefinitely when we do hit the cap.
+    // 32 GB on a 125 GB host gives generous room for the scorer-output
+    // accumulation pattern (PostCancelCluster can emit millions of
+    // capped clusters per day). -XX:+ExitOnOutOfMemoryError fails the
+    // JVM fast instead of thrashing GC indefinitely when we do hit it.
+    // -XX:MaxRAMPercentage isn't used because we want a hard absolute
+    // cap, not a host-proportional one.
     applicationDefaultJvmArgs = listOf(
-            "-Xmx4g",
+            "-Xmx32g",
             "-XX:+ExitOnOutOfMemoryError",
             "-XX:+HeapDumpOnOutOfMemoryError",
             "-XX:HeapDumpPath=/tmp"
