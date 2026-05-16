@@ -14,6 +14,7 @@ import com.longexposure.temporal.activities.RecordValidationActivity;
 import com.longexposure.temporal.activities.ResolveUrlActivity;
 import com.longexposure.temporal.activities.RetentionSweepActivity;
 import com.longexposure.temporal.activities.ScoreEventsActivity;
+import com.longexposure.temporal.activities.SelectTopEventsActivity;
 import com.longexposure.temporal.activities.ValidationLegResult;
 import java.util.UUID;
 import io.temporal.activity.ActivityOptions;
@@ -139,6 +140,13 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
                     // needs to be wide.
                     .setStartToCloseTimeout(Duration.ofMinutes(90))
                     .setHeartbeatTimeout(Duration.ofMinutes(15))
+                    .setRetryOptions(transientRetry(2))
+                    .build());
+
+    private final SelectTopEventsActivity selectTopEvents = Workflow.newActivityStub(
+            SelectTopEventsActivity.class,
+            ActivityOptions.newBuilder()
+                    .setStartToCloseTimeout(Duration.ofMinutes(5))
                     .setRetryOptions(transientRetry(2))
                     .build());
 
@@ -284,6 +292,13 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
             try {
                 long scored = scoreEvents.scoreEvents(date, runUuid);
                 LOG.info("scoring done  date={} scored_events_written={}", date, scored);
+                // Per-scorer top-N pull from scored_events to selected_events.
+                try {
+                    long selected = selectTopEvents.selectTopEvents(date);
+                    LOG.info("selection done  date={} selected_events_written={}", date, selected);
+                } catch (ActivityFailure af) {
+                    LOG.warn("selection failed (workflow continues)  date={} err={}", date, causeMessage(af));
+                }
             } catch (ActivityFailure af) {
                 LOG.warn("scoring failed (workflow continues)  date={} err={}", date, causeMessage(af));
             }

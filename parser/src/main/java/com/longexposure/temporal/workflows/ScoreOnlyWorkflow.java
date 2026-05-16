@@ -1,6 +1,7 @@
 package com.longexposure.temporal.workflows;
 
 import com.longexposure.temporal.activities.ScoreEventsActivity;
+import com.longexposure.temporal.activities.SelectTopEventsActivity;
 import io.temporal.activity.ActivityOptions;
 import io.temporal.common.RetryOptions;
 import io.temporal.workflow.Workflow;
@@ -43,12 +44,21 @@ public final class ScoreOnlyWorkflow {
                         .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(1).build())
                         .build());
 
+        private final SelectTopEventsActivity selectTopEvents = Workflow.newActivityStub(
+                SelectTopEventsActivity.class,
+                ActivityOptions.newBuilder()
+                        .setStartToCloseTimeout(Duration.ofMinutes(5))
+                        .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(2).build())
+                        .build());
+
         @Override
         public long run(final LocalDate date) {
             LOG.info("score-only start  date={}", date);
-            long n = scoreEvents.scoreEvents(date, null);
-            LOG.info("score-only done  date={} scored_events={}", date, n);
-            return n;
+            long scored = scoreEvents.scoreEvents(date, null);
+            long selected = selectTopEvents.selectTopEvents(date);
+            LOG.info("score-only done  date={} scored_events={} selected_events={}",
+                    date, scored, selected);
+            return scored;
         }
     }
 }

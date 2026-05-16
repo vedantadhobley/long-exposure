@@ -438,3 +438,35 @@ CREATE TABLE IF NOT EXISTS scored_events (
 CREATE INDEX IF NOT EXISTS scored_events_date_score_idx ON scored_events (trading_date, score DESC);
 CREATE INDEX IF NOT EXISTS scored_events_symbol_idx     ON scored_events (symbol, ts DESC);
 CREATE INDEX IF NOT EXISTS scored_events_scorer_idx     ON scored_events (scorer_id, trading_date);
+
+-- ─── Selected events (narration-eligible subset of scored_events) ────────────
+-- Written by SelectTopEventsActivity after ScoreEventsActivity. Per-scorer
+-- top-N pull from scored_events, with narration_rank=1 being the
+-- highest-scoring event of that scorer kind on that trading date.
+--
+-- The narration layer reads from this table, never from scored_events
+-- directly. Keeps the narration input set small (~30-40 events per day)
+-- regardless of how many raw events were scored.
+--
+-- Re-written on every pipeline run: DELETE WHERE trading_date=? then
+-- INSERT. Idempotent.
+
+CREATE TABLE IF NOT EXISTS selected_events (
+    selected_id         BIGSERIAL    PRIMARY KEY,
+    event_id            BIGINT       NOT NULL,   -- ref to scored_events.event_id (no FK to make DELETE cheap)
+    trading_date        DATE         NOT NULL,
+    symbol              TEXT         NOT NULL,
+    ts                  TIMESTAMPTZ  NOT NULL,
+    ts_end              TIMESTAMPTZ,
+    scorer_id           TEXT         NOT NULL,
+    score               DOUBLE PRECISION NOT NULL,
+    breakdown           JSONB        NOT NULL,
+    source_refs         JSONB        NOT NULL,
+    narration_rank      INTEGER      NOT NULL,    -- 1 = top-scoring within its scorer for the day
+    selected_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS selected_events_date_scorer_rank_idx
+    ON selected_events (trading_date, scorer_id, narration_rank);
+CREATE INDEX IF NOT EXISTS selected_events_date_score_idx
+    ON selected_events (trading_date, score DESC);
