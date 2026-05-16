@@ -92,6 +92,11 @@ public final class Main {
             com.longexposure.llm.LlamaSmokeTest.run(llmSmoke);
             return;
         }
+        String reverify = System.getenv("IEX_REVERIFY");
+        if (reverify != null && !reverify.isBlank()) {
+            com.longexposure.narration.VerifierBackfill.run(reverify);
+            return;
+        }
 
         String filePath = firstNonNull(
                 args.length > 0 ? args[0] : null,
