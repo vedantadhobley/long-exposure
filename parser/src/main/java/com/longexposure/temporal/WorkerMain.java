@@ -7,6 +7,7 @@ import com.longexposure.temporal.activities.DplsDeepValidatorActivityImpl;
 import com.longexposure.temporal.activities.DplsTopsValidatorActivityImpl;
 import com.longexposure.temporal.activities.ParseAndWriteDplsActivityImpl;
 import com.longexposure.temporal.activities.PipelineRunRecorderActivityImpl;
+import com.longexposure.temporal.activities.NarrateEventsActivityImpl;
 import com.longexposure.temporal.activities.RecordValidationActivityImpl;
 import com.longexposure.temporal.activities.ResolveUrlActivityImpl;
 import com.longexposure.temporal.activities.RetentionSweepActivityImpl;
@@ -15,6 +16,7 @@ import com.longexposure.temporal.activities.SelectTopEventsActivityImpl;
 import com.longexposure.temporal.workflows.DailyPipelineWorkflow;
 import com.longexposure.temporal.workflows.DailyPipelineWorkflowImpl;
 import com.longexposure.temporal.workflows.DailyPipelineWorkflowInput;
+import com.longexposure.temporal.workflows.NarrateOnlyWorkflow;
 import com.longexposure.temporal.workflows.ScoreOnlyWorkflow;
 import com.longexposure.temporal.workflows.SelectOnlyWorkflow;
 import com.longexposure.temporal.workflows.ValidateOnlyWorkflow;
@@ -77,7 +79,8 @@ public final class WorkerMain {
                 DailyPipelineWorkflowImpl.class,
                 ValidateOnlyWorkflow.Impl.class,
                 ScoreOnlyWorkflow.Impl.class,
-                SelectOnlyWorkflow.Impl.class);
+                SelectOnlyWorkflow.Impl.class,
+                NarrateOnlyWorkflow.Impl.class);
         worker.registerActivitiesImplementations(
                 new ResolveUrlActivityImpl(),
                 new DownloadFileActivityImpl(),
@@ -88,6 +91,7 @@ public final class WorkerMain {
                 new RecordValidationActivityImpl(),
                 new ScoreEventsActivityImpl(),
                 new SelectTopEventsActivityImpl(),
+                new NarrateEventsActivityImpl(),
                 new CleanupFilesActivityImpl(),
                 new RetentionSweepActivityImpl(),
                 new PipelineRunRecorderActivityImpl());

@@ -470,3 +470,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS selected_events_date_scorer_rank_idx
     ON selected_events (trading_date, scorer_id, narration_rank);
 CREATE INDEX IF NOT EXISTS selected_events_date_score_idx
     ON selected_events (trading_date, score DESC);
+
+-- ─── Narratives: extension columns for the two-pass + verifier model ─────────
+-- The narrative pipeline produces a blueprint JSON (LLM call #1) and prose
+-- (LLM call #2), then verifies the prose's claims against the blueprint
+-- (pure code, no LLM). These columns capture all three so we can:
+--   - Re-run verification later without re-calling the LLM
+--   - Debug a bad narration by inspecting what facts the extractor
+--     thought were relevant
+--   - Tag rows that failed verification but were stored anyway
+
+ALTER TABLE narratives ADD COLUMN IF NOT EXISTS selected_id     BIGINT;
+ALTER TABLE narratives ADD COLUMN IF NOT EXISTS blueprint       JSONB;
+ALTER TABLE narratives ADD COLUMN IF NOT EXISTS verifier_passed BOOLEAN;
+ALTER TABLE narratives ADD COLUMN IF NOT EXISTS verifier_notes  JSONB;
+
+CREATE INDEX IF NOT EXISTS narratives_selected_id_idx ON narratives (selected_id);
