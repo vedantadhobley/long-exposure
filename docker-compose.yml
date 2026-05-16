@@ -29,6 +29,15 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    # See docker-compose.dev.yml for full rationale. Prod runs slightly
+    # larger than dev since the production dataset is the long-lived one.
+    command: >
+      postgres
+      -c shared_buffers=2GB
+      -c effective_cache_size=8GB
+      -c work_mem=64MB
+      -c maintenance_work_mem=512MB
+    mem_limit: 8g
     volumes:
       - long-exposure-prod-postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -124,6 +133,9 @@ services:
       TEMPORAL_HOST: long-exposure-prod-temporal:7233
       POSTGRES_HOST: long-exposure-prod-postgres
       POSTGRES_PORT: "5432"
+    # JVM is -Xmx8g (see parser/build.gradle.kts). 12g container cap leaves
+    # 4g headroom for JVM overhead. Same as dev.
+    mem_limit: 12g
     depends_on:
       postgres:
         condition: service_healthy

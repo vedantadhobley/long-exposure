@@ -22,6 +22,17 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    # Override TimescaleDB's auto-tune. The default sees 125 GB host RAM
+    # and assumes it owns the box → shared_buffers ≈ 31 GB. We share with
+    # legal-tender's ArangoDB and dev tooling, so cap aggressively. These
+    # are still healthy values for a dev DB.
+    command: >
+      postgres
+      -c shared_buffers=1GB
+      -c effective_cache_size=2GB
+      -c work_mem=32MB
+      -c maintenance_work_mem=256MB
+    mem_limit: 4g
     volumes:
       - long-exposure-dev-postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -119,6 +130,10 @@ services:
       IEX_PCAP_FILE: ${IEX_PCAP_FILE:-}
       IEX_PRINT_LIMIT: ${IEX_PRINT_LIMIT:-20}
       IEX_WRITE_DB: ${IEX_WRITE_DB:-false}
+    # JVM is -Xmx8g (see parser/build.gradle.kts). 12g container cap leaves
+    # 4g headroom for JVM overhead (direct buffers, JIT, native libs).
+    # Hard ceiling so even a misconfiguration can't OOM the host.
+    mem_limit: 12g
     volumes:
       - ./parser:/app
       - long-exposure-dev-gradle-cache:/root/.gradle

@@ -42,15 +42,19 @@ dependencies {
 
 application {
     mainClass.set("com.longexposure.Main")
-    // Hard heap cap so a runaway scorer's buffer can't OOM the host.
-    // 32 GB on a 125 GB host gives generous room for the scorer-output
-    // accumulation pattern (PostCancelCluster can emit millions of
-    // capped clusters per day). -XX:+ExitOnOutOfMemoryError fails the
-    // JVM fast instead of thrashing GC indefinitely when we do hit it.
-    // -XX:MaxRAMPercentage isn't used because we want a hard absolute
-    // cap, not a host-proportional one.
+    // Hard heap cap. 8 GB is 4× the observed peak (~2 GB) under the
+    // push-model scoring + narration pipeline. LLM workloads run on joi
+    // (separate node) — narrating events from THIS process is pure HTTP,
+    // no buffering, so we don't need any extra headroom for that.
+    // Previously bumped to 32 GB during the Sprint 2 eager-buffer episode;
+    // the push-model refactor (Stream → Consumer in EventScorer) made that
+    // budget unnecessary. luv is a shared host with legal-tender and
+    // others — 32 GB declared was an inadvertent foot-gun on the host
+    // memory budget.
+    // -XX:+ExitOnOutOfMemoryError fails the JVM fast instead of
+    // thrashing GC indefinitely when we do hit the cap.
     applicationDefaultJvmArgs = listOf(
-            "-Xmx32g",
+            "-Xmx8g",
             "-XX:+ExitOnOutOfMemoryError",
             "-XX:+HeapDumpOnOutOfMemoryError",
             "-XX:HeapDumpPath=/tmp"
