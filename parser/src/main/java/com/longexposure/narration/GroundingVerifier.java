@@ -2,6 +2,7 @@ package com.longexposure.narration;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -65,25 +66,68 @@ public final class GroundingVerifier {
             }
         }
 
-        // Layer 2: every number in prose must appear somewhere in the haystack
-        // (blueprint values + breakdown values as a single big string).
+        // Layer 2: every number in prose must appear in the haystack — using
+        // numeric-equivalence, not just substring match. Both prose numbers
+        // and haystack numbers get canonicalized via BigDecimal.stripTrailingZeros,
+        // so "431.00" ↔ "431.0" ↔ "431" all collapse to the same key.
+        // Substring match is kept as a fallback for non-numeric tokens that
+        // happen to look like numbers (e.g. parts of IDs).
         String haystack = haystack(blueprint, breakdown);
+        Set<String> haystackCanonical = canonicalNumbersIn(haystack);
         Set<String> proseNumbers = extractNumbers(prose);
         for (String n : proseNumbers) {
             if (n.length() < MIN_LENGTH_TO_CHECK) continue;
             if (BORING_NUMBERS.contains(n)) continue;
-            // Substring match (handles "76,120" appearing in haystack)
+
+            // Try numeric-equivalent match first
+            String canonical = canonicalize(n);
+            if (canonical != null && haystackCanonical.contains(canonical)) continue;
+
+            // Fallback: substring match on the raw haystack (catches numbers
+            // embedded in strings the regex didn't pick up, e.g. inside a
+            // larger numeric token).
             if (haystack.contains(n)) continue;
-            // Also try the comma-stripped version ("76120" might appear)
             String stripped = n.replace(",", "").replace("_", "");
             if (stripped.length() >= MIN_LENGTH_TO_CHECK && haystack.contains(stripped)) continue;
-            // Try the integer floor (for cases where prose rounded "139.755" → "139.76")
-            // We don't auto-resolve this for v1; just flag it.
-            mismatches.add("prose contains number \"" + n + "\" not found in blueprint or breakdown");
+
+            mismatches.add("prose contains number \"" + n + "\" (canonical \"" + canonical
+                    + "\") not found in blueprint or breakdown");
         }
 
         boolean passed = mismatches.isEmpty();
         return new Result(passed, mismatches, proseNumbers.size());
+    }
+
+    /** Find every number-token in the haystack and canonicalize each. */
+    private static Set<String> canonicalNumbersIn(final String haystack) {
+        Set<String> out = new HashSet<>();
+        Matcher m = NUMBER_RE.matcher(haystack);
+        while (m.find()) {
+            String c = canonicalize(m.group());
+            if (c != null) out.add(c);
+        }
+        return out;
+    }
+
+    /**
+     * Canonical numeric form: strip commas + underscores, parse as
+     * BigDecimal, strip trailing zeros, return toPlainString. Returns
+     * null if the token isn't parseable as a number.
+     *
+     * <p>"431.0", "431.00", "431.000" all → "431".
+     * "13.60" → "13.6". "76,120" → "76120".
+     */
+    private static String canonicalize(final String token) {
+        String cleaned = token.replace(",", "").replace("_", "");
+        try {
+            BigDecimal bd = new BigDecimal(cleaned).stripTrailingZeros();
+            // Edge case: stripTrailingZeros on "0.0" or "0.00" returns "0E-1"
+            // / "0E-2" with non-zero scale — force to "0" for matching.
+            if (bd.signum() == 0) return "0";
+            return bd.toPlainString();
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     private static String haystack(final JsonNode blueprint, final JsonNode breakdown) {

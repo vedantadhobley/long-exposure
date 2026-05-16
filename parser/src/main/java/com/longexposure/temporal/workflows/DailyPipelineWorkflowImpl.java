@@ -13,6 +13,7 @@ import com.longexposure.temporal.activities.PipelineRunRecorderActivity;
 import com.longexposure.temporal.activities.RecordValidationActivity;
 import com.longexposure.temporal.activities.ResolveUrlActivity;
 import com.longexposure.temporal.activities.RetentionSweepActivity;
+import com.longexposure.temporal.activities.NarrateEventsActivity;
 import com.longexposure.temporal.activities.ScoreEventsActivity;
 import com.longexposure.temporal.activities.SelectTopEventsActivity;
 import com.longexposure.temporal.activities.ValidationLegResult;
@@ -148,6 +149,16 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
             ActivityOptions.newBuilder()
                     .setStartToCloseTimeout(Duration.ofMinutes(5))
                     .setRetryOptions(transientRetry(2))
+                    .build());
+
+    private final NarrateEventsActivity narrateEvents = Workflow.newActivityStub(
+            NarrateEventsActivity.class,
+            ActivityOptions.newBuilder()
+                    // ~16 sec/event × 90 events = ~25 min observed; budget
+                    // generously since LLM tail latency is unpredictable.
+                    .setStartToCloseTimeout(Duration.ofMinutes(90))
+                    .setHeartbeatTimeout(Duration.ofMinutes(5))
+                    .setRetryOptions(transientRetry(1))
                     .build());
 
     private static ActivityOptions legOptions() {
@@ -296,6 +307,18 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
                 try {
                     long selected = selectTopEvents.selectTopEvents(date);
                     LOG.info("selection done  date={} selected_events_written={}", date, selected);
+
+                    // Narrate the selected events. Only runs when selection
+                    // succeeded — narration needs selected_events as input.
+                    // Failure here logs but doesn't fail the workflow:
+                    // narration can be re-run via NarrateOnlyWorkflow later
+                    // without losing the scored/selected data.
+                    try {
+                        long narrated = narrateEvents.narrateEvents(date);
+                        LOG.info("narration done  date={} narratives_written={}", date, narrated);
+                    } catch (ActivityFailure af) {
+                        LOG.warn("narration failed (workflow continues)  date={} err={}", date, causeMessage(af));
+                    }
                 } catch (ActivityFailure af) {
                     LOG.warn("selection failed (workflow continues)  date={} err={}", date, causeMessage(af));
                 }
