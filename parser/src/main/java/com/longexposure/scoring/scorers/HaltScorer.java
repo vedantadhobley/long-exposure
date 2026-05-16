@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.longexposure.scoring.EventScorer;
+import com.longexposure.scoring.Humanize;
 import com.longexposure.scoring.ScoredEvent;
 import com.longexposure.scoring.ScoringContext;
 import org.slf4j.Logger;
@@ -115,11 +116,11 @@ public final class HaltScorer implements EventScorer {
 
         ObjectMapper json = ctx.json();
         ObjectNode breakdown = json.createObjectNode();
-        breakdown.put("halt_reason",      reason);
-        if (durationS != null) breakdown.put("halt_duration_s", durationS); else breakdown.putNull("halt_duration_s");
-        breakdown.put("halt_start_iso",   haltStart.toString());
-        if (haltEnd != null)   breakdown.put("halt_end_iso", haltEnd.toString()); else breakdown.putNull("halt_end_iso");
-        if (nextSub != null)   breakdown.put("halt_end_sub_type", nextSub); else breakdown.putNull("halt_end_sub_type");
+        breakdown.put("halt_reason",       reason);
+        breakdown.put("halt_duration",     durationS != null ? Humanize.durationSec(durationS) : "unbounded");
+        breakdown.put("halt_start_et",     Humanize.toEtTime(haltStart));
+        if (haltEnd != null)   breakdown.put("halt_end_et", Humanize.toEtTime(haltEnd)); else breakdown.putNull("halt_end_et");
+        breakdown.put("halt_resumed",      "T".equals(nextSub));     // boolean — "did it resume cleanly?"
 
         ArrayNode sourceRefs = json.createArrayNode();
         ObjectNode ref = json.createObjectNode();

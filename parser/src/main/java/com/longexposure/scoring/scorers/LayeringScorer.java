@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.longexposure.scoring.EventScorer;
+import com.longexposure.scoring.Humanize;
 import com.longexposure.scoring.ScoredEvent;
 import com.longexposure.scoring.ScoringContext;
 import com.longexposure.scoring.Side;
@@ -183,16 +184,16 @@ public final class LayeringScorer implements EventScorer {
 
         ObjectMapper json = ctx.json();
         ObjectNode breakdown = json.createObjectNode();
-        breakdown.put("orders",             cluster.size());
-        breakdown.put("distinct_levels",    distinctLevels);
-        breakdown.put("total_shares",       totalShares);
-        breakdown.put("median_lifetime_ms", medianLifetimeMs);
-        breakdown.put("side",               Side.label(first.side));
-        breakdown.put("min_price_dollars",  minPriceRaw / 10_000.0);
-        breakdown.put("max_price_dollars",  maxPriceRaw / 10_000.0);
-        breakdown.put("duration_ms",        (last.addNanos - first.addNanos) / 1_000_000.0);
-        breakdown.put("start_iso",          first.addTs.toString());
-        breakdown.put("end_iso",            last.addTs.toString());
+        breakdown.put("orders",                cluster.size());
+        breakdown.put("distinct_levels",       distinctLevels);
+        breakdown.put("total_shares",          totalShares);
+        breakdown.put("median_order_lifetime", Humanize.durationMs(medianLifetimeMs));
+        breakdown.put("side",                  Side.label(first.side));
+        breakdown.put("min_price_dollars",     minPriceRaw / 10_000.0);
+        breakdown.put("max_price_dollars",     maxPriceRaw / 10_000.0);
+        breakdown.put("duration",              Humanize.durationNanos(last.addNanos - first.addNanos));
+        breakdown.put("start_et",              Humanize.toEtTime(first.addTs));
+        breakdown.put("end_et",                Humanize.toEtTime(last.addTs));
 
         ArrayNode sourceRefs = json.createArrayNode();
         int refsToEmit = Math.min(cluster.size(), MAX_SOURCE_REFS);

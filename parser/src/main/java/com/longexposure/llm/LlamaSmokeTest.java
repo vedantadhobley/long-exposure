@@ -7,6 +7,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.time.Instant;
 
 /**
  * Standalone CLI for iterating on LLM prompts against real
@@ -185,12 +186,20 @@ public final class LlamaSmokeTest {
         // NOTE: deliberately NOT including the internal `score` value here.
         // It leaked into prose as "scored at X within the IEX scoring system"
         // — internal metric, not narratable.
+        // ts comes in as a Postgres timestamp string with a +00 offset; parse
+        // it back to an Instant so we can produce an ET anchor for the prompt.
+        Instant anchorUtc = java.time.OffsetDateTime
+                .parse(ts.replace(" ", "T").replace("+00", "+00:00"))
+                .toInstant();
+        String anchorEt = com.longexposure.scoring.Humanize.toEtTime(anchorUtc);
+
         String user =
                 "Event type: " + scorerId + "\n" +
                 "Symbol: " + symbol + "\n" +
                 "Trading date: " + tradingDate + "\n" +
-                "Event start (UTC): " + ts + "\n\n" +
-                "Structured facts (this is the ground truth — every claim must trace to here):\n" +
+                "Event start: " + anchorEt + " (" + ts + " UTC)\n\n" +
+                "Structured facts (this is the ground truth — every claim must trace to here. " +
+                "When both raw and human-readable versions of a value are present, prefer the human-readable one):\n" +
                 prettyBreakdown;
 
         System.out.println("== prompt (system) ==");

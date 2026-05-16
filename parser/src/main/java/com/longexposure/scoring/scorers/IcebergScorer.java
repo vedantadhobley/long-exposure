@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.longexposure.scoring.EventScorer;
+import com.longexposure.scoring.Humanize;
 import com.longexposure.scoring.ScoredEvent;
 import com.longexposure.scoring.ScoringContext;
 import org.slf4j.Logger;
@@ -186,9 +187,9 @@ public final class IcebergScorer implements EventScorer {
         breakdown.put("price_dollars",    first.priceRaw / 10_000.0);
         breakdown.put("median_fill_size", medianSize);
         breakdown.put("size_cv",          cv);
-        breakdown.put("duration_seconds", (last.tsNanos - first.tsNanos) / 1_000_000_000L);
-        breakdown.put("start_iso",        first.ts.toString());
-        breakdown.put("end_iso",          last.ts.toString());
+        breakdown.put("duration",         Humanize.durationNanos(last.tsNanos - first.tsNanos));
+        breakdown.put("start_et",         Humanize.toEtTime(first.ts));
+        breakdown.put("end_et",           Humanize.toEtTime(last.ts));
 
         ArrayNode sourceRefs = json.createArrayNode();
         int refsToEmit = Math.min(run.size(), MAX_SOURCE_REFS);

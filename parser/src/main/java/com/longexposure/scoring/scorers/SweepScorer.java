@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.longexposure.scoring.EventScorer;
+import com.longexposure.scoring.Humanize;
 import com.longexposure.scoring.ScoredEvent;
 import com.longexposure.scoring.ScoringContext;
 import org.slf4j.Logger;
@@ -189,9 +190,9 @@ public final class SweepScorer implements EventScorer {
         breakdown.put("notional_dollars",  notional);
         breakdown.put("min_price_dollars", minPriceRaw / 10_000.0);
         breakdown.put("max_price_dollars", maxPriceRaw / 10_000.0);
-        breakdown.put("duration_nanos",    last.tsNanos - first.tsNanos);
-        breakdown.put("start_iso",         first.ts.toString());
-        breakdown.put("end_iso",           last.ts.toString());
+        breakdown.put("duration",          Humanize.durationNanos(last.tsNanos - first.tsNanos));
+        breakdown.put("start_et",          Humanize.toEtTime(first.ts));
+        breakdown.put("end_et",            Humanize.toEtTime(last.ts));
 
         ArrayNode sourceRefs = json.createArrayNode();
         int refsToEmit = Math.min(cluster.size(), MAX_SOURCE_REFS);
