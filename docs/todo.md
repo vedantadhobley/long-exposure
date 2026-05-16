@@ -2,7 +2,7 @@
 
 Project scratchpad, agent + human editable. Cross-references @plan.md for full context and @decisions.md for the reasoning behind structural choices.
 
-Last refresh: 2026-05-16. Sprint 2 (event scoring + selection) done. **LLM narration next.**
+Last refresh: 2026-05-16 (late). Sprint 2 done. **Sprint 3 (LLM narration) in progress** — LlamaClient + smoke-test working, four-phase plan locked in.
 
 ---
 
@@ -16,7 +16,7 @@ State of the world:
 - **Selection layer is live.** `SelectTopEventsActivity` pulls per-scorer top-N (90 events/day under current caps) into `selected_events` in ~1.5 sec.
 - 4 workflows registered on `long-exposure-daily-pipeline`: `DailyPipelineWorkflow`, `ValidateOnlyWorkflow`, `ScoreOnlyWorkflow`, `SelectOnlyWorkflow`. Cron schedule paused.
 
-Next thing to build: **LLM narration**. The `selected_events` table is the input set. Architecture is documented in @scoring-and-narration.md — three activities per event (`ExtractFacts` → `RenderProse` → `GroundingVerify`), `LlamaClient` HTTP wrapper hits `llama-large.joi`, output cached in the `narratives` table by event hash.
+Next thing to build: **LLM narration Phase A + B**. `LlamaClient` and `LlamaSmokeTest` already in place — verified working against `llama-large.joi` for all 7 scorer types. Single-pass narrations are grounded but expose breakdown-side problems: wire-format `side: "8"` was hallucinated as "sell" (it's buy); `score`/`trade_id` leak into prose; durations come out as "20,044 seconds" instead of "5h 34m". Four-phase plan locked in — see "Narration phased plan" in @scoring-and-narration.md.
 
 1. **Verify the dev stack is still up**:
 
@@ -30,20 +30,32 @@ Next thing to build: **LLM narration**. The `selected_events` table is the input
    git log --oneline -10
    ```
 
-3. **Verify scoring + selection still work**:
+3. **Verify selection still works** (selected_events is the narration input):
 
    ```bash
-   docker exec long-exposure-dev-temporal temporal workflow start \
-     --task-queue long-exposure-daily-pipeline \
-     --type SelectOnlyWorkflow \
-     --workflow-id select-only-YYYYMMDD \
-     --input '[YYYY,M,D]'
-
    docker exec long-exposure-dev-postgres psql -U leuser -d longexposure -c \
-     "SELECT scorer_id, COUNT(*) FROM selected_events WHERE trading_date='YYYY-MM-DD' GROUP BY scorer_id;"
+     "SELECT scorer_id, COUNT(*) FROM selected_events WHERE trading_date='2026-05-08' GROUP BY scorer_id;"
    ```
 
-4. **Build narration**: `com.longexposure.llm.LlamaClient` + three new Temporal activities (`ExtractFactsActivity`, `RenderProseActivity`, `GroundingVerifyActivity` — the last is pure Java, no LLM). Storage: `narratives` table already exists in schema.sql. See `docs/scoring-and-narration.md` "Narration design principles".
+4. **Verify the LLM endpoint is live**:
+
+   ```bash
+   curl -s http://llama-large.joi/v1/models | jq '.data[].id'
+   # expect: "Qwen3.5-122B-A10B"
+   ```
+
+5. **Quick narration smoke test** against existing selected events:
+
+   ```bash
+   docker compose -f docker-compose.dev.yml run --rm \
+     -e IEX_LLM_SMOKE=all:2026-05-08 worker
+   ```
+
+6. **Then Sprint 3 work** — narration phased plan in @scoring-and-narration.md:
+   - **Phase A**: drop wire-format fields (`score`, `trade_id`, `sale_condition_flags`, raw `ts_nanos`, wire-format `side`) from each scorer's breakdown JSON. Add `side_label` mapping.
+   - **Phase B**: humanize values (`duration_humanized`, `ts_et`, pre-formatted prices).
+   - Run smoke test again, compare narration quality before/after.
+   - Build two-pass `ExtractFacts` → `RenderProse` → `GroundingVerify` activities + `narratives` table writes.
 
 ---
 

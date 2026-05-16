@@ -1,6 +1,53 @@
 # Scoring + Narration — Design Reference
 
-Distilled from the project-positioning + design discussion (captured 2026-05-11). The DEEP+ pivot recorded in `docs/decisions.md` (2026-05-11 entry) makes order-level pattern detection the actual product surface. This doc is the design reference the EventScorer and LLM prompt engineering will work against — the two pieces of work expected to be the hardest in the project.
+Distilled from the project-positioning + design discussion (captured 2026-05-11). The DEEP+ pivot recorded in `docs/decisions.md` (2026-05-11 entry) makes order-level pattern detection the actual product surface. This doc is the design reference the EventScorer and LLM prompt engineering work against.
+
+> **Status (2026-05-16):**
+> - **Scoring + selection** ✅ shipped. 7 intraday scorers + `SelectTopEventsActivity`. Producing ~90 narratable events per trading day. See "Scoring architecture" below.
+> - **Narration** 🛠 in progress. `LlamaClient` + `LlamaSmokeTest` working against `llama-large.joi`; one-shot narrations verified per scorer type on 2026-05-08 data. Two-pass extract/render/verify pipeline + breakdown enrichment is the next chunk. See "Narration phased plan" below.
+
+## Narration phased plan (2026-05-16)
+
+Worked out during initial smoke tests after observing first-pass narrations. Single-pass narrations are factually grounded but reveal that the **breakdown JSON is the contract** — every quality issue is upstream of the LLM call. Four phases, each independently shippable:
+
+| Phase | Status | Scope | Effort |
+|---|---|---|---|
+| **A. Strip metadata from breakdowns** | TODO | Drop `score`, `trade_id`, `sale_condition_flags`, raw `ts_nanos`, wire-format `side` from breakdown JSONs. Keep them in `scored_events` rows for joins/debugging, just not in the LLM-facing payload. Fixes the observed side-enum hallucination (`"side": "8"` → narrator guessed "sell" when 8 = buy). | 30 min |
+| **B. Humanize values** | TODO | Add `duration_humanized` ("22m 17s"), `ts_et` (US/Eastern), `side_label` ("buy"/"sell"). Pre-format prices to 2-4 decimals where displayed. Fixes "20,044 seconds", "18,128,957 nanoseconds", and similar wire-format leaks. | 30 min |
+| **C. Symbol enrichment** | TODO (decide after A/B narrate-all) | Pre-fetched per-symbol metadata: `company_name`, `sector`, `prev_close`, `is_etf`. Sourced from IEX SecurityDirectory + a static CSV. Stored in a new `symbols` reference table, joined into the breakdown at scoring time. | half-day |
+| **D. RAG for daily-synthesis pass** | Deferred | Vector store of news headlines + sector commentary. Used ONLY by the day-level synthesis ("today saw heavy semiconductor activity") — NOT per-event narration. Per-event grounding semantics break with RAG (retrieved text introduces unverified claims). | sprint |
+
+The **two-pass extract/render/verify** pipeline (currently documented in "Narration design principles") sits orthogonal to these phases and lands together with Phase A. Phases C and D are decided based on what A+B narrations look like.
+
+## Modern LLM query patterns — decisions and rejections (2026-05-16)
+
+The cutting-edge LLM techniques as of early 2026 and where we land on each:
+
+| Pattern | Decision | Reason |
+|---|---|---|
+| **GBNF grammar-constrained decoding** | ✓ Adopt for ExtractFacts | llama.cpp natively supports grammars. Forces blueprint JSON to be structurally valid by construction — no parse-retry loops. |
+| **min-p sampling + low temperature** | ✓ Adopt for prose step | min-p (post-2024) is mathematically cleaner than top-p for factual generation. Less drift at low temps. |
+| **Prompt caching / KV-cache reuse** | ✓ Use automatically | llama.cpp keeps system-prompt KV cache resident across calls. We get this free by reusing the same client. |
+| **Server-side batching (parallel slots)** | ✓ Adopt eventually, **capped at 2** | `llama-large.joi` is a single-GPU local model. Throughput drops sharply above 2 concurrent calls — so the parallelism win caps at ~2× (not 5-10× as a hosted endpoint could provide). Narration activities must enforce this with a concurrency limiter. See "Operational constraints" below. |
+| **Pure-code rubric verifier** | ✓ Load-bearing — this is the moat | Pure-code grounding check (every number in prose ⊆ blueprint's `key_numbers[]`) is deterministic and free. The actual correctness guarantee. |
+| Tool calling / function calling | ✗ Reject | Adds latency and a hallucination surface. The verifier becomes "LLM judging another LLM." We pre-fetch all needed context into the breakdown instead. |
+| Self-consistency (sample-N-and-vote) | ✗ Reject | Useful for "what's the answer" tasks. Our task is "render the known answer well." Voting on prose doesn't make it more correct. |
+| Chain-of-Thought / self-critique | ✗ Reject | Useful for reasoning tasks. Our reasoning is done by the scorer. |
+| LLM-as-judge | ✗ Reject | Non-deterministic, costs another LLM call, weaker than pure-code rubric. |
+| DSPy / prompt-as-code frameworks | ✗ Reject for now | Real value at scale (1000s of examples to optimize against). At 50-90 narrations/day we iterate by hand faster than DSPy would compile. |
+| RAG (per-event) | ✗ Reject for per-event | Retrieved text introduces unverified claims; grounding semantics break. |
+| RAG (daily-synthesis only) | ✓ Phase D | The daily-themes cross-event synthesis has looser grounding requirements and benefits from sector/news context. |
+
+**The throughline**: pre-fetched deterministic context goes in the breakdown; the verifier is pure code; the LLM's job is purely "render the known facts as prose."
+
+## Operational constraints — `llama-large.joi`
+
+The LLM endpoint is a **local model** running on a single Strix Halo GPU (Framework Desktop, 128 GB unified memory, Qwen3.5-122B-A10B via llama.cpp/Vulkan). Observed throughput ~23 tok/sec end-of-stream. This produces specific operational rules:
+
+- **Hard concurrency cap: 2 simultaneous chat calls.** Above 2 the per-call throughput collapses faster than the parallelism gains (the model's KV cache and compute share the GPU; more than 2 concurrent decode streams starves them all). All narration code that fans out events must enforce this — Java `Semaphore(2)`, Temporal `setMaxConcurrentActivityExecutionSize(2)` on narration activities, or both.
+- **Per-event budget: ~5-10 sec** (~100-200 completion tokens at 23 tok/sec). 90 events/day × 2 calls per event (extract + render) × 5-10 sec ÷ 2 parallel slots = **8-15 min** total per-day narration wall-clock. Comfortable inside the daily pipeline.
+- **No bursty schedule overlap.** If the narration step lands during another LLM-consuming workload on `joi` (e.g. a developer chatting with Open WebUI), throughput will suffer for both. The cron is at 00:00 ET when other usage is minimal — keep it there.
+- **Endpoint identifier discipline.** Use the model ID as it appears in `/v1/models` (currently `Qwen3.5-122B-A10B`), not the parameter-size shorthand. The ID can change if the model is replaced; verify with `curl $LLAMA_URL/models | jq .data[].id` before relying on it.
 
 ## Framing — what TOPS gives us vs what DEEP+ unlocks
 

@@ -20,6 +20,8 @@ import java.sql.ResultSet;
  *   <li>{@code IEX_LLM_SMOKE=scorer:<scorer_id>:<date>} — narrate the
  *       top selected event for a (scorer_id, trading_date), e.g.
  *       {@code scorer:halt:2026-05-08}
+ *   <li>{@code IEX_LLM_SMOKE=all:<date>} — narrate the top selected
+ *       event for every scorer registered on that date, in one run.
  * </ul>
  *
  * <p>Run from host:
@@ -61,7 +63,40 @@ public final class LlamaSmokeTest {
             narrateTopForScorer(llama, scorerId, date);
             return;
         }
+        if (arg.startsWith("all:")) {
+            String date = arg.substring("all:".length());
+            narrateAllScorersForDate(llama, date);
+            return;
+        }
         System.err.println("Unrecognized IEX_LLM_SMOKE value. See LlamaSmokeTest javadoc.");
+    }
+
+    private static void narrateAllScorersForDate(final LlamaClient llama, final String date) throws Exception {
+        // Enumerate distinct scorer_ids that have selected events on this date.
+        java.util.List<String> scorerIds = new java.util.ArrayList<>();
+        try (Connection conn = openConnection();
+             PreparedStatement st = conn.prepareStatement(
+                     "SELECT DISTINCT scorer_id FROM selected_events WHERE trading_date = ? ORDER BY scorer_id")) {
+            st.setObject(1, java.time.LocalDate.parse(date));
+            try (ResultSet rs = st.executeQuery()) {
+                while (rs.next()) scorerIds.add(rs.getString(1));
+            }
+        }
+
+        System.out.println("scorer_ids found: " + scorerIds);
+        System.out.println();
+
+        for (String scorerId : scorerIds) {
+            System.out.println();
+            System.out.println("════════════════════════════════════════════════════════════════════");
+            System.out.println("  " + scorerId);
+            System.out.println("════════════════════════════════════════════════════════════════════");
+            try {
+                narrateTopForScorer(llama, scorerId, date);
+            } catch (Exception e) {
+                System.err.println("FAILED for scorer=" + scorerId + ": " + e.getMessage());
+            }
+        }
     }
 
     // ─── modes ───────────────────────────────────────────────────────────────

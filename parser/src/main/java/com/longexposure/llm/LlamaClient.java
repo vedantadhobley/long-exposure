@@ -15,6 +15,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.concurrent.Semaphore;
 
 /**
  * Minimal OpenAI-compatible chat client for {@code llama-large.joi}
@@ -30,6 +31,16 @@ public final class LlamaClient {
 
     private static final Logger LOG = LoggerFactory.getLogger(LlamaClient.class);
     private static final MediaType JSON_TYPE = MediaType.parse("application/json; charset=utf-8");
+
+    /**
+     * Hard cap on concurrent in-flight chat calls. `llama-large.joi` is a
+     * single-GPU local model — throughput collapses above 2 concurrent
+     * decode streams. JVM-wide semaphore so this can't be violated even
+     * across activity instances. See @docs/scoring-and-narration.md
+     * "Operational constraints".
+     */
+    private static final int MAX_CONCURRENT_CALLS = 2;
+    private static final Semaphore CONCURRENCY_GATE = new Semaphore(MAX_CONCURRENT_CALLS, true);
 
     private final OkHttpClient http;
     private final ObjectMapper json;
@@ -67,6 +78,14 @@ public final class LlamaClient {
                 .build();
 
         long t0 = System.nanoTime();
+        boolean acquired = false;
+        try {
+            CONCURRENCY_GATE.acquire();
+            acquired = true;
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("LLM gate interrupted", ie);
+        }
         try (Response resp = http.newCall(req).execute()) {
             if (!resp.isSuccessful()) {
                 String errBody = bodyAsString(resp);
@@ -82,11 +101,14 @@ public final class LlamaClient {
             long ms = (System.nanoTime() - t0) / 1_000_000L;
             int promptToks    = root.path("usage").path("prompt_tokens").asInt(-1);
             int completionTks = root.path("usage").path("completion_tokens").asInt(-1);
-            LOG.info("LLM ok  elapsed_ms={} prompt_tokens={} completion_tokens={} content_chars={}",
-                    ms, promptToks, completionTks, content.length());
+            LOG.info("LLM ok  elapsed_ms={} prompt_tokens={} completion_tokens={} content_chars={} concurrent_in_flight={}",
+                    ms, promptToks, completionTks, content.length(),
+                    MAX_CONCURRENT_CALLS - CONCURRENCY_GATE.availablePermits());
             return content;
         } catch (IOException ioe) {
             throw new RuntimeException("LLM HTTP failed", ioe);
+        } finally {
+            if (acquired) CONCURRENCY_GATE.release();
         }
     }
 
