@@ -99,17 +99,22 @@ public interface EventScorer {
     /** Stable id, e.g. "halt", "large_trade", "sweep", "post_cancel_cluster". */
     String id();
 
-    /** Whether this scorer consults BaselineProvider. */
-    default boolean needsBaselines() { return false; }
-
-    /** Scan source data for the day and emit zero or more scored events. */
-    Stream<ScoredEvent> score(ScoringContext ctx);
+    /**
+     * Scan source data for the day and emit zero or more scored events
+     * via the {@code emit} callback. PUSH MODEL — the scorer must NOT
+     * accumulate emitted events in a list; each call to {@code emit.accept(...)}
+     * is streamed to COPY by the host activity, so memory stays bounded
+     * by per-cluster state regardless of total event count.
+     */
+    void score(ScoringContext ctx, Consumer<ScoredEvent> emit);
 }
 
 public record ScoringContext(
-        LocalDate         tradingDate,
-        Connection        conn,
-        BaselineProvider  baselines       // EmptyBaselineProvider when no history exists
+        LocalDate                    tradingDate,
+        Connection                   conn,
+        UUID                         pipelineRunId,     // nullable
+        ObjectMapper                 json,
+        ScoringContext.HeartbeatCallback heartbeat      // call every N rows to keep activity alive
 ) {}
 
 public record ScoredEvent(
@@ -122,40 +127,49 @@ public record ScoredEvent(
         JsonNode   breakdown,             // transparency JSON — see "grounding contract"
         JsonNode   sourceRefs             // array of {"table":...,"ts_nanos":...} pointers
 ) {}
-
-public interface BaselineProvider {
-    Optional<Double>          dailyVolumeMedian(String symbol);
-    Optional<Double>          tradeCountMedian(String symbol);
-    Optional<Double>          averageSpreadMedian(String symbol);
-    Optional<HaltFrequency>   haltFrequency(String symbol);
-    // extends per metric as scorers need them
-}
 ```
+
+A `BaselineProvider` interface for the interday scorers (volume-deviation,
+time-in-book drift) remains on the backlog — current scorers are all
+intraday.
+
+### Why push model
+
+Originally the interface was `Stream<ScoredEvent> score(ctx)` with each
+scorer building an in-memory `List<ScoredEvent>` and returning its
+stream. That blew up on real data: PostCancelClusterScorer emitted
+3.6 M clusters on a single trading day (loose thresholds — see below),
+which at ~5 KB per `ScoredEvent` is ~18 GB of accumulated heap — OOM
+even at 32 GB. The push model bounds memory by per-cluster state
+(typically < 1 MB) regardless of how many events fire.
 
 Implementations live in `parser/src/main/java/com/longexposure/scoring/`:
 
 ```
 scoring/
-  ├── EventScorer.java                   (interface)
+  ├── EventScorer.java                   (interface — push model)
   ├── ScoredEvent.java                   (record)
-  ├── ScoringContext.java                (record)
-  ├── BaselineProvider.java              (interface)
-  ├── EmptyBaselineProvider.java         (used until history exists)
-  ├── CaggBaselineProvider.java          (backed by daily_volume_by_symbol cagg)
-  ├── EventScorerRegistry.java           (list of all registered scorers)
+  ├── ScoringContext.java                (record + HeartbeatCallback)
+  ├── EventScorerRegistry.java           (List<EventScorer> ALL — 7 entries today)
   └── scorers/
-      ├── HaltScorer.java                (intraday)
-      ├── LargeTradeScorer.java          (intraday)
-      ├── SweepScorer.java               (intraday)
-      ├── PostCancelClusterScorer.java   (intraday)
-      ├── LayeringScorer.java            (intraday)
-      ├── IcebergScorer.java             (intraday)
-      ├── LiquidityWithdrawalScorer.java (intraday, baseline = rolling N-min window today)
-      ├── TimeInBookDriftScorer.java     (interday, BaselineProvider)
-      └── VolumeDeviationScorer.java     (interday, BaselineProvider)
+      ├── HaltScorer.java                ✓ built
+      ├── LargeTradeScorer.java          ✓ built
+      ├── SweepScorer.java               ✓ built
+      ├── PostCancelClusterScorer.java   ✓ built
+      ├── LayeringScorer.java            ✓ built
+      ├── IcebergScorer.java             ✓ built
+      └── LiquidityWithdrawalScorer.java ✓ built
+  (planned, Sprint 3+):
+      ├── BaselineProvider.java          (interface)
+      ├── CaggBaselineProvider.java
+      ├── scorers/TimeInBookDriftScorer.java
+      └── scorers/VolumeDeviationScorer.java
 ```
 
 ### The schema
+
+Two tables: the full `scored_events` (everything every scorer fires)
+and the per-scorer top-N `selected_events` (the narration input set).
 
 ```sql
 CREATE TABLE scored_events (
@@ -174,61 +188,127 @@ CREATE TABLE scored_events (
 CREATE INDEX scored_events_date_score_idx ON scored_events (trading_date, score DESC);
 CREATE INDEX scored_events_symbol_idx     ON scored_events (symbol, ts DESC);
 CREATE INDEX scored_events_scorer_idx     ON scored_events (scorer_id, trading_date);
+
+CREATE TABLE selected_events (
+    selected_id     BIGSERIAL    PRIMARY KEY,
+    event_id        BIGINT       NOT NULL,            -- loose ref to scored_events.event_id
+    trading_date    DATE         NOT NULL,
+    symbol          TEXT         NOT NULL,
+    ts              TIMESTAMPTZ  NOT NULL,
+    ts_end          TIMESTAMPTZ,
+    scorer_id       TEXT         NOT NULL,
+    score           DOUBLE PRECISION NOT NULL,
+    breakdown       JSONB        NOT NULL,
+    source_refs     JSONB        NOT NULL,
+    narration_rank  INTEGER      NOT NULL,            -- 1 = top within its scorer for the day
+    selected_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX selected_events_date_scorer_rank_idx
+    ON selected_events (trading_date, scorer_id, narration_rank);
 ```
 
-Not a hypertable. Output volume is small (thousands per day across all
-scorers, not millions). Standard B-tree indexes are enough.
+Neither is a hypertable. `scored_events` peaked at ~660 K rows for a
+busy trading day in v8 testing — small enough for standard B-tree
+indexes. `selected_events` is at most ~90 rows per day under current
+per-scorer caps.
 
-Idempotency: scoring a date is re-runnable. `ScoreEventsActivity`
-pre-cleans with `DELETE FROM scored_events WHERE trading_date=?` before
-running — much faster than the parse pre-clean since rowcount is small.
+Idempotency: both `ScoreEventsActivity` and `SelectTopEventsActivity`
+pre-clean their target table for the trading date before inserting, so
+re-runs produce a deterministic state.
 
-### Mapping the pattern catalog to scorers
+### Mapping the pattern catalog to scorers — as built
 
-| Catalog # | Pattern | Type | Source tables | Detection sketch |
+| Pattern | Built | Source tables | Detection (as-built) | v8 count (2026-05-08) |
 |---|---|---|---|---|
-| (simple) | Halt | Intraday | `status_events` | `WHERE status='H'`. Score = halt_duration × liquidity_tier |
-| (simple) | Large trade | Intraday | `trades` | `notional > $1M` OR top 0.1% by notional today. Score = log(notional) |
-| 4 | Sweep | Intraday | `orders_executed` | Cluster ≥ 3 distinct price levels within 10 ms window from same incoming side |
-| 1 | Post-cancel cluster | Intraday | `orders_add`, `orders_delete` | Sliding-window count of (add → delete) pairs where lifetime < 50 ms, same side, concentrated in time |
-| 2 | Liquidity withdrawal | Intraday | `orders_delete` | Per-symbol per-second deletion rate at top 5 levels. Compare to rolling N-min today (later swap to interday) |
-| 3 | Layering | Intraday | `orders_add`, `orders_delete` | Group-add across price levels followed by group-cancel within ms |
-| 5 | Iceberg | Intraday | `orders_executed` | Repeated equal-size fills at same `(symbol, price)` over sustained period |
-| 6 | Time-in-book drift | Interday | all orders tables | Per-symbol-per-hour lifetime distribution diffed against baseline distribution |
-| (simple) | Volume × average | Interday | `trades` | Today's per-symbol volume vs `BaselineProvider.dailyVolumeMedian()` |
+| Halt | ✓ | `status_events` | `kind='H' AND sub_type='H'`, LEAD() to find resume. Score = halt_duration_s | 105 |
+| Large trade | ✓ | `trades` | `notional > $1M`. Score = log10(notional_dollars) | 149 |
+| Sweep | ✓ | `orders_executed` | Cluster ≥ 3 distinct price levels within 10ms, same symbol. Score = log10(notional) × levels | 9,703 |
+| Post-cancel cluster | ✓ | `orders_add` ⨝ `orders_delete` | Short-lived (< 50ms) order pairs, cluster gap 50ms, min 20 orders. Score = log10(shares) × orders | 343,563 |
+| Layering | ✓ | (same JOIN as Post-cancel) | Same shape but require ≥ 5 distinct price levels in cluster | 73,456 |
+| Iceberg | ✓ | `orders_executed` | ≥ 8 equal-size fills (CV ≤ 0.20) at same `(symbol, price)` over ≥ 30 sec | 794 |
+| Liquidity withdrawal | ✓ | `orders_delete` | ≥ 50 cancels on same symbol within 100ms gaps. Score = log10(deletes) × deletes | 233,179 |
+| Time-in-book drift | ✗ Sprint 3+ | (interday) | Distribution diff vs baseline | — |
+| Volume × average | ✗ Sprint 3+ | (interday) | Today's vol vs `BaselineProvider.dailyVolumeMedian()` | — |
 
-Eight of nine planned scorers are intraday — meaning a fresh deploy with
-zero history can ship narrations on day 1. The two interday scorers
-degrade gracefully via `BaselineProvider.empty()` until the cagg
-window has enough days.
+All seven intraday scorers ship. The two interday ones wait on a
+`BaselineProvider` backed by the `daily_volume_by_symbol` cagg, which
+needs ≥ 30 days of history before it's useful — bootstrap backfill is
+deferred to Sprint 3+.
+
+**Pattern scorers fire a lot.** PostCancel, Layering, Iceberg-adjacent,
+LiquidityWithdrawal collectively produce 100K-1M raw events per day.
+That's fine because `SelectTopEventsActivity` cuts each scorer down to
+its top-N before narration — see below.
 
 ### Temporal integration
 
-`ScoreEventsActivity` runs after `RecordValidationActivity`:
-
 ```
-... Parse + Validate triangle (parallel) ─▶ RecordValidation ─▶ ScoreEvents ─▶ SelectTopN ─▶ Narrate ─▶ Store
+... Parse + Validate triangle (parallel) ─▶ RecordValidation ─▶ ScoreEvents ─▶ SelectTopEvents ─▶ Narrate (TBD)
 ```
 
-The activity:
+`ScoreEventsActivity`:
+1. `SchemaManager.apply(conn)` (idempotent) then `setAutoCommit(false)`
+   — critical: enables JDBC cursor-based streaming so multi-million-row
+   joins don't buffer entirely into Java heap.
+2. Pre-clean: `DELETE FROM scored_events WHERE trading_date = ?`
+3. Background heartbeat daemon: `actx.heartbeat()` every 60s so the
+   activity stays alive while long Postgres queries run with no row
+   yields.
+4. Iterates `EventScorerRegistry.ALL`, runs each scorer with a
+   `Consumer<ScoredEvent>` that appends to a 10K-row COPY buffer and
+   flushes incrementally. Per-scorer `try/catch` so one scorer failing
+   doesn't kill the others.
+5. Returns total rows written across all scorers.
 
-1. Pre-cleans: `DELETE FROM scored_events WHERE trading_date = ?`
-2. Constructs a `ScoringContext` with the date, JDBC connection, and a
-   `BaselineProvider` (cagg-backed or empty depending on data availability)
-3. Iterates `EventScorerRegistry.ALL`, runs each scorer, COPY-writes
-   results in batches to `scored_events`
-4. Returns total count of scored events written
+`SelectTopEventsActivity`:
+1. `DELETE FROM selected_events WHERE trading_date = ?`
+2. One `INSERT INTO selected_events SELECT ... LIMIT N` per scorer_id,
+   using the hardcoded `PER_SCORER_CAPS` map.
+3. Returns total rows selected.
 
-For v1, scorers run sequentially in one activity. Output volume is
-small so this is cheap (typical day: thousands of scored events across
-all scorers). Can fan out to one-activity-per-scorer later if any
-single scorer becomes a long pole.
+Both run sequentially in their own activities. `ScoreEventsActivity` is
+~45 min on a busy trading day (PostCancel + Layering each do a heavy
+JOIN over `orders_add` ⨝ `orders_delete`). `SelectTopEventsActivity` is
+< 2 sec.
+
+For ad-hoc iteration: standalone `ScoreOnlyWorkflow` and
+`SelectOnlyWorkflow` exist so you can re-run just scoring or just
+selection against an existing dataset.
 
 ### Extensibility — adding a new scorer
 
 1. Implement `EventScorer` in `com.longexposure.scoring.scorers.MyNewScorer`
 2. Add it to `EventScorerRegistry.ALL`
-3. No schema change. No workflow change. No retraining.
+3. Add a per-scorer cap entry in `SelectTopEventsActivityImpl.PER_SCORER_CAPS`
+4. No schema change. No workflow change.
+
+### Selection — per-scorer top-N
+
+Narration doesn't read `scored_events` directly. The
+`SelectTopEventsActivity` between scoring and narration pulls the top-N
+events per scorer into `selected_events`. v1 caps:
+
+| scorer_id | cap |
+|---|---|
+| halt | 20 |
+| large_trade | 20 |
+| sweep | 10 |
+| post_cancel_cluster | 10 |
+| layering | 10 |
+| iceberg | 10 |
+| liquidity_withdrawal | 10 |
+
+= 90 max selected events per day. Caps are deliberately per-scorer
+(not a single global threshold) because the score units aren't
+comparable across scorers — halt scores are in seconds (hundreds-to-
+thousands), large-trade scores are log10(notional) (6-8), pattern
+scorer scores are log10(shares) × cluster_count (units mixed).
+Per-scorer top-N sidesteps that entirely.
+
+Future enhancement: score normalization for cross-scorer global
+ranking, OR rank-aware narration that emits roughly one paragraph per
+scorer_id and groups related events. For now the simpler per-scorer
+cut is fine for the daily-column shape we want.
 
 ---
 

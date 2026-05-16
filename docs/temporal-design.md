@@ -9,14 +9,16 @@ responsible for. Reflects what's actually running in `parser/src/main/java/com/l
 
 ## Workflows
 
-Two workflows registered on task queue `long-exposure-daily-pipeline`:
+Four workflows registered on task queue `long-exposure-daily-pipeline`:
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `DailyPipelineWorkflow` | cron (midnight ET, paused) + ad-hoc | Full end-to-end: resolve URLs, download 3 feeds, parse DPLS, validate triangle, optionally clean files + sweep retention |
-| `ValidateOnlyWorkflow` (`Iface`) | ad-hoc only | Run the 3 validators in parallel against pcap.gz files already on disk; upsert `validation_runs`. Used to re-validate after a parse without re-ingesting |
+| `DailyPipelineWorkflow` | cron (midnight ET, paused) + ad-hoc | Full end-to-end: resolve URLs, download 3 feeds, parse DPLS, validate triangle, score events, select top-N, optionally clean files + sweep retention |
+| `ValidateOnlyWorkflow` | ad-hoc only | Run the 3 validators in parallel against pcap.gz files already on disk; upsert `validation_runs`. For re-validation without re-ingesting. |
+| `ScoreOnlyWorkflow` | ad-hoc only | Run scoring + selection for a date whose DPLS data is already in Postgres. For iterating on scorers / thresholds without re-parsing. |
+| `SelectOnlyWorkflow` | ad-hoc only | Just SelectTopEvents — pulls top-N from existing `scored_events` to `selected_events`. For iterating on per-scorer caps. |
 
-Both share the same activity registry — only the orchestration logic differs.
+All share the same activity registry — only the orchestration logic differs.
 
 ---
 
@@ -85,11 +87,18 @@ flowchart TD
     Record --> Status[computeFinalStatus<br/>from parse + record results]
     Status --> CompleteRun[recorder.completeRun]
 
-    CompleteRun --> CleanupGate{runRetentionSweep<br/>AND status=ok?}
+    CompleteRun --> ScoreGate{parseError == null?}
+    ScoreGate -->|no| Skip[skip scoring +<br/>cleanup]
+    ScoreGate -->|yes| Score[ScoreEvents<br/>7 scorers → scored_events]
+    Score --> Select[SelectTopEvents<br/>per-scorer top-N → selected_events]
+    Select --> CleanupGate
+
+    CleanupGate{runRetentionSweep<br/>AND status=ok?}
     CleanupGate -->|yes| Cleanup[CleanupFiles<br/>delete 3 .pcap.gz]
-    CleanupGate -->|no| Skip[skip cleanup<br/>files retained]
+    CleanupGate -->|no| KeepFiles[skip cleanup<br/>files retained]
+    Skip --> CleanupGate
     Cleanup --> SweepGate
-    Skip --> SweepGate
+    KeepFiles --> SweepGate
 
     SweepGate{runRetentionSweep?}
     SweepGate -->|yes| Sweep[RetentionSweep<br/>drop_chunks older<br/>than 30 days]
@@ -149,7 +158,41 @@ Trigger via Temporal CLI:
 ```bash
 docker exec long-exposure-dev-temporal temporal workflow start \
   --task-queue long-exposure-daily-pipeline \
-  --type Iface --workflow-id validate-YYYYMMDD \
+  --type ValidateOnlyWorkflow --workflow-id validate-YYYYMMDD \
+  --input '[YYYY,M,D]'
+```
+
+---
+
+## `ScoreOnlyWorkflow`
+
+Runs `ScoreEventsActivity` + `SelectTopEventsActivity` against a date
+whose DPLS data is already loaded in Postgres. Used for iterating on
+scorers or thresholds without re-parsing the source file.
+
+Trigger:
+
+```bash
+docker exec long-exposure-dev-temporal temporal workflow start \
+  --task-queue long-exposure-daily-pipeline \
+  --type ScoreOnlyWorkflow --workflow-id score-YYYYMMDD \
+  --input '[YYYY,M,D]'
+```
+
+---
+
+## `SelectOnlyWorkflow`
+
+Just `SelectTopEventsActivity`. Pulls top-N per scorer from existing
+`scored_events` into `selected_events`. Used for tuning per-scorer
+caps without re-running the multi-minute scoring step.
+
+Trigger:
+
+```bash
+docker exec long-exposure-dev-temporal temporal workflow start \
+  --task-queue long-exposure-daily-pipeline \
+  --type SelectOnlyWorkflow --workflow-id select-YYYYMMDD \
   --input '[YYYY,M,D]'
 ```
 
@@ -251,6 +294,46 @@ bug-equivalent (empirically confirmed: identical match/mismatch counts).
 
 **Status returned.** `passed` if all three pass. `below_threshold` if any
 falls below. `failed` if any leg result is null (its activity threw).
+
+### `ScoreEventsActivity`
+
+**What.** Runs every `EventScorer` in `EventScorerRegistry.ALL` against
+the day's data and writes results to `scored_events`. Detailed
+algorithm in `docs/scoring-and-narration.md`.
+
+**Memory model.** Push model — each scorer emits `ScoredEvent` via a
+`Consumer` callback. The activity buffers up to 10K rows of COPY text
+then flushes to Postgres. Memory bounded to ~per-cluster state inside
+the scorer (typically < 1 MB).
+
+**JDBC.** Sets `setAutoCommit(false)` before any scorer runs. Critical:
+Postgres's JDBC driver silently ignores `setFetchSize` in autoCommit
+mode and buffers entire result sets, which OOMs on the JOIN-heavy
+scorers. autoCommit=false enables server-side cursor + fetch-by-batch.
+
+**Background heartbeat.** Daemon thread fires `actx.heartbeat()` every
+60s so the activity stays alive while Postgres queries are running
+with no rows yielded yet.
+
+**Per-scorer isolation.** Each scorer's `score()` call wrapped in
+try/catch. Normal exceptions log + heartbeat "scorer_failed" + continue
+with next scorer. `OutOfMemoryError` re-thrown so the JVM's
+`ExitOnOutOfMemoryError` fires cleanly.
+
+**Timeouts.** start-to-close 90min, heartbeat 15min.
+
+**Retry.** Transient retry × 2.
+
+### `SelectTopEventsActivity`
+
+**What.** Per-scorer top-N pull from `scored_events` into
+`selected_events`. Pre-cleans `selected_events` for the date, then runs
+one `INSERT INTO selected_events SELECT ... LIMIT N` per scorer
+according to the hardcoded `PER_SCORER_CAPS` map (~90 rows/day).
+
+**Timeouts.** start-to-close 5min. Typical runtime < 2 sec.
+
+**Retry.** Transient retry × 2.
 
 ### `CleanupFilesActivity`
 
@@ -385,6 +468,8 @@ pre-cleans normally before re-writing.
 | `DplsTopsValidate` | 30min | — | transient × 2 |
 | `DeepTopsValidate` | 30min | — | transient × 2 |
 | `RecordValidation` | 2min | — | transient × 3 |
+| `ScoreEvents` | 90min | 15min | transient × 2 |
+| `SelectTopEvents` | 5min | — | transient × 2 |
 | `CleanupFiles` | 5min | — | none (best-effort) |
 | `RetentionSweep` | 15min | — | transient × 3 |
 | `PipelineRunRecorder` | 30s | — | default × 3 |
@@ -469,6 +554,39 @@ but the lessons are worth keeping.
    `validate()` produces three registrations of activity type `"Validate"`
    — Temporal refuses to register them. Fix: explicit
    `@ActivityMethod(name = "...")` per interface.
+
+## Sprint 2 lessons learned
+
+`ScoreEventsActivity` cost a half-day of debugging because of three
+gnarly interactions:
+
+1. **JDBC `setFetchSize` silently does nothing when `autoCommit=true`.**
+   The driver buffers the entire result set into Java memory in that
+   mode, regardless of any fetch-size hint. With a multi-million-row
+   JOIN that's an instant OOM. Always `setAutoCommit(false)` before
+   running a streaming query. Then commit explicitly between scorers
+   so the COPY writes are durable.
+
+2. **`SchemaManager.apply` resets autoCommit to true.** DDL wants
+   per-statement commits, so `SchemaManager.apply()` unconditionally
+   calls `setAutoCommit(true)`. Call it BEFORE your own
+   `setAutoCommit(false)`, not after, or your next `commit()` throws
+   "Cannot commit when autoCommit is enabled."
+
+3. **Eager `List<ScoredEvent>` accumulation inside scorers OOMs even
+   at huge heaps.** PostCancelClusterScorer emitted 3.6M clusters on
+   loose-thresholds; each ScoredEvent's JsonNode breakdown +
+   sourceRefs are ~5KB; 3.6M × 5KB = 18GB. The push model
+   (`void score(ctx, Consumer<ScoredEvent>)`) bounds memory by
+   per-cluster state instead. Activity-side COPY buffer also gets
+   flushed every 10K rows.
+
+Also: background-heartbeat daemon thread is non-negotiable for any
+activity that calls a multi-minute SQL. Per-row heartbeats inside the
+scorer only fire after the first row yields; the heavy JOIN takes 5+
+min before yielding anything, exceeding the heartbeat timeout. The
+daemon fires `actx.heartbeat()` every 60s regardless of where the
+worker thread is.
 
 ---
 

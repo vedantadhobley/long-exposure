@@ -2,7 +2,7 @@
 
 Project scratchpad, agent + human editable. Cross-references @plan.md for full context and @decisions.md for the reasoning behind structural choices.
 
-Last refresh: 2026-05-13. Sprint 1 (Temporal scaffolding) done. **Bootstrap baselines + event scoring next.**
+Last refresh: 2026-05-16. Sprint 2 (event scoring + selection) done. **LLM narration next.**
 
 ---
 
@@ -10,16 +10,13 @@ Last refresh: 2026-05-13. Sprint 1 (Temporal scaffolding) done. **Bootstrap base
 
 State of the world:
 
-- TOPS + DEEP + DPLS .pcap.gz for both 2026-05-07 and 2026-05-08 sit at `~/workspace/data/long-exposure/raw/`.
-- Both days fully loaded into Postgres for triangle validation purposes.
-- Triangle cross-validation done on both days (DPLS↔DEEP ≥ 99.99999 %, DPLS→TOPS 99.4017–99.4184 %, DEEP→TOPS identical to DPLS→TOPS to the share).
-- `prior_close_20260507.csv` derived and used for per-symbol round-lot tier.
-- **Temporal pipeline running**. `DailyPipelineWorkflow` + `ValidateOnlyWorkflow` registered on task queue `long-exposure-daily-pipeline`. Cron schedule paused — operator unpauses when ready.
-- `validation_runs` populated for 2026-05-08 with `status=passed`.
+- TOPS + DEEP + DPLS .pcap.gz for both 2026-05-07 and 2026-05-08 at `~/workspace/data/long-exposure/raw/`.
+- 2026-05-08 DPLS data loaded in Postgres; full triangle validated (status=`passed`).
+- **Scoring layer is live.** All 7 intraday `EventScorer`s built and registered. v8 run on 2026-05-08 produced 660,949 raw scored events across the seven scorers in ~45 min.
+- **Selection layer is live.** `SelectTopEventsActivity` pulls per-scorer top-N (90 events/day under current caps) into `selected_events` in ~1.5 sec.
+- 4 workflows registered on `long-exposure-daily-pipeline`: `DailyPipelineWorkflow`, `ValidateOnlyWorkflow`, `ScoreOnlyWorkflow`, `SelectOnlyWorkflow`. Cron schedule paused.
 
-Next thing to build: **Bootstrap baselines** (30 trading days of historical HIST → load via the workflow → cagg populates → ready for scorer). Trivially scriptable as a loop of `temporal workflow start` calls.
-
-After bootstrap, the algorithmic core: **EventScorer** (per-event-type scoring with transparent JSON breakdowns — pattern catalog in @scoring-and-narration.md).
+Next thing to build: **LLM narration**. The `selected_events` table is the input set. Architecture is documented in @scoring-and-narration.md — three activities per event (`ExtractFacts` → `RenderProse` → `GroundingVerify`), `LlamaClient` HTTP wrapper hits `llama-large.joi`, output cached in the `narratives` table by event hash.
 
 1. **Verify the dev stack is still up**:
 
@@ -27,25 +24,26 @@ After bootstrap, the algorithmic core: **EventScorer** (per-event-type scoring w
    docker compose -f docker-compose.dev.yml ps
    ```
 
-   Temporal containers (`long-exposure-dev-temporal`, `long-exposure-dev-temporal-postgres`, `long-exposure-dev-temporal-ui`) should all be healthy. Temporal UI is at `http://long-exposure-dev-temporal-ui.luv`.
-
-2. **Re-confirm latest commits**:
+2. **Latest commits**:
 
    ```bash
    git log --oneline -10
    ```
 
-3. **Trigger an ad-hoc workflow** for any historical date to verify the pipeline still works end-to-end before kicking off bootstrap:
+3. **Verify scoring + selection still work**:
 
    ```bash
    docker exec long-exposure-dev-temporal temporal workflow start \
      --task-queue long-exposure-daily-pipeline \
-     --type DailyPipelineWorkflow \
-     --workflow-id daily-pipeline-test-YYYYMMDD \
-     --input '{"targetDate":[YYYY,M,D],"pollUntilReady":false,"forceReingest":false,"runRetentionSweep":false}'
+     --type SelectOnlyWorkflow \
+     --workflow-id select-only-YYYYMMDD \
+     --input '[YYYY,M,D]'
+
+   docker exec long-exposure-dev-postgres psql -U leuser -d longexposure -c \
+     "SELECT scorer_id, COUNT(*) FROM selected_events WHERE trading_date='YYYY-MM-DD' GROUP BY scorer_id;"
    ```
 
-4. **Then start on bootstrap** — script a loop that calls the above with `forceReingest=true` for the previous 30 trading days. Use the `validate-only` workflow shape (just `Iface`) for any reruns of just-validation.
+4. **Build narration**: `com.longexposure.llm.LlamaClient` + three new Temporal activities (`ExtractFactsActivity`, `RenderProseActivity`, `GroundingVerifyActivity` — the last is pure Java, no LLM). Storage: `narratives` table already exists in schema.sql. See `docs/scoring-and-narration.md` "Narration design principles".
 
 ---
 
@@ -101,7 +99,9 @@ Full layout in @plan.md. Quick status:
 Full details in @plan.md.
 
 - [x] **Temporal scaffolding** ✅ done 2026-05-13. Two workflows + 10 activities + paused cron schedule. End-to-end verified on 2026-05-08. Full layout in @temporal-design.md.
-- [ ] **Bootstrap baselines** — run the workflow 30 times against historical HIST dates → continuous aggregate populates → ready for scorer. (Trivially scriptable now that the workflow is in.)
+- [x] **Event scoring** ✅ done 2026-05-16. Seven intraday scorers (halt, large_trade, sweep, post_cancel_cluster, layering, iceberg, liquidity_withdrawal). Push-model EventScorer interface; bounded memory; per-scorer top-N selection into selected_events. v8 produces 90 selected events per day. Full layout in @scoring-and-narration.md.
+- [ ] **LLM narration** — the hardest design work in the project. Three activities per scored event: ExtractFacts → RenderProse → GroundingVerify. LlamaClient HTTP wrapper. Per-event hash caching in narratives table. Architecture in @scoring-and-narration.md.
+- [ ] **Bootstrap baselines** (Sprint 3+) — run the workflow 30 times against historical HIST dates → continuous aggregate populates → enables interday scorers (VolumeDeviation, TimeInBookDrift). Not blocking for v1 launch.
 - [ ] **Event scoring** (`com.longexposure.scoring.EventScorer`) — the algorithmic core. Per-event-type scoring with transparent JSON breakdown for "why this event scored high"
 - [ ] **LLM narration** — prompt engineering against `llama-large.joi`. Expected to be the hardest part of the project.
 - [ ] **FastAPI endpoints** — the read-only API consumed by vedanta-systems
