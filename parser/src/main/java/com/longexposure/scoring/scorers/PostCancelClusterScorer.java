@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.longexposure.scoring.EventScorer;
 import com.longexposure.scoring.ScoredEvent;
 import com.longexposure.scoring.ScoringContext;
+import com.longexposure.scoring.Side;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -205,7 +206,7 @@ public final class PostCancelClusterScorer implements EventScorer {
         breakdown.put("orders",             cluster.size());
         breakdown.put("total_shares",       totalShares);
         breakdown.put("median_lifetime_ms", medianLifetimeMs);
-        breakdown.put("side",               first.side);
+        breakdown.put("side",               Side.label(first.side));
         breakdown.put("duration_ms",        (last.addNanos - first.addNanos) / 1_000_000.0);
         breakdown.put("start_iso",          first.addTs.toString());
         breakdown.put("end_iso",            last.addTs.toString());

@@ -109,8 +109,10 @@ public final class LargeTradeScorer implements EventScorer {
         breakdown.put("size_shares",          size);
         breakdown.put("price_dollars",        priceDollars);
         breakdown.put("notional_dollars",     notionalDollars);
-        breakdown.put("trade_id",             tradeId);
-        breakdown.put("sale_condition_flags", flags);
+        // trade_id and sale_condition_flags are intentionally NOT in the
+        // breakdown — they're wire-format metadata that leaked into prose
+        // as "trade ID 173670060632532234" / "flags 0". Still preserved in
+        // sourceRefs below for joins back to the trades table.
 
         ArrayNode sourceRefs = json.createArrayNode();
         ObjectNode ref = json.createObjectNode();

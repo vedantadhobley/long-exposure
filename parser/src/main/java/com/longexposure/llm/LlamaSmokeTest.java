@@ -182,12 +182,14 @@ public final class LlamaSmokeTest {
                 "If a field is missing or null, do not narrate that aspect.\n\n" +
                 "Output 2-3 sentences of prose. No bullet points, no headers, no preamble.";
 
+        // NOTE: deliberately NOT including the internal `score` value here.
+        // It leaked into prose as "scored at X within the IEX scoring system"
+        // — internal metric, not narratable.
         String user =
                 "Event type: " + scorerId + "\n" +
                 "Symbol: " + symbol + "\n" +
                 "Trading date: " + tradingDate + "\n" +
-                "Event start (UTC): " + ts + "\n" +
-                "Score within scorer: " + score + "\n\n" +
+                "Event start (UTC): " + ts + "\n\n" +
                 "Structured facts (this is the ground truth — every claim must trace to here):\n" +
                 prettyBreakdown;
 
