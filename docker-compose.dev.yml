@@ -2,15 +2,19 @@
 #
 # Dev variant of docker-compose.yml. Differences:
 #   - container_name suffix is `-dev` (so URLs become long-exposure-dev-*.luv)
-#   - source code bind-mounted into worker/api for hot reload
+#   - source code bind-mounted into worker for hot reload
 #   - separate volumes for dev DB so dev/prod don't share state
 #
 # HTTP services reachable via the workspace `proxy` network at:
-#   long-exposure-dev-api.luv           consumed by vedanta-systems-dev's nginx
 #   long-exposure-dev-temporal-ui.luv
 #   long-exposure-dev-adminer.luv
 #
-# No frontend service — see docker-compose.yml header.
+# No HTTP API in this repo and no frontend in this repo. The
+# vedanta-systems unified API (src/server/routes/long-exposure.ts)
+# connects directly to long-exposure-dev-postgres over the luv-dev
+# docker network and serves /api/long-exposure/* publicly. The Long
+# Exposure worker is the data plane — Temporal cron + activities, no
+# inbound HTTP needed.
 
 name: long-exposure-dev
 
@@ -43,6 +47,7 @@ services:
     restart: unless-stopped
     networks:
       - long-exposure-dev
+      - luv-dev        # so vedanta-systems-dev-api can reach the DB for /api/long-exposure/*
 
   adminer:
     image: adminer:latest
@@ -151,27 +156,11 @@ services:
       - long-exposure-dev
       - luv-dev
 
-  api:
-    build:
-      context: ./api
-      dockerfile: Dockerfile.dev
-    image: long-exposure-dev-api:latest
-    container_name: long-exposure-dev-api
-    env_file: .env
-    environment:
-      APP_ENV: development
-      POSTGRES_HOST: long-exposure-dev-postgres
-      POSTGRES_PORT: "5432"
-    volumes:
-      - ./api:/app
-    command: uvicorn long_exposure_api.main:app --host 0.0.0.0 --port 3001 --reload
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - long-exposure-dev
-      - proxy
+  # No HTTP API in this repo. Read-only access to narratives is served
+  # by the vedanta-systems unified API (src/server/routes/long-exposure.ts)
+  # which connects directly to long-exposure-dev-postgres over the
+  # luv-dev docker network. The worker is the only ingress: Temporal
+  # cron + activities are the data plane, no inbound HTTP needed.
 
 volumes:
   long-exposure-dev-postgres-data:

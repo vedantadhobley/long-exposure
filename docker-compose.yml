@@ -1,7 +1,6 @@
 # Production Docker Compose — Long Exposure
 #
 # HTTP services reachable via the workspace `proxy` network at:
-#   long-exposure-prod-api.luv          consumed by vedanta-systems' nginx as /api/long-exposure/*
 #   long-exposure-prod-temporal-ui.luv
 #   long-exposure-prod-adminer.luv
 #
@@ -11,10 +10,12 @@
 #   long-exposure-prod-temporal:7233           temporal gRPC
 #   long-exposure-prod-worker                  Java + Temporal SDK
 #
-# No frontend service — Long Exposure surfaces inside vedanta-systems
-# (~/workspace/dev/vedanta-systems/) as a `long-exposure-browser` component.
-# vedanta-systems' nginx proxies /api/long-exposure/* to long-exposure-prod-api
-# over the shared `proxy` docker network.
+# No HTTP API and no frontend in this repo. Public `/api/long-exposure/*`
+# routes are served by vedanta-systems' unified Express API
+# (~/workspace/dev/vedanta-systems/src/server/routes/long-exposure.ts),
+# which connects directly to long-exposure-prod-postgres over the
+# luv-prod docker network. The Long Exposure browser component lives
+# in ~/workspace/dev/vedanta-systems/src/components/long-exposure-browser.tsx.
 #
 # See deploy/INFRA-NOTES.md for the Caddyfile entries needed on luv.
 
@@ -48,6 +49,7 @@ services:
     restart: unless-stopped
     networks:
       - long-exposure-prod
+      - luv-prod        # so vedanta-systems-prod-api can reach the DB for /api/long-exposure/*
 
   # ─── Adminer for ad-hoc SQL ────────────────────────────────────────────────
   adminer:
@@ -146,25 +148,11 @@ services:
       - long-exposure-prod
       - luv-prod        # to reach llama-large.joi via tailnet split-DNS
 
-  # ─── FastAPI: read-only API serving the frontend ──────────────────────────
-  api:
-    build:
-      context: ./api
-      dockerfile: Dockerfile
-    image: long-exposure-prod-api:latest
-    container_name: long-exposure-prod-api
-    env_file: .env
-    environment:
-      APP_ENV: production
-      POSTGRES_HOST: long-exposure-prod-postgres
-      POSTGRES_PORT: "5432"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-    networks:
-      - long-exposure-prod
-      - proxy
+  # No HTTP API in this repo. Read-only access to narratives is served
+  # by the vedanta-systems unified API (src/server/routes/long-exposure.ts)
+  # which connects directly to long-exposure-prod-postgres over the
+  # luv-prod docker network. The worker is the only ingress: Temporal
+  # cron + activities are the data plane, no inbound HTTP needed.
 
 volumes:
   long-exposure-prod-postgres-data:

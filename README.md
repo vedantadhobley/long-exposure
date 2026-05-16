@@ -63,15 +63,14 @@ It's open source from day one — MIT licensed — positioned as **the first pub
 
 Every service runs in Docker. No host ports published for HTTP services — the workspace's shared `proxy` (Caddy) handles routing by hostname on the tailnet. Logs auto-flow to Loki via Promtail, container metrics via cAdvisor — no per-service instrumentation needed for v1.
 
-Long Exposure does not host its own frontend. The UI surfaces inside the unified portal at `vedanta.systems` (served by `~/workspace/dev/vedanta-systems/`), which proxies `/api/long-exposure/*` to this project's API container over the shared `proxy` docker network. See [Frontend integration](#frontend-integration) below.
+Long Exposure does not host its own frontend AND does not host its own HTTP API. The UI surfaces inside the unified portal at `vedanta.systems` (served by `~/workspace/dev/vedanta-systems/`); the `/api/long-exposure/*` routes are served by vedanta-systems' unified Express API, which connects directly to long-exposure's Postgres over the shared `luv-{dev,prod}` docker network. See [Frontend integration](#frontend-integration) below.
 
 | Service | Container | URL (tailnet) | Internal port | Node |
 |---|---|---|---|---|
-| API (FastAPI) | `long-exposure-prod-api` | `long-exposure-prod-api.luv` *(also reachable as `vedanta.systems/api/long-exposure/*` via vedanta-systems' nginx)* | 3001 | luv |
 | Worker (Java + Temporal SDK) | `long-exposure-prod-worker` | — (no HTTP) | — | luv |
 | Temporal server | `long-exposure-prod-temporal` | — (gRPC only, internal) | 7233 | luv |
 | Temporal UI | `long-exposure-prod-temporal-ui` | `long-exposure-prod-temporal-ui.luv` | 8080 | luv |
-| Postgres + TimescaleDB | `long-exposure-prod-postgres` | — (PG wire only, internal) | 5432 | luv |
+| Postgres + TimescaleDB | `long-exposure-prod-postgres` | — (PG wire only, on `long-exposure-prod` + `luv-prod`) | 5432 | luv |
 | Adminer (Postgres web UI) | `long-exposure-prod-adminer` | `long-exposure-prod-adminer.luv` | 8080 | luv |
 | LLM (chat) | `llama-large` (existing) | `llama-large.joi` (already running) | 8080 | joi |
 
@@ -373,30 +372,31 @@ Each activity has retry policies, appropriate timeouts, and heartbeating for lon
 
 ## API
 
-FastAPI on `long-exposure-prod-api.luv`:
+Public read-only API, served by vedanta-systems' unified Express service (`~/workspace/dev/vedanta-systems/src/server/routes/long-exposure.ts`):
 
 ```
-GET /api/v1/market/today
-GET /api/v1/market/{date}
-GET /api/v1/market/{date}/events
-GET /api/v1/ticker/{symbol}/history
-GET /api/v1/event/{event_id}                # includes the score breakdown
-GET /api/v1/health
+GET /api/long-exposure/health             # narratives_total + dates_available
+GET /api/long-exposure/latest             # ISO date of most recent narrated day
+GET /api/long-exposure/dates              # all dates with narrative counts
+GET /api/long-exposure/day/{YYYY-MM-DD}   # narratives grouped by scorer for that day
+GET /api/long-exposure/symbol/{symbol}    # narratives for a ticker across days
+GET /api/long-exposure/event/{id}         # full detail: prose, blueprint, breakdown
 ```
 
-Structured JSON logging via `structlog`; auto-shipped to Loki by the workspace promtail.
+All endpoints are read-only — no write/refresh/admin surface — so the public `/api/long-exposure/*` URL space is safe by construction. The vedanta-systems Express service is the only HTTP front-door; the Long Exposure worker is the only write path (Temporal cron + activities).
 
 ---
 
 ## Frontend integration
 
-Long Exposure does **not** ship its own frontend. The unified portal at [vedanta.systems](https://vedanta.systems) (sources in `~/workspace/dev/vedanta-systems/`, React + TypeScript + shadcn/ui) hosts a per-project browser component that consumes this project's API.
+Long Exposure does **not** ship its own frontend AND does not ship its own HTTP API. Both live in the unified portal at [vedanta.systems](https://vedanta.systems) (sources in `~/workspace/dev/vedanta-systems/`, React + TypeScript + shadcn/ui + Express):
 
-The integration contract:
+- `src/server/routes/long-exposure.ts` — Express router for `/api/long-exposure/*`, connects to `long-exposure-{dev,prod}-postgres:5432` over the shared `luv-{dev,prod}` docker network.
+- `src/components/long-exposure-browser.tsx` — the per-project browser component consuming those endpoints.
+- `src/types/long-exposure.ts` — response shapes.
+- Project entry registered in `src/App.tsx` under `~/workspace/long-exposure`.
 
-- This repo exposes the API container on the workspace `proxy` network as `long-exposure-prod-api.luv` (and `long-exposure-dev-api.luv` for the dev stack).
-- `vedanta-systems` adds an nginx location for `/api/long-exposure/*` that proxies to the API container, mirroring the existing `/api/found-footy/*` and `/api/spin-cycle/*` blocks.
-- A new `src/components/long-exposure-browser.tsx` in `vedanta-systems` consumes `/api/long-exposure/v1/*` and renders the timeline UI.
+Same shape as the existing `found-footy-browser` and `spin-cycle-browser` integrations, except long-exposure has no inbound submission surface (it's a fully autonomous pipeline; users only read).
 
 Design principles for the browser component (lives in `vedanta-systems`): clean, minimal, timeline-first, mobile-friendly, dark mode by default. Each event card exposes the score breakdown ("why this event made the cut") on hover/tap.
 

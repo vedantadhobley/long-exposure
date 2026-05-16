@@ -14,7 +14,8 @@ docker compose -f docker-compose.yml up -d --build
 Verify:
 
 ```bash
-curl -sI http://long-exposure-prod-api.luv/api/v1/health
+# Public API surface lives in vedanta-systems, not this repo:
+curl -sI https://vedanta.systems/api/long-exposure/health
 docker compose -f docker-compose.yml ps
 ```
 
@@ -28,9 +29,10 @@ docker compose -f docker-compose.dev.yml up -d --build
 ```
 
 URLs:
-- API:         http://long-exposure-dev-api.luv/api/v1/health
 - Temporal UI: http://long-exposure-dev-temporal-ui.luv
 - Adminer:     http://long-exposure-dev-adminer.luv
+
+No `long-exposure-{dev,prod}-api.luv` — public `/api/long-exposure/*` is served by vedanta-systems' unified API, which connects directly to long-exposure's postgres via the shared `luv-{dev,prod}` network. To probe the API endpoints during dev: `docker exec vedanta-systems-dev-api wget -qO- http://localhost:3001/api/long-exposure/health`.
 
 The dev worker bind-mounts `./parser` at `/app` and runs `gradle --no-daemon run`. Editing Java source triggers a rebuild on container restart.
 

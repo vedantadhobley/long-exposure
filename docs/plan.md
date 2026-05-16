@@ -112,10 +112,11 @@ Bootstrap problem: on day-1-live we have zero history in DB, so every baseline i
 
 Cross-repo work in `~/workspace/dev/vedanta-systems/`:
 
-- [ ] nginx location for `/api/long-exposure/*` → `long-exposure-prod-api:3001`
-- [ ] `src/components/long-exposure-browser.tsx` — timeline UI consuming `/api/long-exposure/v1/*`
-- [ ] Register project entry in `src/App.tsx` under `~/workspace/long-exposure`
-- [ ] (Optional) `LongExposureContext` if streaming is needed — likely not, daily updates
+- [x] `src/server/routes/long-exposure.ts` — Express router connecting to `long-exposure-{dev,prod}-postgres` over the `luv-{dev,prod}` shared docker network. Read-only endpoints: `/health`, `/latest`, `/dates`, `/day/:date`, `/symbol/:symbol`, `/event/:id`. No separate API container in this repo (unlike spin-cycle, which has its own FastAPI because users submit work — long-exposure has no inbound surface).
+- [x] `src/types/long-exposure.ts` — response shapes.
+- [x] `src/components/long-exposure-browser.tsx` — minimal v1 (grouped list by scorer). Polished timeline UI is future work.
+- [x] Register project entry in `src/App.tsx` under `~/workspace/long-exposure`.
+- [ ] Polished UI (drill-down panel showing blueprint + breakdown JSON; ticker search; date picker).
 
 In this repo:
 

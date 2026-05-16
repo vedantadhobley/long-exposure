@@ -61,9 +61,9 @@ The dev stack is identical with `-dev` suffixes and bind-mounted source.
 
 ## Networks
 
-- `long-exposure-{prod,dev}` — internal bridge for postgres ↔ worker ↔ temporal traffic. Not joined to anything else.
-- `proxy` — workspace-shared external network. Joined by `api`, `temporal-ui`, `adminer`. Caddy reaches them by container name. `vedanta-systems`'s nginx also lives on this network and reaches `long-exposure-prod-api` over it.
-- `luv-{prod,dev}` — workspace-shared external network for tailnet egress (so `worker` can resolve `llama-large.joi`).
+- `long-exposure-{prod,dev}` — internal bridge for postgres ↔ worker ↔ temporal traffic.
+- `proxy` — workspace-shared external network. Joined by `temporal-ui`, `adminer`. Caddy reaches them by container name.
+- `luv-{prod,dev}` — workspace-shared external network. The worker joins this to reach `llama-large.joi` via tailnet. **Postgres also joins** this so vedanta-systems' unified Express API (which lives on the same network) can query the narratives table directly. There is NO HTTP API container in this repo.
 
 ## Pipeline (Temporal workflow)
 
@@ -94,14 +94,15 @@ Schema lives in `parser/src/main/resources/schema.sql` (target — not yet commi
 
 ## Frontend integration
 
-The UI is *not* in this repo. See `~/workspace/dev/vedanta-systems/`:
+Neither the API nor the UI lives in this repo — both are owned by `~/workspace/dev/vedanta-systems/`:
 
-- `nginx.conf` — `location /api/long-exposure/ { proxy_pass http://long-exposure-prod-api:3001/; }`
-- `src/components/long-exposure-browser.tsx` — the per-project browser component
-- `src/contexts/LongExposureContext.tsx` (only if narratives need streaming; probably not — daily updates)
-- Project entry registered in `src/App.tsx` under `~/workspace/long-exposure`
+- `src/server/routes/long-exposure.ts` — Express router mounted at `/api/long-exposure/*`. Connects to `long-exposure-{dev,prod}-postgres:5432` over the `luv-{dev,prod}` docker network. Read-only; the worker is the only write path.
+- `src/server/index.ts` — wires the router into the unified API (`vedanta-systems-{dev,prod}-api`).
+- `src/components/long-exposure-browser.tsx` — the per-project browser component.
+- `src/types/long-exposure.ts` — response shapes the frontend consumes.
+- Project entry registered in `src/App.tsx` under `~/workspace/long-exposure` (folder listing + routing branch).
 
-Same shape as the existing `found-footy-browser` and `spin-cycle-browser` integrations.
+Same shape as the existing `found-footy-browser` and `spin-cycle-browser` integrations, except long-exposure is read-only — there's no inbound submission surface in this repo (the Temporal worker autonomously ingests).
 
 ## Observability
 

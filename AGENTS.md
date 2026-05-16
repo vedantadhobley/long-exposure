@@ -12,13 +12,12 @@ This file is your front door. Read it first; follow the imports below for deeper
 docker compose -f docker-compose.dev.yml up -d
 ```
 
-- API:         http://long-exposure-dev-api.luv/api/v1/health
 - Temporal UI: http://long-exposure-dev-temporal-ui.luv
 - Adminer:     http://long-exposure-dev-adminer.luv
 
 Production: `docker compose -f docker-compose.yml up -d`.
 
-The frontend lives in a different repo — see [Frontend integration](#frontend-integration) below.
+No HTTP API in this repo. The public `/api/long-exposure/*` routes are served by vedanta-systems' unified Express API (`~/workspace/dev/vedanta-systems/src/server/routes/long-exposure.ts`), which connects directly to `long-exposure-{dev,prod}-postgres` over the `luv-{dev,prod}` shared docker network. The frontend (`long-exposure-browser` component) also lives in vedanta-systems. See [Frontend integration](#frontend-integration) below.
 
 ## Stack
 
