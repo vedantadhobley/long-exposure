@@ -85,6 +85,14 @@ public final class Main {
     private Main() {}
 
     public static void main(final String[] args) throws Exception {
+        // Standalone CLI paths first — these don't need a pcap file or
+        // Temporal worker. Triggered purely by env var.
+        String llmSmoke = System.getenv("IEX_LLM_SMOKE");
+        if (llmSmoke != null && !llmSmoke.isBlank()) {
+            com.longexposure.llm.LlamaSmokeTest.run(llmSmoke);
+            return;
+        }
+
         String filePath = firstNonNull(
                 args.length > 0 ? args[0] : null,
                 System.getenv("IEX_PCAP_FILE"));
