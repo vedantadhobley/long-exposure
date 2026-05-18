@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.longexposure.scoring.EventScorer;
+import com.longexposure.scoring.Humanize;
 import com.longexposure.scoring.ScoredEvent;
 import com.longexposure.scoring.ScoringContext;
 import org.slf4j.Logger;
@@ -108,7 +109,7 @@ public final class LargeTradeScorer implements EventScorer {
         ObjectNode breakdown = json.createObjectNode();
         breakdown.put("size_shares",          size);
         breakdown.put("price_dollars",        priceDollars);
-        breakdown.put("notional_dollars",     notionalDollars);
+        breakdown.put("notional_dollars",     Humanize.round2(notionalDollars));
         // trade_id and sale_condition_flags are intentionally NOT in the
         // breakdown — they're wire-format metadata that leaked into prose
         // as "trade ID 173670060632532234" / "flags 0". Still preserved in

@@ -147,7 +147,7 @@ public final class LiquidityWithdrawalScorer implements EventScorer {
         ObjectNode breakdown = json.createObjectNode();
         breakdown.put("deletes",      cluster.size());
         breakdown.put("duration",     Humanize.durationMs(durationMs));
-        breakdown.put("rate_per_sec", ratePerSec);
+        breakdown.put("rate_per_sec", Humanize.round2(ratePerSec));
         breakdown.put("start_et",     Humanize.toEtTime(first.ts));
         breakdown.put("end_et",       Humanize.toEtTime(last.ts));
 

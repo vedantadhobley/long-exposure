@@ -82,4 +82,25 @@ public final class Humanize {
         if (utc == null) return null;
         return ET_TIME_FMT.format(ZonedDateTime.ofInstant(utc, ET));
     }
+
+    // ─── numeric ─────────────────────────────────────────────────────────────
+
+    /**
+     * Round a double to {@code decimals} places. Used by scorers when
+     * putting derived ratios into the breakdown JSON so the LLM doesn't
+     * see (and faithfully copy) values like {@code 220.3892538641666}.
+     *
+     * <p>{@link Math#round(double)} is sufficient — banker's rounding /
+     * IEEE-754 edge cases don't matter here; we're producing display
+     * values, not financial accounting numbers.
+     */
+    public static double round(final double v, final int decimals) {
+        double scale = Math.pow(10, decimals);
+        return Math.round(v * scale) / scale;
+    }
+
+    /** Two-decimal shorthand — the common case for rates and percentages. */
+    public static double round2(final double v) {
+        return round(v, 2);
+    }
 }

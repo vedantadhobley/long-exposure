@@ -187,7 +187,7 @@ public final class SweepScorer implements EventScorer {
         breakdown.put("executions",        cluster.size());
         breakdown.put("distinct_levels",   distinctLevels);
         breakdown.put("total_shares",      totalShares);
-        breakdown.put("notional_dollars",  notional);
+        breakdown.put("notional_dollars",  Humanize.round2(notional));
         breakdown.put("min_price_dollars", minPriceRaw / 10_000.0);
         breakdown.put("max_price_dollars", maxPriceRaw / 10_000.0);
         breakdown.put("duration",          Humanize.durationNanos(last.tsNanos - first.tsNanos));
