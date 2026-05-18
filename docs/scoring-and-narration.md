@@ -2,9 +2,55 @@
 
 Distilled from the project-positioning + design discussion (captured 2026-05-11). The DEEP+ pivot recorded in `docs/decisions.md` (2026-05-11 entry) makes order-level pattern detection the actual product surface. This doc is the design reference the EventScorer and LLM prompt engineering work against.
 
-> **Status (2026-05-16):**
-> - **Scoring + selection** ✅ shipped. 7 intraday scorers + `SelectTopEventsActivity`. Producing ~90 narratable events per trading day. See "Scoring architecture" below.
-> - **Narration** 🛠 in progress. `LlamaClient` + `LlamaSmokeTest` working against `llama-large.joi`; one-shot narrations verified per scorer type on 2026-05-08 data. Two-pass extract/render/verify pipeline + breakdown enrichment is the next chunk. See "Narration phased plan" below.
+> **Status (2026-05-18):**
+> - **Scoring + selection** ✅ shipped. 7 intraday scorers + `SelectTopEventsActivity`. Producing ~90 narratable events per trading day on 2026-05-08. See "Scoring architecture" below.
+> - **Symbol enrichment (Phase C)** ✅ shipped. `symbols` reference table populated weekly from NASDAQ public listings + IEX SecurityDirectory. `Enrich.symbol()` joins company name, exchange, ETF flag, round lot, prev close into every breakdown.
+> - **Two-pass narration** ✅ shipped. `BlueprintExtractor` → `ProseRenderer` → pure-code `GroundingVerifier` chain running against `llama-large.joi` (Qwen3.5-122B-A10B). Narrations verified for all 7 scorer types.
+> - **Cross-event linking, threshold-based selection** 🛠 next — see todo.md.
+> - **Layer 3 daily synthesis, Layer-0 expansion** 📋 designed, deferred.
+> - **30-day backfill + inter-day scorers** 🛑 explicitly deferred until single-day output is rock-solid.
+
+---
+
+## The 7 scorers in plain English
+
+The detection vocabulary of the whole project. Every narrated event falls into one of these seven buckets (or — once cross-event linking ships — a `combined` row tying 2+ of them together on the same symbol).
+
+| Scorer id | What it detects | Plain-English signal | Source data |
+|---|---|---|---|
+| `halt` | The stock was paused from trading | Regulator halted it for news, or a circuit breaker tripped | `status_events` (kind = 'H') |
+| `large_trade` | A single trade > $1 M | A big block of stock changed hands in one print | `trades` |
+| `sweep` | One aggressive order ate through multiple price levels | A buyer (or seller) hit several different prices in milliseconds — paid up to fill | `orders_executed` cluster across ≥ 3 price levels in 10 ms |
+| `post_cancel_cluster` | Burst of orders placed then yanked within ms | Many short-lived orders, characteristic of certain HFT strategies (incl. spoofing-shaped activity) | `order_lifecycle` (paired add ↔ delete with lifetime < 50 ms) |
+| `layering` | Same as post_cancel_cluster but spread across many price levels | Looks like manufacturing fake depth across the book — same yanking behavior at multiple prices | `order_lifecycle` (≥ 5 distinct prices in cluster) |
+| `iceberg` | Hidden order revealing itself by getting filled in equal chunks at one price | A large reserve order whose displayed tip refills repeatedly | `orders_executed` runs at same `(symbol, price)` with low size variance |
+| `liquidity_withdrawal` | Flood of cancels on one symbol | Market makers pulling quotes — often happens just before halts, news, or volatility events | `orders_delete` ≥ 50 cancels with < 100 ms gaps |
+
+### How "score" works (plain English)
+
+Each scorer assigns a numeric score to every event it detects. Higher = more interesting. But **the scores aren't directly comparable across scorers** — they're in different units:
+
+- A halt's score is its duration in seconds (105–23 400 range)
+- A large_trade's score is `log10($notional)` (6–8 range)
+- A pattern scorer's score is `log10(shares) × cluster_count` (mixed units, broad range)
+
+This is why selection (today) picks the top-N events *within each scorer* separately, then concatenates. Threshold-based selection (queued, see todo.md) replaces this with within-scorer percentile rank, putting all scorers on the same 0–1 scale.
+
+### What gets narrated (the funnel)
+
+Real numbers from 2026-05-08:
+
+```
+Layer 0:   ~360 M wire events on the IEX DEEP+ feed for the day
+Layer 1:    ~660 K events emitted by the 7 scorers      (1 / 550)
+Layer 2:        90 events selected for narration         (1 / 7 300)
+Layer 3:    [not yet built] 1 daily synthesis paragraph
+Layer 4:    [not yet built] 1 weekly / monthly synthesis
+```
+
+About 1 in every 4 million wire events ends up in a narrated paragraph. We are aggressively filtering signal from noise.
+
+---
 
 ## Narration phased plan (2026-05-16)
 
@@ -12,9 +58,9 @@ Worked out during initial smoke tests after observing first-pass narrations. Sin
 
 | Phase | Status | Scope | Effort |
 |---|---|---|---|
-| **A. Strip metadata from breakdowns** | TODO | Drop `score`, `trade_id`, `sale_condition_flags`, raw `ts_nanos`, wire-format `side` from breakdown JSONs. Keep them in `scored_events` rows for joins/debugging, just not in the LLM-facing payload. Fixes the observed side-enum hallucination (`"side": "8"` → narrator guessed "sell" when 8 = buy). | 30 min |
-| **B. Humanize values** | TODO | Add `duration_humanized` ("22m 17s"), `ts_et` (US/Eastern), `side_label` ("buy"/"sell"). Pre-format prices to 2-4 decimals where displayed. Fixes "20,044 seconds", "18,128,957 nanoseconds", and similar wire-format leaks. | 30 min |
-| **C. Symbol enrichment** | TODO (decide after A/B narrate-all) | Pre-fetched per-symbol metadata: `company_name`, `sector`, `prev_close`, `is_etf`. Sourced from IEX SecurityDirectory + a static CSV. Stored in a new `symbols` reference table, joined into the breakdown at scoring time. | half-day |
+| **A. Strip metadata from breakdowns** | ✅ done 2026-05-16 | Dropped `score`, `trade_id`, `sale_condition_flags`, raw `ts_nanos`, wire-format `side` from breakdown JSONs. Kept in `scored_events` rows for joins/debugging, just not in the LLM-facing payload. Fixed the observed side-enum hallucination (`"side": "8"` → narrator guessed "sell" when 8 = buy). | 30 min |
+| **B. Humanize values** | ✅ done 2026-05-16 | Added `duration_humanized` ("22m 17s"), `ts_et` (US/Eastern), `side_label` ("buy"/"sell"). Pre-formatted prices to 2-4 decimals where displayed. Fixed "20,044 seconds", "18,128,957 nanoseconds", and similar wire-format leaks. | 30 min |
+| **C. Symbol enrichment** | ✅ done 2026-05-18 | `symbols` reference table populated from NASDAQ public listings + IEX SecurityDirectory. `Enrich.symbol()` joins `company_name`, `listing_exchange`, `is_etf`, `round_lot`, `prev_close_dollars`, `luld_tier` into every breakdown from the in-memory cache loaded at scoring-activity start. Weekly refresh via `RefreshSymbolsWorkflow`. | half-day |
 | **D. RAG for daily-synthesis pass** | Deferred | Vector store of news headlines + sector commentary. Used ONLY by the day-level synthesis ("today saw heavy semiconductor activity") — NOT per-event narration. Per-event grounding semantics break with RAG (retrieved text introduces unverified claims). | sprint |
 
 The **two-pass extract/render/verify** pipeline (currently documented in "Narration design principles") sits orthogonal to these phases and lands together with Phase A. Phases C and D are decided based on what A+B narrations look like.
@@ -270,8 +316,8 @@ re-runs produce a deterministic state.
 | Halt | ✓ | `status_events` | `kind='H' AND sub_type='H'`, LEAD() to find resume. Score = halt_duration_s | 105 |
 | Large trade | ✓ | `trades` | `notional > $1M`. Score = log10(notional_dollars) | 149 |
 | Sweep | ✓ | `orders_executed` | Cluster ≥ 3 distinct price levels within 10ms, same symbol. Score = log10(notional) × levels | 9,703 |
-| Post-cancel cluster | ✓ | `orders_add` ⨝ `orders_delete` | Short-lived (< 50ms) order pairs, cluster gap 50ms, min 20 orders. Score = log10(shares) × orders | 343,563 |
-| Layering | ✓ | (same JOIN as Post-cancel) | Same shape but require ≥ 5 distinct price levels in cluster | 73,456 |
+| Post-cancel cluster | ✓ | `order_lifecycle` | Sequential scan of materialized lifecycle, `lifetime_ns < 50ms`, cluster gap 50ms, min 20 orders. Score = log10(shares) × orders | 343,563 |
+| Layering | ✓ | `order_lifecycle` | Same lifecycle scan; differs only post-fetch (require ≥ 5 distinct price levels in cluster) | 73,456 |
 | Iceberg | ✓ | `orders_executed` | ≥ 8 equal-size fills (CV ≤ 0.20) at same `(symbol, price)` over ≥ 30 sec | 794 |
 | Liquidity withdrawal | ✓ | `orders_delete` | ≥ 50 cancels on same symbol within 100ms gaps. Score = log10(deletes) × deletes | 233,179 |
 | Time-in-book drift | ✗ Sprint 3+ | (interday) | Distribution diff vs baseline | — |
@@ -313,14 +359,20 @@ its top-N before narration — see below.
    using the hardcoded `PER_SCORER_CAPS` map.
 3. Returns total rows selected.
 
-Both run sequentially in their own activities. `ScoreEventsActivity` is
-~45 min on a busy trading day (PostCancel + Layering each do a heavy
-JOIN over `orders_add` ⨝ `orders_delete`). `SelectTopEventsActivity` is
+Both run sequentially in their own activities. As of 2026-05-18,
+`MaterializeOrderLifecycleActivity` runs between Parse and Score; it
+pairs Add ↔ Delete + last Execute into the `order_lifecycle`
+hypertable once per day so PostCancel + Layering become sub-second
+partial-index range scans instead of the 13 GB hash JOIN they used to
+do per-scorer. `ScoreEventsActivity` itself now completes in a few
+minutes for the full 7-scorer registry. `SelectTopEventsActivity` is
 < 2 sec.
 
-For ad-hoc iteration: standalone `ScoreOnlyWorkflow` and
-`SelectOnlyWorkflow` exist so you can re-run just scoring or just
-selection against an existing dataset.
+For ad-hoc iteration: standalone `MaterializeWorkflow`,
+`ScoreWorkflow`, and `SelectWorkflow` exist so you can re-run
+just the lifecycle build, scoring, or selection against an existing
+dataset. `ScoreWorkflow` runs Materialize → Score → Select; the
+materialize step is idempotent so it's cheap to repeat.
 
 ### Extensibility — adding a new scorer
 

@@ -67,21 +67,30 @@ The dev stack is identical with `-dev` suffixes and bind-mounted source.
 
 ## Pipeline (Temporal workflow)
 
-Runs nightly at 6:00 AM ET, after T+1 HIST data becomes available. Activities listed in execution order:
+`DailyPipelineWorkflow` runs nightly at 00:00 America/New_York (Tue–Sat, schedule paused by default during dev). T+1 HIST data is usually available between 22:32 ET and 00:11 ET; midnight gives the workflow a 3-hour retry budget on the upstream-resolve step without spilling into the morning.
+
+Activities are listed in execution order. Steps 1 and 2 fan out into 3 parallel branches (one per IEX feed: DPLS / DEEP / TOPS). The 3 validators after parsing run concurrently. The full activity catalog + retry policies live in @temporal-design.md.
 
 | # | Activity | Purpose | Long-running? |
 |---|---|---|---|
-| 1 | `DownloadHistActivity` | HTTPS download from `iextrading.com/api/1.0/hist` | yes (heartbeat) |
-| 2 | `DecompressActivity` | gunzip the .pcap.gz | yes (heartbeat) |
-| 3 | `ParseTopsActivity` | Java parser → events hypertable via JDBC `COPY` | yes (heartbeat) |
-| 4 | `ValidateDailyTotalsActivity` | cross-check parsed totals vs IEX's daily summaries | no |
-| 5 | `RefreshBaselinesActivity` | refresh TimescaleDB continuous aggregates for T-30 windows | no |
-| 6 | `ScoreEventsActivity` | apply `EventScorer` to every parsed event | no |
-| 7 | `SelectTopEventsActivity` | top N events by score | no |
-| 8 | `NarrateEventsActivity` | call `llama-large.joi`; cache by event hash | yes (heartbeat) |
-| 9 | `StoreNarrativesActivity` | write to `narratives` table | no |
+| 1 | `ResolveUrlActivity` ×3 | Hit `iextrading.com/api/1.0/hist?date=…`, pick GCS download URLs for each of the three feeds | no |
+| 2 | `DownloadFileActivity` ×3 | HTTPS stream each `.pcap.gz` to `/storage/raw/` (resumable, short-circuits on existing file) | yes (heartbeat) |
+| 3 | `ParseAndWriteDplsActivity` | Java parser → 13 hypertables via JDBC `COPY` (DPLS feed only; idempotent pre-clean) | yes (heartbeat) |
+| 4 | `DplsDeepValidatorActivity` + `DplsTopsValidatorActivity` + `DeepTopsValidatorActivity` (parallel) | Triangle cross-validation: DPLS book ↔ DEEP price levels (100 %); DPLS / DEEP derived BBO vs TOPS Quote Updates (99.4 %) | yes |
+| 5 | `RecordValidationActivity` | Upsert the three validator results into `validation_runs`, classify run status | no |
+| 6 | `MaterializeOrderLifecycleActivity` | Pair Add ↔ Delete + last Execute per order_id into the `order_lifecycle` hypertable (one expensive JOIN amortized across all downstream scorers) | yes |
+| 7 | `ScoreEventsActivity` | Run the 7-scorer registry against parsed + materialized data, write to `scored_events` | yes |
+| 8 | `SelectTopEventsActivity` | Per-scorer top-N pull from `scored_events` into `selected_events` | no |
+| 9 | `NarrateEventsActivity` | Two-pass extract → render → pure-code grounding verify against `llama-large.joi`; cache by `event_hash`; write `narratives` | yes (heartbeat) |
+| 10 | `CleanupFilesActivity` | Delete the 3 `.pcap.gz` files (only when `runRetentionSweep=true AND status='passed'`) | no |
+| 11 | `RetentionSweepActivity` | `drop_chunks` older than 30 days from DPLS hypertables; per-row `DELETE` on shared TOPS-validation tables | no |
+| 12 | `PipelineRunRecorderActivity` (start/end) | Tag the run in `pipeline_runs` for replayability and the idempotency short-circuit | no |
 
-Failed validation flags the day's events as "unverified" rather than publishing them.
+Two ancillary workflows on the same task queue:
+
+- `RefreshSymbolsWorkflow` — weekly cron (Sun 02:00 ET, paused). Refreshes the `symbols` reference table from NASDAQ public listings + local IEX SecurityDirectory data. Read by `ScoreEventsActivity` to enrich event breakdown JSONs (company name, ETF flag, round lot, prev close) so the LLM narrator has structured per-ticker context.
+
+A failed validation flags the day's events as `unverified` rather than publishing them. Failed parse fails the workflow (no scoring/narration runs against incomplete data).
 
 ## Data layout
 

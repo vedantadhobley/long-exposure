@@ -4,6 +4,60 @@ Append-only record of architectural and operational decisions, ordered by date. 
 
 ---
 
+## 2026-05-18 — `order_lifecycle` materialized table between Parse and Score
+
+**Context.** Two of the seven event scorers — `PostCancelClusterScorer` and `LayeringScorer` — both ask the same underlying question: *"for every order placed on the book today, when (if ever) was it cancelled, and what was the gap?"* Both implementations queried `orders_add ⨝ orders_delete ON order_id` at scoring time, then post-filtered to lifetime < 50 ms.
+
+That JOIN became the bottleneck. On the 2026-05-08 trading day, `orders_add` has 161 937 752 rows and `orders_delete` has 160 364 854 rows. The resulting hash table is ≈ 13 GB. The two scorers each ran the same JOIN independently, paying the cost twice per run. Postgres's `work_mem` defaulted to 32 MB per parallel worker, so the hash partitions spilled to ~9 GB of temp files on disk; the activity was I/O-bound on `DataFileRead` with the 32-core box mostly idle.
+
+Three iterations of tuning made the spill smaller but never eliminated it:
+
+| Tuning | `mem_limit` / `shared_buffers` / `work_mem` | PostCancel runtime | Spill |
+|---|---|---|---|
+| baseline | 4 GB / 1 GB / 32 MB | ~25 min | ~9 GB random-access |
+| v1 (session work_mem) | 16 GB / 4 GB / 1 GB | ~20 min | ~9 GB sequential |
+| v2 (aggressive) | 48 GB / 8 GB / 2 GB + `hash_mem_multiplier=2` | ~15 min | ~9 GB still |
+
+The 13 GB hash table simply does not fit cleanly in any reasonable per-worker memory budget. We were tuning around the wrong-shape query.
+
+**Decided.** Stop recomputing a fixed answer on every scoring run. An order's lifecycle (add timestamp paired with terminal event) is a fact about a trading day, not a derivation. Build it once.
+
+- New activity `MaterializeOrderLifecycleActivity` runs between Parse and Score in `DailyPipelineWorkflow`. Idempotent via pre-clean by `trading_date`.
+- New hypertable `order_lifecycle` — one row per order with `(trading_date, symbol, order_id, side, add_ts, add_ts_nanos, add_price_raw, add_size, delete_ts, execute_ts, terminal_state, lifetime_ns, feed_source)`.
+- `terminal_state ∈ {'deleted', 'executed', 'open'}`. Orders that survive end-of-session land with `lifetime_ns = NULL`, `terminal_state = 'open'`.
+- Partial index on `(trading_date, symbol, add_ts) WHERE lifetime_ns IS NOT NULL AND lifetime_ns < 100_000_000` — the 99 %+-of-rows-excluded filter is baked into the index, so PostCancel + Layering hit a sub-second sequential range scan instead of a full-table scan.
+- `PostCancelClusterScorer` + `LayeringScorer` rewritten to read this table. Both queries become `SELECT … FROM order_lifecycle WHERE trading_date = ? AND terminal_state = 'deleted' AND lifetime_ns ≤ 50_000_000 ORDER BY symbol, side, add_ts_nanos`.
+- Standalone `MaterializeWorkflow` for ad-hoc replay (mirrors `ScoreWorkflow`).
+- Session-level `work_mem` bump in `ScoreEventsActivity` reverted from 2 GB → 256 MB, since scoring is no longer JOIN-heavy.
+
+**Why this is right and not just "different".**
+
+1. *Matches the conceptual model.* "An order has a lifecycle" is how a trader thinks. The original schema is wire-format-shaped (one row per protocol message); the new table is domain-shaped.
+2. *JOIN cost is amortized.* PostCancel + Layering today, plus any future order-lifecycle scorer (e.g. `TimeInBookDriftScorer`), pay once instead of N-times-per-tuning-iteration.
+3. *Unlocks the 30-day backfill.* Inter-day scorers (`VolumeDeviation`, `TimeInBookDrift`) need 30 trading days of history. 30 × 45-min-per-scoring-run is ≈ 22 hours of compute. With the lifecycle table: 30 × ~2 min (materialize once + fast scoring) ≈ 1 hour. Two orders of magnitude.
+4. *Reverts memory pressure.* The 48 GB `mem_limit` we set during tuning becomes unnecessary; we can drop back to something modest after observing the materialize step settles.
+5. *No change to wire-format tables.* `orders_add` / `orders_delete` / `orders_executed` stay as the raw ingest target — validators still cross-check against them, the parser doesn't change. The new table is a *derivation*, transparently rebuilt from the raw rows by an idempotent activity.
+
+**What was considered and rejected.**
+
+| Alternative | Why rejected |
+|---|---|
+| **More aggressive Postgres tuning** | Three iterations didn't eliminate spilling; the 13 GB hash table is fundamentally too big for any reasonable per-worker work_mem. |
+| **Rewrite as `LAG()`-style single-pass scan** | Possible, but more invasive (touches both scorers' algorithms) and doesn't help any future scorer that also wants paired add/delete data. |
+| **Run PostCancel + Layering concurrently** | Both query the same JOIN; running them in parallel competes for the same hash table memory and worsens spilling. |
+| **Emit lifecycle rows from the parser directly** | The parser's `OrderBook` already pairs Add ↔ Delete at parse time. We could emit `order_lifecycle` rows during the parse pass and skip the JOIN entirely. *This is the absolute best end-state*, but it touches `TimescaleWriter` + breaks the "one table per wire message" convention. The activity-level materialization captures 95 % of the win for 10 % of the effort, so we deferred the parser-side emission to a follow-up. Logged in `docs/todo.md`. |
+| **Materialized view (auto-refresh)** | Postgres MVs need explicit `REFRESH` and don't fit cleanly into Temporal's idempotent-activity model. The activity gives us better failure semantics + replay. |
+
+**Engineering bug caught during the build (worth recording).** First draft of `MaterializeOrderLifecycleActivityImpl.doMaterialize()` used `LEFT JOIN LATERAL (SELECT … FROM orders_executed WHERE ox.order_id = a.order_id ORDER BY ts DESC LIMIT 1) ON true`. That's per-row — 162 M outer rows × indexed lookup each ≈ 30–270 minutes. Replaced with a CTE that builds "last execute per (order_id, feed_source)" once over the small (~2.4 M row) `orders_executed` table via `DISTINCT ON`, then a regular hash JOIN against `orders_add`. Textbook fix for an N+1-shaped SQL.
+
+**Open follow-ups recorded in `docs/todo.md`.**
+
+- Parser-side lifecycle emission (eliminates the JOIN entirely; deferred as the larger architectural improvement).
+- TimescaleDB columnar compression on chunks older than 7 days (after the 30-day backfill).
+- Dropping `symbol` from the residual JOIN predicate in the materialize step (per-session uniqueness of `order_id` is already guaranteed by IEX's DEEP+ spec; symbol equality is redundant).
+
+---
+
 ## 2026-05-11 (late) — Code identifiers use DPLS (filename token), docs/prose use DEEP+ (product name)
 
 **Context.** Two names for the same feed: the spec / product name is **DEEP+**, the HIST filename token is **DPLS**. We had been using "DeepPlus" in Java code (package `com.longexposure.deepplus`, classes `DeepPlusMessage*`, enum `Feed.DEEPPLUS`, variable `deepPlusFile`), which was asymmetric with the 4-letter `Tops` / `Deep` siblings and grated to read.

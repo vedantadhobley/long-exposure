@@ -9,16 +9,21 @@ responsible for. Reflects what's actually running in `parser/src/main/java/com/l
 
 ## Workflows
 
-Four workflows registered on task queue `long-exposure-daily-pipeline`:
+Seven workflows registered on task queue `long-exposure-daily-pipeline`:
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `DailyPipelineWorkflow` | cron (midnight ET, paused) + ad-hoc | Full end-to-end: resolve URLs, download 3 feeds, parse DPLS, validate triangle, score events, select top-N, optionally clean files + sweep retention |
-| `ValidateOnlyWorkflow` | ad-hoc only | Run the 3 validators in parallel against pcap.gz files already on disk; upsert `validation_runs`. For re-validation without re-ingesting. |
-| `ScoreOnlyWorkflow` | ad-hoc only | Run scoring + selection for a date whose DPLS data is already in Postgres. For iterating on scorers / thresholds without re-parsing. |
-| `SelectOnlyWorkflow` | ad-hoc only | Just SelectTopEvents — pulls top-N from existing `scored_events` to `selected_events`. For iterating on per-scorer caps. |
+| `DailyPipelineWorkflow` | cron (midnight ET, paused) + ad-hoc | Top-level orchestrator. Resolves URLs, downloads 3 feeds, parses DPLS, then calls `ValidateWorkflow` + `ScoreWorkflow` + `NarrateWorkflow` as **child workflows**. Finishes with cleanup + retention. |
+| `ValidateWorkflow` | child of DailyPipeline + ad-hoc | Runs the 3 validators in parallel against pcap.gz files already on disk and upserts `validation_runs`. |
+| `MaterializeWorkflow` | ad-hoc only | Builds the `order_lifecycle` table for a date whose DPLS data is already in Postgres. Used for backfilling lifecycle data or after schema changes. (DailyPipeline invokes the materialize activity inline via `ScoreWorkflow`, not this workflow.) |
+| `ScoreWorkflow` | child of DailyPipeline + ad-hoc | Materialize lifecycle → run scoring → select top-N. |
+| `SelectWorkflow` | ad-hoc only | Just SelectTopEvents — pulls top-N from existing `scored_events` to `selected_events`. For iterating on per-scorer caps without re-scoring. |
+| `NarrateWorkflow` | child of DailyPipeline + ad-hoc | Two-pass extract → render → verify against the LLM. Writes `narratives`. |
+| `RefreshSymbolsWorkflow` | weekly cron (Sun 02:00 ET, paused) + ad-hoc | Refreshes the `symbols` reference table from NASDAQ public listings + local IEX SecurityDirectory data. Once-per-week is plenty; symbol metadata changes slowly. |
 
-All share the same activity registry — only the orchestration logic differs.
+**Composition model.** `DailyPipelineWorkflow` is the orchestrator. The Validate / Score / Narrate phases are owned by their own workflows, called as child workflows from `DailyPipelineWorkflow` via `Workflow.newChildWorkflowStub()`. This way the cron path and the ad-hoc developer-invoked path run the *identical code* for each phase — no duplicated wiring. Child workflow IDs are auto-generated (avoiding collisions with ad-hoc workflow IDs); `ParentClosePolicy=TERMINATE` ensures killing the parent cleanly cascades.
+
+All share the same activity registry on a single task queue — only the orchestration logic differs.
 
 ---
 
@@ -89,9 +94,11 @@ flowchart TD
 
     CompleteRun --> ScoreGate{parseError == null?}
     ScoreGate -->|no| Skip[skip scoring +<br/>cleanup]
-    ScoreGate -->|yes| Score[ScoreEvents<br/>7 scorers → scored_events]
+    ScoreGate -->|yes| Materialize[MaterializeOrderLifecycle<br/>orders_add ⨝ orders_delete<br/>once → order_lifecycle]
+    Materialize --> Score[ScoreEvents<br/>7 scorers → scored_events<br/>PostCancel + Layering read order_lifecycle]
     Score --> Select[SelectTopEvents<br/>per-scorer top-N → selected_events]
-    Select --> CleanupGate
+    Select --> Narrate[NarrateEvents<br/>two-pass extract+render+verify<br/>→ narratives]
+    Narrate --> CleanupGate
 
     CleanupGate{runRetentionSweep<br/>AND status=ok?}
     CleanupGate -->|yes| Cleanup[CleanupFiles<br/>delete 3 .pcap.gz]
@@ -123,7 +130,7 @@ Written to `pipeline_runs.status`:
 
 ---
 
-## `ValidateOnlyWorkflow`
+## `ValidateWorkflow`
 
 A thin workflow that runs just the 3 validators in parallel against
 already-downloaded `.pcap.gz` files. Skips the 30-40 min parse phase when
@@ -158,13 +165,13 @@ Trigger via Temporal CLI:
 ```bash
 docker exec long-exposure-dev-temporal temporal workflow start \
   --task-queue long-exposure-daily-pipeline \
-  --type ValidateOnlyWorkflow --workflow-id validate-YYYYMMDD \
+  --type ValidateWorkflow --workflow-id validate-YYYYMMDD \
   --input '[YYYY,M,D]'
 ```
 
 ---
 
-## `ScoreOnlyWorkflow`
+## `ScoreWorkflow`
 
 Runs `ScoreEventsActivity` + `SelectTopEventsActivity` against a date
 whose DPLS data is already loaded in Postgres. Used for iterating on
@@ -175,13 +182,13 @@ Trigger:
 ```bash
 docker exec long-exposure-dev-temporal temporal workflow start \
   --task-queue long-exposure-daily-pipeline \
-  --type ScoreOnlyWorkflow --workflow-id score-YYYYMMDD \
+  --type ScoreWorkflow --workflow-id score-YYYYMMDD \
   --input '[YYYY,M,D]'
 ```
 
 ---
 
-## `SelectOnlyWorkflow`
+## `SelectWorkflow`
 
 Just `SelectTopEventsActivity`. Pulls top-N per scorer from existing
 `scored_events` into `selected_events`. Used for tuning per-scorer
@@ -192,7 +199,7 @@ Trigger:
 ```bash
 docker exec long-exposure-dev-temporal temporal workflow start \
   --task-queue long-exposure-daily-pipeline \
-  --type SelectOnlyWorkflow --workflow-id select-YYYYMMDD \
+  --type SelectWorkflow --workflow-id select-YYYYMMDD \
   --input '[YYYY,M,D]'
 ```
 
@@ -295,11 +302,57 @@ bug-equivalent (empirically confirmed: identical match/mismatch counts).
 **Status returned.** `passed` if all three pass. `below_threshold` if any
 falls below. `failed` if any leg result is null (its activity threw).
 
+### `MaterializeOrderLifecycleActivity`
+
+**What.** Builds the `order_lifecycle` hypertable for one trading date.
+One row per order: `(trading_date, symbol, order_id, side, add_ts,
+add_ts_nanos, add_price_raw, add_size, delete_ts, execute_ts,
+terminal_state, lifetime_ns, feed_source)`. Pairs each `orders_add`
+row with its terminal event (Delete OR latest Execute) via a single
+JOIN; orders that survive end-of-session land with `lifetime_ns=NULL`,
+`terminal_state='open'`.
+
+**Why it exists.** The Add ↔ Delete pairing JOIN is the most expensive
+query in the daily pipeline (162 M × 160 M rows, ~13 GB hash table).
+Materializing once between Parse and Score means every downstream
+scorer queries a partial-indexed sequential scan instead of the JOIN.
+PostCancel + Layering drop from ~20 min each to under a minute. See
+`docs/decisions.md` 2026-05-18 for full rationale.
+
+**SQL shape.** A CTE first builds "last execute per (order_id,
+feed_source)" via `SELECT DISTINCT ON … ORDER BY order_id, ts DESC`
+over the small `orders_executed` table (~2.4 M rows/day). The main
+`INSERT … SELECT` then does two hash JOINs (`orders_add` ⨯
+`orders_delete`, `orders_add` ⨯ the CTE). Earlier draft used a
+`LATERAL ... LIMIT 1` per row — replaced because that would have
+been 162 M nested-loop seeks.
+
+**Idempotency.** Pre-cleans `order_lifecycle` for the target
+trading_date before populating. Repeated runs converge.
+
+**Memory tuning.** Sets `SET work_mem='4GB'` for the duration of the
+materialize transaction. With `hash_mem_multiplier=2` (server-side)
+and 16 parallel workers, peak hash-table budget is 16 × 4 × 2 = 128 GB
+ceiling (bounded by the postgres container `mem_limit=48g`). Resets
+when the activity completes.
+
+**Timeouts.** start-to-close 60 min, heartbeat 15 min. Background
+heartbeat thread fires every 60 s while the JOIN runs.
+
+**Retry.** Transient retry × 2.
+
 ### `ScoreEventsActivity`
 
 **What.** Runs every `EventScorer` in `EventScorerRegistry.ALL` against
 the day's data and writes results to `scored_events`. Detailed
 algorithm in `docs/scoring-and-narration.md`.
+
+**Lifecycle dependency.** Post-2026-05-18 refactor, `PostCancelClusterScorer`
+and `LayeringScorer` query `order_lifecycle` (populated by the upstream
+`MaterializeOrderLifecycleActivity`) instead of the raw
+`orders_add`/`orders_delete` tables. The other 5 scorers are unchanged
+— they read `status_events`/`trades`/`orders_executed`/`orders_delete`
+directly.
 
 **Memory model.** Push model — each scorer emits `ScoredEvent` via a
 `Consumer` callback. The activity buffers up to 10K rows of COPY text
@@ -468,6 +521,7 @@ pre-cleans normally before re-writing.
 | `DplsTopsValidate` | 30min | — | transient × 2 |
 | `DeepTopsValidate` | 30min | — | transient × 2 |
 | `RecordValidation` | 2min | — | transient × 3 |
+| `MaterializeOrderLifecycle` | 60min | 15min | transient × 2 |
 | `ScoreEvents` | 90min | 15min | transient × 2 |
 | `SelectTopEvents` | 5min | — | transient × 2 |
 | `CleanupFiles` | 5min | — | none (best-effort) |
@@ -484,9 +538,10 @@ short-circuits the workflow regardless of which leg threw it.
 | File | Role |
 |---|---|
 | `parser/src/main/java/com/longexposure/temporal/WorkerMain.java` | Worker bootstrap: connect to Temporal, register workflows + activities, register cron schedule (paused) |
-| `parser/src/main/java/com/longexposure/temporal/workflows/DailyPipelineWorkflow{,Impl,Input}.java` | The cron + ad-hoc workflow |
-| `parser/src/main/java/com/longexposure/temporal/workflows/ValidateOnlyWorkflow.java` | Validate-only workflow |
-| `parser/src/main/java/com/longexposure/temporal/activities/*.java` | 10 activity interfaces + impls |
+| `parser/src/main/java/com/longexposure/temporal/workflows/DailyPipelineWorkflow{,Impl,Input}.java` | Top-level orchestrator workflow |
+| `parser/src/main/java/com/longexposure/temporal/workflows/{Validate,Materialize,Score,Select,Narrate}Workflow{,Impl}.java` | Phase workflows — each owns one phase of the pipeline; called as child workflows from `DailyPipelineWorkflow` and as standalone entry points for ad-hoc developer invocation |
+| `parser/src/main/java/com/longexposure/temporal/workflows/RefreshSymbolsWorkflow{,Impl}.java` | Weekly symbols-refresh workflow (separate cron) |
+| `parser/src/main/java/com/longexposure/temporal/activities/*.java` | 14 activity interfaces + impls |
 | `parser/src/main/resources/schema.sql` | `pipeline_runs` + `validation_runs` table DDL |
 | `docs/temporal-design.md` (this file) | What's running and why |
 
