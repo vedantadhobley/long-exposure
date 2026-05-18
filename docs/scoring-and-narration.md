@@ -5,7 +5,7 @@ Distilled from the project-positioning + design discussion (captured 2026-05-11)
 > **Status (2026-05-18):**
 > - **Scoring + selection** ✅ shipped. 7 intraday scorers + `SelectTopEventsActivity`. Producing ~90 narratable events per trading day on 2026-05-08. See "Scoring architecture" below.
 > - **Symbol enrichment (Phase C)** ✅ shipped. `symbols` reference table populated weekly from NASDAQ public listings + IEX SecurityDirectory. `Enrich.symbol()` joins company name, exchange, ETF flag, round lot, prev close into every breakdown.
-> - **Two-pass narration** ✅ shipped. `BlueprintExtractor` → `ProseRenderer` → pure-code `GroundingVerifier` chain running against `llama-large.joi` (Qwen3.5-122B-A10B). Narrations verified for all 7 scorer types.
+> - **Two-pass narration** ✅ shipped. `BlueprintExtractor` → `ProseRenderer` → pure-code `GroundingVerifier` chain running against `llama-large.joi` (Qwen3.5-122B-A10B). Narrations verified for all 7 scorer types. Verifier enforces three grounding layers: (1) every number in prose ⊆ blueprint ∪ breakdown, (2) every blueprint key_number's source_field exists in breakdown, (3) every ticker-shaped token in prose must equal the event's symbol OR be a real ticker in the `symbols` reference table — no maintained denylist for non-ticker abbreviations.
 > - **Cross-event linking, threshold-based selection** 🛠 next — see todo.md.
 > - **Layer 3 daily synthesis, Layer-0 expansion** 📋 designed, deferred.
 > - **30-day backfill + inter-day scorers** 🛑 explicitly deferred until single-day output is rock-solid.

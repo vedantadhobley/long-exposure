@@ -15,23 +15,36 @@ import java.util.regex.Pattern;
 /**
  * Pure-code rubric verifier — the load-bearing correctness mechanism in
  * the narration pipeline. Walks the rendered prose, extracts every
- * number-shaped token, and checks that each one has a basis in either
- * the blueprint's {@code key_numbers[]} or the original breakdown.
+ * number-shaped token AND every ticker-shaped token, and checks that
+ * each one has a basis in the blueprint, the breakdown, or a known
+ * ticker.
  *
- * <p>Two layers of grounding:
+ * <p>Three layers of grounding:
  * <ol>
- *   <li><b>prose ⊆ blueprint ∪ breakdown</b> — every number in prose must
- *       appear somewhere in either the blueprint or the original breakdown
- *       (as a substring of any value).
- *   <li><b>blueprint ⊆ breakdown</b> — every key_number's source_field
- *       must be a real key in the breakdown.
+ *   <li><b>prose numbers ⊆ blueprint ∪ breakdown</b> — every numeric
+ *       token in prose must appear somewhere in either the blueprint
+ *       or the original breakdown (as a substring of any value).
+ *   <li><b>blueprint key_numbers ⊆ breakdown</b> — every
+ *       {@code source_field} reference must be a real key in the
+ *       breakdown.
+ *   <li><b>prose tickers ⊆ {event symbol} ∪ symbols table</b> — every
+ *       all-caps 2-5-letter token in prose must equal the event's own
+ *       symbol or be a real ticker in the {@code symbols} reference
+ *       table. Catches the ODDTX-from-ODTX class of hallucination.
  * </ol>
  *
- * <p>Loose matching is intentional for v1: "5 hours and 34 minutes" in
- * prose corresponds to {@code halt_duration: "5h 34m 4s"} in the breakdown.
- * The verifier extracts numbers (5, 34) and checks substring inclusion in
- * the haystack. Strict semantic matching is a follow-up. False negatives
- * are acceptable as long as actual fabrications get caught.
+ * <p>The ticker check has NO denylist of "non-ticker abbreviations"
+ * (ET, ETF, NMS, ...). The prompt is responsible for keeping such
+ * abbreviations out of the prose entirely. If the LLM emits one, the
+ * verifier flags it as a signal that the prompt needs tightening
+ * rather than papering over with a maintained list.
+ *
+ * <p>Loose matching is intentional for v1 number checks: "5 hours and
+ * 34 minutes" in prose corresponds to {@code halt_duration: "5h 34m 4s"}
+ * in the breakdown. The verifier extracts numbers (5, 34) and checks
+ * substring inclusion in the haystack. Strict semantic matching is a
+ * follow-up. False negatives are acceptable as long as actual
+ * fabrications get caught.
  */
 public final class GroundingVerifier {
 
@@ -41,11 +54,41 @@ public final class GroundingVerifier {
      */
     private static final Pattern NUMBER_RE = Pattern.compile("\\d[\\d,_]*(?:\\.\\d+)?");
 
+    /**
+     * Matches all-caps 2-5 letter tokens — the shape of a US ticker
+     * symbol. \b on both sides ensures we don't match "ET" inside
+     * "PARTNERSHIP" or similar.
+     */
+    private static final Pattern TICKER_CANDIDATE_RE = Pattern.compile("\\b[A-Z]{2,5}\\b");
+
     /** Numbers shorter than this are too noisy to verify (single-digit year, etc). */
     private static final int MIN_LENGTH_TO_CHECK = 2;
 
     /** Numbers we don't care about — common in prose but never narratable claims. */
     private static final Set<String> BORING_NUMBERS = Set.of("2026", "2025");
+
+    /**
+     * All real ticker symbols, loaded once per narration-activity run
+     * from the {@code symbols} reference table. Empty if the activity
+     * couldn't load symbols (e.g. table not yet populated) — in that
+     * case the ticker check degrades to "must equal event symbol".
+     */
+    private final Set<String> validSymbols;
+
+    /**
+     * Construct with a known set of legitimate tickers. Use the no-arg
+     * constructor when the caller doesn't have access to the symbols
+     * table (e.g. {@link VerifierBackfill} running outside the
+     * narration activity context).
+     */
+    public GroundingVerifier(final Set<String> validSymbols) {
+        this.validSymbols = validSymbols == null ? Set.of() : validSymbols;
+    }
+
+    /** Number-only verifier (skips ticker spell-check). */
+    public GroundingVerifier() {
+        this(Set.of());
+    }
 
     /**
      * @return result detailing pass/fail + the specific mismatches found.
@@ -92,6 +135,22 @@ public final class GroundingVerifier {
 
             mismatches.add("prose contains number \"" + n + "\" (canonical \"" + canonical
                     + "\") not found in blueprint or breakdown");
+        }
+
+        // Layer 3: every ticker-shaped token in prose must match the
+        // event's own symbol OR be in the symbols reference table.
+        // Skipped entirely when validSymbols is empty (back-compat path)
+        // — in that case we ONLY enforce "must equal event symbol".
+        String eventSymbol = breakdown.path("symbol").asText("");
+        Matcher tm = TICKER_CANDIDATE_RE.matcher(prose);
+        Set<String> proseTickerCandidates = new HashSet<>();
+        while (tm.find()) proseTickerCandidates.add(tm.group());
+        for (String token : proseTickerCandidates) {
+            if (token.equals(eventSymbol)) continue;
+            if (validSymbols.contains(token)) continue;
+            mismatches.add("prose contains ticker-shaped token \"" + token
+                    + "\" — not event symbol \"" + eventSymbol
+                    + "\" and not in symbols reference table");
         }
 
         boolean passed = mismatches.isEmpty();

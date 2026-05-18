@@ -66,7 +66,7 @@ Honest list of things that are weak, undertested, or might bite us. Order is by 
 
 ### Narration layer
 
-- **Symbol fabrication.** One narration said "ODDTX" when the symbol was "ODTX" (extra D). Verifier currently checks numbers only, not named entities. Now that we have a `symbols` reference table, we can pass-list the symbol string to the verifier — easy fix, queued.
+- **Symbol fabrication (FIXED 2026-05-18).** One narration said "ODDTX" when the symbol was "ODTX" (extra D). Verifier originally checked numbers only, not named entities. Fix shipped: `GroundingVerifier` now takes a `Set<String> validSymbols` loaded once from the `symbols` reference table at narration-activity start; every all-caps 2-5-letter token in prose must equal the event symbol or be a real ticker in `symbols`. The prompt was also tightened ("the ONLY ticker that may appear is the event subject") and `Humanize.toEtTime()` no longer emits a trailing `" ET"` so the LLM doesn't see ticker-shaped abbreviations in the breakdown. No maintained denylist.
 - **Verifier false negatives on rounded prices** — already canonicalized via `BigDecimal.stripTrailingZeros()` (so "$431.00" ↔ "$431"). But "approximately $431" with no exact match in breakdown is *not* caught; we rely on the prompt forbidding the LLM from inventing approximations.
 - **Verifier doesn't catch tone-or-claim hallucinations.** "AAPL had a *catastrophic* halt" — the verifier checks numbers + (soon) symbols, not adjectives or causal claims. If the prompt says "factual, no editorializing" and the LLM editorializes, only human review catches it.
 - **Single point of failure on `llama-large.joi`.** If the host is down, narration fails. The pipeline degrades gracefully (workflow continues, narratives just don't get written) but the user-facing site shows yesterday's narrations until joi recovers.
@@ -88,6 +88,76 @@ Honest list of things that are weak, undertested, or might bite us. Order is by 
 
 - The plain-English scorer overview lives in @scoring-and-narration.md (top of the doc). If we add scorers, this needs updating in lockstep with the registry.
 - The "Pipeline shape (6 things)" mental model above is the single canonical view. If we add Layer-3 daily synthesis or Layer-0 expansion, this list grows. Don't let it grow to 12 things.
+
+---
+
+## Hardcode audit (things we'd want data-driven eventually)
+
+Inventoried 2026-05-18 in response to a "no maintained denylists / arbitrary caps" pushback. Order is rough priority for migrating away.
+
+### Tier 1 — Selection / filtering arbitrary caps
+
+- [ ] **`PER_SCORER_CAPS` in `SelectTopEventsActivityImpl`** — `{halt: 20, large_trade: 20, others: 10}`. Picks a fixed 90 narrated events/day regardless of how dramatic the session was. **Fix**: threshold-based selection (within-scorer percentile rank → unified threshold + per-scorer floor + ceiling). Already on roadmap, queued next.
+- [x] **No verifier denylist** — we considered a maintained `TICKER_DENYLIST` of non-ticker abbreviations (`ET`, `ETF`, `NMS`, ...) and explicitly rejected it. The verifier now uses the `symbols` reference table as the source of truth for "is this a real ticker." If the LLM emits something non-ticker-shaped (like "ET" for Eastern Time), the verifier flags it as a signal the prompt needs tightening — we don't paper over with a list. (Done 2026-05-18.)
+- [ ] **Cross-event linking pair-windows** (proposed but not built). I floated a small table of `{(halt, large_trade): 5 min, (halt, liquidity_withdrawal): 30 sec}` for non-overlapping-but-related event pairs. **Don't build with this hardcode**. Start with interval-overlap only — if it misses obviously-related pairs, observe what's missed and decide whether the exception table is worth it. Don't add the table preemptively.
+
+### Tier 2 — Scorer thresholds (magic numbers, finite but never audited)
+
+Currently 12 thresholds across the 7 scorers:
+
+| Scorer | Constant | Value | What it gates |
+|---|---|---|---|
+| LargeTrade | `NOTIONAL_CUTOFF_DOLLARS` | $1 M | Min trade size to score |
+| PostCancel | `MAX_LIFETIME_NANOS` | 50 ms | Add→Delete pair counts as "short-lived" |
+| PostCancel | `CLUSTER_GAP_NANOS` | 50 ms | Max gap between events in same cluster |
+| PostCancel | `MIN_ORDERS_PER_CLUSTER` | 20 | Min orders to emit a scored event |
+| PostCancel | `MAX_CLUSTER_SIZE` | 10 000 | Buffer cap before emit-and-reset |
+| Layering | (mirrors PostCancel) | — | Same shape + `MIN_DISTINCT_LEVELS = 5` |
+| Iceberg | `MIN_FILLS` | 8 | Min equal-size fills to score |
+| Iceberg | `MIN_DURATION_NANOS` | 30 sec | Min span of fills |
+| Iceberg | `MAX_SIZE_CV` | 0.20 | Max coefficient-of-variation across fill sizes |
+| Iceberg | `RUN_GAP_NANOS` | 10 min | Max gap between fills in same run |
+| Sweep | `CLUSTER_GAP_NANOS` | 10 ms | Max gap between fills in same sweep |
+| LiquidityWithdrawal | `MIN_DELETES` | 50 | Min cancels to score |
+| LiquidityWithdrawal | `CLUSTER_GAP_NANOS` | 100 ms | Max gap between cancels |
+
+**Why they're slop**: they were picked by feel when each scorer was written. Never audited against "would a trader actually flag these as the day's top 20." Hardcoded in Java means tuning requires recompiling + redeploying.
+
+**Fix path** (next-session-or-later):
+1. **Short term**: migrate to a `scorer_config` table read at scoring-activity start. One row per scorer with the thresholds as columns. Tuning becomes `UPDATE scorer_config SET min_orders = 25 WHERE scorer_id = 'post_cancel_cluster'` + `temporal workflow start --type ScoreWorkflow ...` — no rebuild.
+2. **Long term**: per-symbol baselines. `MIN_ORDERS = max(20, p95(per-symbol cluster size over 30 days))`. The `LargeTrade` $1 M is the worst offender here — $1 M in AAPL is routine, $1 M in a small-cap is enormous. Symbol-relative thresholds make all 12 magic numbers data-driven.
+
+Blocker for path #2: 30-day backfill, which is itself blocked on the single-day pipeline being rock-solid (which is where we are right now).
+
+### Tier 3 — Score formulas (algorithmic choice, harder to make data-driven)
+
+Each scorer has a hardcoded score formula:
+
+- LargeTrade: `log10($notional)`
+- Sweep: `log10($notional) × distinct_price_levels`
+- PostCancel: `log10(shares) × cluster_count`
+- Layering: `log10(shares) × distinct_price_levels`
+- Iceberg: `log10(shares) × fill_count`
+- LiquidityWithdrawal: `log10(deletes) × deletes`
+- Halt: `duration_in_seconds`
+
+**Issues**:
+- Halt is linear in duration but interestingness probably isn't (4 h halt isn't 48× a 5 min halt).
+- Mixed units across scorers, defeats global ranking. Threshold-based selection (Tier 1) sidesteps this via within-scorer percentile.
+- No principled justification for `×` vs `+` vs other combinations.
+
+**Fix path**: audit one scorer at a time. Sort top-20 events per scorer-day, confirm a trader would flag those. If not, tune the formula and document why. Not urgent until inter-day baselines are live.
+
+### Tier 4 — Infrastructure / operational constants
+
+- `RETENTION_DAYS = 30` in `DailyPipelineWorkflowImpl` — fine, basically a deployment policy.
+- `RAW_DIR = "/storage/raw"` — fine, infrastructure path.
+- `PLACEHOLDER_DATE = LocalDate.of(1970, 1, 1)` — sentinel value, intentional.
+- Postgres tuning (`mem_limit: 48g`, `work_mem='2GB'` per-session, `shared_buffers=8GB`, `hash_mem_multiplier=2`) — in `docker-compose.dev.yml` + `MaterializeOrderLifecycleActivityImpl`. **Move to env vars eventually** so dev/prod can differ without code edits, but not urgent.
+- `LlamaClient` `Semaphore(2, fair)` — 2 is a real physical constraint of the `llama-large.joi` single-GPU box, not arbitrary. Stays.
+- Various workflow timeouts (`Duration.ofMinutes(60)` for materialize, etc.) — keep as code constants but generous enough to absorb the variance we observe.
+
+**The principle**: hardcodes are fine if they're physical constants or won't grow. Anything you'd EDIT regularly to tune the product belongs in a config table or env var.
 
 ---
 

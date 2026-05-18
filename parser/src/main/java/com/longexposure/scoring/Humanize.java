@@ -21,7 +21,7 @@ public final class Humanize {
 
     private static final ZoneId ET = ZoneId.of("America/New_York");
 
-    /** Time-of-day in ET with millisecond precision, e.g. {@code "07:08:14.994 ET"}. */
+    /** Time-of-day in ET with millisecond precision, e.g. {@code "07:08:14.994"}. */
     private static final DateTimeFormatter ET_TIME_FMT =
             DateTimeFormatter.ofPattern("HH:mm:ss.SSS").withZone(ET);
 
@@ -68,11 +68,18 @@ public final class Humanize {
 
     /**
      * Format a UTC instant as time-of-day in Eastern Time with millisecond
-     * precision. Returns e.g. {@code "07:08:14.994 ET"} (note: handles
-     * DST automatically; ET = EDT in May, EST in winter).
+     * precision. Returns e.g. {@code "07:08:14.994"} (handles DST
+     * automatically; ET = EDT in May, EST in winter).
+     *
+     * <p>The {@code "ET"} suffix is intentionally omitted from the
+     * output — breakdown fields are conventionally named with an
+     * {@code _et} suffix (e.g. {@code halt_start_et}), so the zone is
+     * already self-documenting. Keeping {@code "ET"} out of the string
+     * value also prevents the LLM from copying it into prose and being
+     * mistaken for a ticker by the grounding verifier.
      */
     public static String toEtTime(final Instant utc) {
         if (utc == null) return null;
-        return ET_TIME_FMT.format(ZonedDateTime.ofInstant(utc, ET)) + " ET";
+        return ET_TIME_FMT.format(ZonedDateTime.ofInstant(utc, ET));
     }
 }

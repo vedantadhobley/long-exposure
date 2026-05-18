@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Instant;
+import java.util.Set;
 
 /**
  * Orchestrates the two-pass + verify model for one event end-to-end.
@@ -35,11 +36,23 @@ public final class NarrationPipeline {
     private final GroundingVerifier  verifier;
     private final String             modelId;
 
-    public NarrationPipeline(final LlamaClient llama, final String modelId) {
+    /**
+     * Construct with an explicit set of legitimate tickers — passed to
+     * the verifier so it can reject narrations that mention any ticker
+     * other than the event's subject. The activity layer loads
+     * {@code validSymbols} from the {@code symbols} reference table
+     * once per run and passes it here.
+     */
+    public NarrationPipeline(final LlamaClient llama, final String modelId, final Set<String> validSymbols) {
         this.extractor = new BlueprintExtractor(llama);
         this.renderer  = new ProseRenderer(llama);
-        this.verifier  = new GroundingVerifier();
+        this.verifier  = new GroundingVerifier(validSymbols);
         this.modelId   = modelId;
+    }
+
+    /** Construct without symbol validation — verifier only checks numbers. */
+    public NarrationPipeline(final LlamaClient llama, final String modelId) {
+        this(llama, modelId, Set.of());
     }
 
     /**
