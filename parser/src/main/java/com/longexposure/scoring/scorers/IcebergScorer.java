@@ -209,6 +209,8 @@ public final class IcebergScorer implements EventScorer {
             sourceRefs.add(trunc);
         }
 
+        com.longexposure.scoring.Enrich.symbol(breakdown, ctx, first.symbol);
+
         double score = Math.log10(Math.max(totalShares, 1)) * run.size();
 
         return new ScoredEvent(

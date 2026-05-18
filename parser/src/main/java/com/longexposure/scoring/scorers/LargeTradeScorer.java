@@ -122,6 +122,8 @@ public final class LargeTradeScorer implements EventScorer {
         ref.put("trade_id", tradeId);
         sourceRefs.add(ref);
 
+        com.longexposure.scoring.Enrich.symbol(breakdown, ctx, symbol);
+
         double score = Math.log10(notionalDollars);
 
         return new ScoredEvent(

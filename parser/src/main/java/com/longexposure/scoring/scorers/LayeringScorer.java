@@ -72,38 +72,34 @@ public final class LayeringScorer implements EventScorer {
 
     @Override
     public void score(final ScoringContext ctx, final Consumer<ScoredEvent> emit) {
+        // Read from order_lifecycle (pre-materialized by
+        // MaterializeOrderLifecycleActivity). Same input shape as
+        // PostCancelClusterScorer; differs only in post-fetch clustering
+        // rules (≥ 5 distinct price levels, etc.).
         String sql = """
-                SELECT a.symbol,
-                       a.side,
-                       a.order_id,
-                       a.ts        AS add_ts,
-                       a.ts_nanos  AS add_nanos,
-                       a.size,
-                       a.price_raw,
-                       d.ts_nanos  AS delete_nanos
-                FROM orders_add a
-                JOIN orders_delete d ON a.order_id = d.order_id
-                WHERE a.feed_source = 'DPLS'
-                  AND d.feed_source = 'DPLS'
-                  AND a.ts >= ? AND a.ts < ?
-                  AND d.ts >= ? AND d.ts < ?
-                  AND (d.ts_nanos - a.ts_nanos) > 0
-                  AND (d.ts_nanos - a.ts_nanos) <= ?
-                ORDER BY a.symbol, a.side, a.ts_nanos
+                SELECT symbol,
+                       side,
+                       order_id,
+                       add_ts,
+                       add_ts_nanos  AS add_nanos,
+                       add_size      AS size,
+                       add_price_raw AS price_raw,
+                       lifetime_ns
+                FROM order_lifecycle
+                WHERE trading_date = ?
+                  AND feed_source  = 'DPLS'
+                  AND terminal_state = 'deleted'
+                  AND lifetime_ns > 0
+                  AND lifetime_ns <= ?
+                ORDER BY symbol, side, add_ts_nanos
                 """;
-
-        Timestamp from = Timestamp.from(ctx.tradingDate().atStartOfDay().toInstant(ZoneOffset.UTC));
-        Timestamp to   = Timestamp.from(ctx.tradingDate().plusDays(1).atStartOfDay().toInstant(ZoneOffset.UTC));
 
         long[] emitted = {0};
         Consumer<ScoredEvent> counting = se -> { emit.accept(se); emitted[0]++; };
         try (PreparedStatement st = ctx.conn().prepareStatement(sql)) {
             st.setFetchSize(50_000);
-            st.setTimestamp(1, from);
-            st.setTimestamp(2, to);
-            st.setTimestamp(3, from);
-            st.setTimestamp(4, to);
-            st.setLong(5, MAX_LIFETIME_NANOS);
+            st.setObject(1, ctx.tradingDate());
+            st.setLong(2, MAX_LIFETIME_NANOS);
             try (ResultSet rs = st.executeQuery()) {
                 ClusterBuilder cb = new ClusterBuilder(ctx);
                 long rowsRead = 0;
@@ -135,7 +131,7 @@ public final class LayeringScorer implements EventScorer {
                     rs.getLong("add_nanos"),
                     rs.getInt("size"),
                     rs.getLong("price_raw"),
-                    rs.getLong("delete_nanos") - rs.getLong("add_nanos"));
+                    rs.getLong("lifetime_ns"));
 
             if (!current.isEmpty()) {
                 ShortLivedOrder last = current.get(current.size() - 1);
@@ -211,6 +207,8 @@ public final class LayeringScorer implements EventScorer {
             trunc.put("truncated_count", cluster.size() - MAX_SOURCE_REFS);
             sourceRefs.add(trunc);
         }
+
+        com.longexposure.scoring.Enrich.symbol(breakdown, ctx, first.symbol);
 
         double score = Math.log10(Math.max(totalShares, 1)) * distinctLevels;
 

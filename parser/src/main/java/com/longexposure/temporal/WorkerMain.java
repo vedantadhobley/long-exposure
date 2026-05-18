@@ -5,10 +5,12 @@ import com.longexposure.temporal.activities.DeepTopsValidatorActivityImpl;
 import com.longexposure.temporal.activities.DownloadFileActivityImpl;
 import com.longexposure.temporal.activities.DplsDeepValidatorActivityImpl;
 import com.longexposure.temporal.activities.DplsTopsValidatorActivityImpl;
+import com.longexposure.temporal.activities.MaterializeOrderLifecycleActivityImpl;
 import com.longexposure.temporal.activities.ParseAndWriteDplsActivityImpl;
 import com.longexposure.temporal.activities.PipelineRunRecorderActivityImpl;
 import com.longexposure.temporal.activities.NarrateEventsActivityImpl;
 import com.longexposure.temporal.activities.RecordValidationActivityImpl;
+import com.longexposure.temporal.activities.RefreshSymbolMetadataActivityImpl;
 import com.longexposure.temporal.activities.ResolveUrlActivityImpl;
 import com.longexposure.temporal.activities.RetentionSweepActivityImpl;
 import com.longexposure.temporal.activities.ScoreEventsActivityImpl;
@@ -16,10 +18,18 @@ import com.longexposure.temporal.activities.SelectTopEventsActivityImpl;
 import com.longexposure.temporal.workflows.DailyPipelineWorkflow;
 import com.longexposure.temporal.workflows.DailyPipelineWorkflowImpl;
 import com.longexposure.temporal.workflows.DailyPipelineWorkflowInput;
-import com.longexposure.temporal.workflows.NarrateOnlyWorkflow;
-import com.longexposure.temporal.workflows.ScoreOnlyWorkflow;
-import com.longexposure.temporal.workflows.SelectOnlyWorkflow;
-import com.longexposure.temporal.workflows.ValidateOnlyWorkflow;
+import com.longexposure.temporal.workflows.MaterializeWorkflow;
+import com.longexposure.temporal.workflows.MaterializeWorkflowImpl;
+import com.longexposure.temporal.workflows.NarrateWorkflow;
+import com.longexposure.temporal.workflows.NarrateWorkflowImpl;
+import com.longexposure.temporal.workflows.RefreshSymbolsWorkflow;
+import com.longexposure.temporal.workflows.RefreshSymbolsWorkflowImpl;
+import com.longexposure.temporal.workflows.ScoreWorkflow;
+import com.longexposure.temporal.workflows.ScoreWorkflowImpl;
+import com.longexposure.temporal.workflows.SelectWorkflow;
+import com.longexposure.temporal.workflows.SelectWorkflowImpl;
+import com.longexposure.temporal.workflows.ValidateWorkflow;
+import com.longexposure.temporal.workflows.ValidateWorkflowImpl;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.schedules.Schedule;
 import io.temporal.client.schedules.ScheduleActionStartWorkflow;
@@ -60,6 +70,9 @@ public final class WorkerMain {
     /** Schedule ID. Same name used by every worker — schedule is global. */
     public static final String SCHEDULE_ID = "daily-pipeline-cron";
 
+    /** Weekly schedule for refreshing the symbols reference table. */
+    public static final String SYMBOLS_SCHEDULE_ID = "refresh-symbols-weekly";
+
     private WorkerMain() {}
 
     public static void start() {
@@ -77,10 +90,12 @@ public final class WorkerMain {
         Worker worker = factory.newWorker(DailyPipelineWorkflow.TASK_QUEUE);
         worker.registerWorkflowImplementationTypes(
                 DailyPipelineWorkflowImpl.class,
-                ValidateOnlyWorkflow.Impl.class,
-                ScoreOnlyWorkflow.Impl.class,
-                SelectOnlyWorkflow.Impl.class,
-                NarrateOnlyWorkflow.Impl.class);
+                ValidateWorkflowImpl.class,
+                MaterializeWorkflowImpl.class,
+                ScoreWorkflowImpl.class,
+                SelectWorkflowImpl.class,
+                NarrateWorkflowImpl.class,
+                RefreshSymbolsWorkflowImpl.class);
         worker.registerActivitiesImplementations(
                 new ResolveUrlActivityImpl(),
                 new DownloadFileActivityImpl(),
@@ -89,12 +104,14 @@ public final class WorkerMain {
                 new DplsTopsValidatorActivityImpl(),
                 new DeepTopsValidatorActivityImpl(),
                 new RecordValidationActivityImpl(),
+                new MaterializeOrderLifecycleActivityImpl(),
                 new ScoreEventsActivityImpl(),
                 new SelectTopEventsActivityImpl(),
                 new NarrateEventsActivityImpl(),
                 new CleanupFilesActivityImpl(),
                 new RetentionSweepActivityImpl(),
-                new PipelineRunRecorderActivityImpl());
+                new PipelineRunRecorderActivityImpl(),
+                new RefreshSymbolMetadataActivityImpl());
 
         factory.start();
         LOG.info("worker started  task_queue={}", DailyPipelineWorkflow.TASK_QUEUE);
@@ -105,6 +122,11 @@ public final class WorkerMain {
             registerSchedule(client);
         } catch (Exception e) {
             LOG.warn("schedule registration failed (worker continues running)", e);
+        }
+        try {
+            registerSymbolsRefreshSchedule(client);
+        } catch (Exception e) {
+            LOG.warn("symbols-refresh schedule registration failed (worker continues running)", e);
         }
 
         // Block forever — Temporal's worker threads keep running.
@@ -182,6 +204,60 @@ public final class WorkerMain {
             LOG.info("schedule registered  id={} spec='0 0 * * 2-6 America/New_York'", SCHEDULE_ID);
         } catch (ScheduleAlreadyRunningException already) {
             LOG.info("schedule already exists — leaving as-is  id={}", SCHEDULE_ID);
+        }
+    }
+
+    /**
+     * Register a weekly schedule that runs {@link RefreshSymbolsWorkflow}
+     * every Sunday at 02:00 America/New_York. Sunday because markets are
+     * closed and the nightly daily-pipeline cron can't fire at the same
+     * time. Idempotent — leaves an existing schedule alone.
+     *
+     * <p>Registered paused-by-default like the daily-pipeline schedule;
+     * unpause with:
+     * <pre>
+     *   docker exec long-exposure-dev-temporal temporal schedule toggle \
+     *     --schedule-id refresh-symbols-weekly --unpause
+     * </pre>
+     * For initial population, run it manually once:
+     * <pre>
+     *   docker exec long-exposure-dev-temporal temporal schedule trigger \
+     *     --schedule-id refresh-symbols-weekly
+     * </pre>
+     */
+    private static void registerSymbolsRefreshSchedule(final WorkflowClient client) {
+        ScheduleClient scheduleClient = ScheduleClient.newInstance(client.getWorkflowServiceStubs());
+
+        ScheduleActionStartWorkflow action = ScheduleActionStartWorkflow.newBuilder()
+                .setWorkflowType(RefreshSymbolsWorkflow.class)
+                .setOptions(WorkflowOptions.newBuilder()
+                        .setWorkflowId(RefreshSymbolsWorkflow.WORKFLOW_ID)
+                        .setTaskQueue(RefreshSymbolsWorkflow.TASK_QUEUE)
+                        .build())
+                .build();
+
+        ScheduleSpec spec = ScheduleSpec.newBuilder()
+                .setCronExpressions(List.of("0 2 * * 0"))   // 02:00 Sun
+                .setTimeZoneName("America/New_York")
+                .build();
+
+        Schedule schedule = Schedule.newBuilder()
+                .setAction(action)
+                .setSpec(spec)
+                .setPolicy(SchedulePolicy.newBuilder()
+                        .setOverlap(io.temporal.api.enums.v1.ScheduleOverlapPolicy.SCHEDULE_OVERLAP_POLICY_SKIP)
+                        .build())
+                .setState(ScheduleState.newBuilder()
+                        .setPaused(true)
+                        .setNote("paused by default — operator runs manually for initial population then unpauses for weekly")
+                        .build())
+                .build();
+
+        try {
+            scheduleClient.createSchedule(SYMBOLS_SCHEDULE_ID, schedule, ScheduleOptions.newBuilder().build());
+            LOG.info("symbols-refresh schedule registered  id={} spec='0 2 * * 0 America/New_York'", SYMBOLS_SCHEDULE_ID);
+        } catch (ScheduleAlreadyRunningException already) {
+            LOG.info("symbols-refresh schedule already exists — leaving as-is  id={}", SYMBOLS_SCHEDULE_ID);
         }
     }
 

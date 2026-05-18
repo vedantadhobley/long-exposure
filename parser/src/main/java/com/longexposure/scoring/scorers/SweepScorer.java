@@ -212,6 +212,8 @@ public final class SweepScorer implements EventScorer {
             sourceRefs.add(trunc);
         }
 
+        com.longexposure.scoring.Enrich.symbol(breakdown, ctx, first.symbol);
+
         double score = Math.log10(Math.max(notional, 1.0)) * distinctLevels;
 
         return new ScoredEvent(

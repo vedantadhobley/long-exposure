@@ -28,15 +28,35 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     # Override TimescaleDB's auto-tune. The default sees 125 GB host RAM
     # and assumes it owns the box → shared_buffers ≈ 31 GB. We share with
-    # legal-tender's ArangoDB and dev tooling, so cap aggressively. These
-    # are still healthy values for a dev DB.
+    # legal-tender's ArangoDB and dev tooling, so cap explicitly. Sized
+    # for scoring workload: PostCancel/Layering JOINs over 160 M+ rows
+    # need a large per-worker hash budget to avoid disk-spill.
+    #
+    # Memory accounting during a single heavy scoring query:
+    #   • 8 GB           shared_buffers (raw row cache)
+    #   • 16 × 2 GB × 2  ≈ 64 GB peak for parallel hash JOINs
+    #                    (work_mem × max_parallel_workers_per_gather × hash_mem_multiplier)
+    #   • 4 GB           OS page cache + connection overhead
+    #   ≈ 76 GB worst-case peak — bounded by mem_limit and only during
+    #     the JOIN phase. Falls back to ~10 GB resident outside scoring.
+    #
+    # hash_mem_multiplier=2 (PG13+) lets hash ops use 2× the regular
+    # work_mem ceiling, which is exactly what large JOINs want without
+    # affecting sort/aggregate budgets.
+    #
+    # Scoring activity additionally sets `SET work_mem='2GB'` per session
+    # to lift only this connection's budget rather than the server's.
     command: >
       postgres
-      -c shared_buffers=1GB
-      -c effective_cache_size=2GB
-      -c work_mem=32MB
-      -c maintenance_work_mem=256MB
-    mem_limit: 4g
+      -c shared_buffers=8GB
+      -c effective_cache_size=24GB
+      -c work_mem=64MB
+      -c hash_mem_multiplier=2
+      -c maintenance_work_mem=2GB
+      -c max_parallel_workers_per_gather=16
+      -c max_parallel_workers=32
+      -c max_worker_processes=48
+    mem_limit: 48g
     volumes:
       - long-exposure-dev-postgres-data:/var/lib/postgresql/data
     healthcheck:

@@ -122,6 +122,8 @@ public final class HaltScorer implements EventScorer {
         if (haltEnd != null)   breakdown.put("halt_end_et", Humanize.toEtTime(haltEnd)); else breakdown.putNull("halt_end_et");
         breakdown.put("halt_resumed",      "T".equals(nextSub));     // boolean — "did it resume cleanly?"
 
+        com.longexposure.scoring.Enrich.symbol(breakdown, ctx, symbol);
+
         ArrayNode sourceRefs = json.createArrayNode();
         ObjectNode ref = json.createObjectNode();
         ref.put("table",    "status_events");

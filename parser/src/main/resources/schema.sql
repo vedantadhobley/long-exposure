@@ -408,6 +408,63 @@ CREATE TABLE IF NOT EXISTS validation_runs (
 
 CREATE INDEX IF NOT EXISTS validation_runs_run_at_idx ON validation_runs (run_at DESC);
 
+-- ─── Order lifecycle (materialized derivation of orders_add ⨝ orders_delete) ─
+-- Populated by MaterializeOrderLifecycleActivity in the daily pipeline,
+-- between ParseAndWriteDpls and ScoreEvents. One row per order: the
+-- add event paired with its terminal event (delete OR final execute).
+-- Orders that survive end-of-session land with delete_ts=NULL,
+-- execute_ts=NULL, terminal_state='open'.
+--
+-- Why this exists: the natural domain question "what was this order's
+-- lifetime?" answers `orders_add ⨝ orders_delete ON (symbol, order_id)`,
+-- which costs ~13 GB of hash table on 162M rows and dominates the
+-- scoring wall clock. Materializing once per day amortizes that cost
+-- across PostCancel + Layering + any future order-lifecycle scorer.
+-- Subsequent reads become a sequential range scan with the symbol-add_ts
+-- index. See docs/todo.md "Performance — scoring layer" for full
+-- rationale.
+--
+-- Hypertable on add_ts (the order's "birth" time) — same partitioning
+-- semantics as orders_add. Chunk interval 1 day; one trading session
+-- per chunk.
+
+CREATE TABLE IF NOT EXISTS order_lifecycle (
+    trading_date    DATE             NOT NULL,
+    symbol          TEXT             NOT NULL,
+    order_id        BIGINT           NOT NULL,
+    side            CHAR(1)          NOT NULL,         -- 'B' (buy) or 'S' (sell)
+    add_ts          TIMESTAMPTZ      NOT NULL,
+    add_ts_nanos    BIGINT           NOT NULL,
+    add_price_raw   BIGINT           NOT NULL,         -- decode as price_raw / 10000.0
+    add_size        INTEGER          NOT NULL,
+    delete_ts       TIMESTAMPTZ,                       -- null if order wasn't deleted
+    execute_ts      TIMESTAMPTZ,                       -- null if order wasn't (fully) executed
+    terminal_state  TEXT             NOT NULL,         -- 'deleted' | 'executed' | 'open' (end-of-session)
+    lifetime_ns     BIGINT,                            -- computed: (terminal_ts - add_ts) in ns; null for 'open'
+    feed_source     TEXT             NOT NULL DEFAULT 'DPLS'
+);
+
+SELECT create_hypertable('order_lifecycle', 'add_ts',
+    chunk_time_interval => INTERVAL '1 day',
+    if_not_exists => TRUE);
+
+-- Primary access pattern: PostCancel/Layering scan short-lived orders
+-- per symbol in add_ts order. The (symbol, add_ts) index supports
+-- both the scan order and the symbol filter.
+CREATE INDEX IF NOT EXISTS order_lifecycle_symbol_add_ts_idx
+    ON order_lifecycle (symbol, add_ts);
+
+-- Lifetime filter: WHERE lifetime_ns < 50_000_000 cuts >99% of rows.
+-- Partial index on the most-common scoring predicate makes the scan
+-- effectively touch only the short-lived order subset.
+CREATE INDEX IF NOT EXISTS order_lifecycle_short_lived_idx
+    ON order_lifecycle (trading_date, symbol, add_ts)
+    WHERE lifetime_ns IS NOT NULL AND lifetime_ns < 100000000;  -- <100ms covers PostCancel + Layering
+
+-- Order ID is unique per session per symbol; useful for forensic lookups.
+CREATE INDEX IF NOT EXISTS order_lifecycle_order_id_idx
+    ON order_lifecycle (order_id);
+
 -- ─── Scored events (per-event scoring output) ────────────────────────────────
 -- Written by ScoreEventsActivity after the validate triangle passes. Each row
 -- represents one "thing worth narrating" — could be a single source row
@@ -486,3 +543,34 @@ ALTER TABLE narratives ADD COLUMN IF NOT EXISTS verifier_passed BOOLEAN;
 ALTER TABLE narratives ADD COLUMN IF NOT EXISTS verifier_notes  JSONB;
 
 CREATE INDEX IF NOT EXISTS narratives_selected_id_idx ON narratives (selected_id);
+
+-- ─── Symbols reference table ────────────────────────────────────────────────
+-- Per-ticker metadata used by scorers to enrich the breakdown JSON before
+-- LLM narration. Populated by RefreshSymbolMetadataActivity (Temporal),
+-- refreshed weekly. Source columns:
+--   * NASDAQ public symbol files (nasdaqlisted.txt, otherlisted.txt) —
+--     company_name, listing_exchange, is_etf for every US-listed symbol
+--   * Our existing `securities` table (IEX SecurityDirectory messages) —
+--     round_lot, prev_close, luld_tier, IEX-side flags
+-- Not a hypertable. ~10K rows total; small and slow-changing.
+--
+-- Lookup pattern: at the start of each ScoreEventsActivity run, the
+-- activity loads this table into a Map<String, SymbolMetadata> and
+-- carries it in the ScoringContext for O(1) per-event enrichment with
+-- zero DB calls inside the hot path.
+
+CREATE TABLE IF NOT EXISTS symbols (
+    symbol             TEXT             PRIMARY KEY,
+    company_name       TEXT,
+    listing_exchange   TEXT,                       -- 'NASDAQ', 'NYSE', 'NYSE Arca', 'Cboe BZX', etc.
+    is_etf             BOOLEAN,
+    round_lot          INTEGER,
+    prev_close_dollars DOUBLE PRECISION,
+    luld_tier          TEXT,                       -- '1' or '2' per IEX SecurityDirectory
+    updated_at         TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
+    source             TEXT             NOT NULL    -- 'nasdaq_listed' | 'nasdaq_other' | 'iex_security_directory'
+                                                    -- (most rows are merges; this records the dominant source)
+);
+
+CREATE INDEX IF NOT EXISTS symbols_listing_exchange_idx ON symbols (listing_exchange);
+CREATE INDEX IF NOT EXISTS symbols_is_etf_idx           ON symbols (is_etf);

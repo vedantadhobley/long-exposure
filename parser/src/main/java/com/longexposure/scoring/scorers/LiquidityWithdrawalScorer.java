@@ -168,6 +168,8 @@ public final class LiquidityWithdrawalScorer implements EventScorer {
             sourceRefs.add(trunc);
         }
 
+        com.longexposure.scoring.Enrich.symbol(breakdown, ctx, first.symbol);
+
         double score = Math.log10(cluster.size()) * cluster.size();
 
         return new ScoredEvent(

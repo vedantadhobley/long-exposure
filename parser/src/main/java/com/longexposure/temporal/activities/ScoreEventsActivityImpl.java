@@ -5,7 +5,10 @@ import com.longexposure.scoring.EventScorer;
 import com.longexposure.scoring.EventScorerRegistry;
 import com.longexposure.scoring.ScoredEvent;
 import com.longexposure.scoring.ScoringContext;
+import com.longexposure.scoring.SymbolMetadata;
 import com.longexposure.storage.SchemaManager;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.function.Consumer;
 import io.temporal.activity.Activity;
 import io.temporal.activity.ActivityExecutionContext;
@@ -66,7 +69,7 @@ public final class ScoreEventsActivityImpl implements ScoreEventsActivity {
         try (Connection conn = openConnection()) {
             // Idempotent — ensures scored_events table exists when this
             // activity runs without a preceding parse activity (e.g. via
-            // ScoreOnlyWorkflow). SchemaManager.apply internally flips
+            // ScoreWorkflow). SchemaManager.apply internally flips
             // autoCommit=true (DDL wants per-statement commits), so we
             // set our autoCommit=false AFTER it completes.
             SchemaManager.apply(conn);
@@ -81,6 +84,19 @@ public final class ScoreEventsActivityImpl implements ScoreEventsActivity {
             // COPY so the writes are durable.
             conn.setAutoCommit(false);
 
+            // Modest work_mem bump for the per-symbol GROUP BYs in
+            // Iceberg + LiquidityWithdrawal scorers. The PostCancel +
+            // Layering JOINs that used to need 2 GB+ are gone now —
+            // both read order_lifecycle as a sequential partial-index
+            // scan instead. 256 MB is comfortable for the remaining
+            // scorer queries; the heavy memory tuning that the JOIN
+            // version needed (work_mem='2GB' + hash_mem_multiplier=2)
+            // is no longer required.
+            try (java.sql.Statement st = conn.createStatement()) {
+                st.execute("SET work_mem = '256MB'");
+            }
+            conn.commit();
+
             // Pre-clean: scored_events for this date.
             long deleted;
             try (PreparedStatement st = conn.prepareStatement(
@@ -92,9 +108,19 @@ public final class ScoreEventsActivityImpl implements ScoreEventsActivity {
             LOG.info("score pre-clean  date={} rows_deleted={}", tradingDate, deleted);
             actx.heartbeat("preclean_done:" + deleted);
 
+            // Load symbol metadata cache once for the whole run.
+            // ~12 000 rows from a tiny reference table — sub-second load,
+            // O(1) lookups for every event afterward. Empty map if the
+            // RefreshSymbolMetadataActivity has never run yet (scorers
+            // null-check and degrade gracefully).
+            Map<String, SymbolMetadata> symbols = loadSymbols(conn);
+            LOG.info("symbols loaded  count={}", symbols.size());
+            actx.heartbeat("symbols_loaded:" + symbols.size());
+
             ScoringContext sctx = new ScoringContext(
                     tradingDate, conn, pipelineRunId, json,
-                    detail -> actx.heartbeat("scorer_progress:" + detail));
+                    detail -> actx.heartbeat("scorer_progress:" + detail),
+                    symbols);
             CopyManager copyManager = conn.unwrap(PGConnection.class).getCopyAPI();
 
             for (EventScorer scorer : EventScorerRegistry.ALL) {
@@ -210,6 +236,40 @@ public final class ScoreEventsActivityImpl implements ScoreEventsActivity {
                 default   -> sb.append(c);
             }
         }
+    }
+
+    /**
+     * Load the {@code symbols} reference table into an in-memory map.
+     * Returns an empty map if the table is missing/empty — scorers + the
+     * Enrich helper are null-safe, so missing symbols just means the LLM
+     * gets the ticker without company-name etc. (same as today).
+     */
+    private static Map<String, SymbolMetadata> loadSymbols(final Connection conn) {
+        Map<String, SymbolMetadata> out = new HashMap<>(20_000);
+        String sql = """
+                SELECT symbol, company_name, listing_exchange, is_etf,
+                       round_lot, prev_close_dollars, luld_tier
+                FROM symbols
+                """;
+        try (PreparedStatement st = conn.prepareStatement(sql);
+             java.sql.ResultSet rs = st.executeQuery()) {
+            while (rs.next()) {
+                String  symbol           = rs.getString("symbol");
+                String  companyName      = rs.getString("company_name");
+                String  listingExchange  = rs.getString("listing_exchange");
+                Boolean isEtf            = (Boolean) rs.getObject("is_etf");
+                Integer roundLot         = (Integer) rs.getObject("round_lot");
+                Double  prevClose        = (Double)  rs.getObject("prev_close_dollars");
+                String  luldTier         = rs.getString("luld_tier");
+                out.put(symbol, new SymbolMetadata(
+                        symbol, companyName, listingExchange, isEtf,
+                        roundLot, prevClose, luldTier));
+            }
+        } catch (Exception e) {
+            // Likely "table doesn't exist yet" — log and proceed empty.
+            LOG.warn("symbols table not readable, scoring will proceed without enrichment: {}", e.getMessage());
+        }
+        return out;
     }
 
     private static Connection openConnection() throws Exception {
