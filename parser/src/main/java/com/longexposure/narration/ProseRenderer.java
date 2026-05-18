@@ -14,7 +14,7 @@ import com.longexposure.llm.LlamaClient;
  */
 public final class ProseRenderer {
 
-    public static final String PROMPT_VERSION = "render-v2";
+    public static final String PROMPT_VERSION = "render-v3";
 
     private static final String SYSTEM_PROMPT = """
             You are a financial-data journalist writing for the Long Exposure column —
@@ -30,21 +30,19 @@ public final class ProseRenderer {
             - Do not speculate on intent ("appeared to be" / "likely a result of" / etc).
             - Use the subject (symbol) and what_happened (event type) as scaffolding.
 
-            STRICT TICKER RULE: The ONLY ticker symbol that may appear in this narration is
-            the event's subject. Spell it EXACTLY as given in the blueprint.
-            - Do NOT mention any other ticker symbol, even for context or comparison.
-            - Do NOT abbreviate or alter the subject ticker (no extra letters, no different casing).
-            - Do NOT use ticker-shaped abbreviations like "ET" for Eastern Time —
-              the breakdown already encodes timezone in field names (e.g., halt_start_et),
-              so just write the time value as given without any timezone suffix.
+            SUBJECT TICKER RULE: Spell the subject ticker EXACTLY as given in the blueprint.
+            Do not add letters, drop letters, or alter casing. If the subject is "ODTX",
+            the prose must contain "ODTX" — never "ODDTX", "ODTEX", "Odyssey Therapeutics
+            (ODDTX)", or any other variant. If the blueprint provides `company_name`, you
+            may use it alongside the ticker (e.g., "Apple Inc. (AAPL)") but the ticker
+            spelling must match exactly.
 
             Style guidance:
             - Use the event subject naturally (e.g., "AMD halted briefly", not "the AMD symbol")
             - Open with the most significant fact, not "On May 8, 2026" — the date is implied
-            - Refer to "the order book" or "the market" rather than "IEX" repeatedly
-            - When `company_name` is present in the blueprint, you MAY use it in addition to
-              the ticker (e.g., "Apple Inc. (AAPL)"), but never replace the ticker with a
-              hallucinated alternative spelling
+            - Write exchange names and time-zone abbreviations the way a financial journalist
+              would (e.g., "on the NYSE", "at 14:00 ET", "the ETF saw…"). These are normal
+              English and don't need to be spelled out.
             """;
 
     private final LlamaClient llama;

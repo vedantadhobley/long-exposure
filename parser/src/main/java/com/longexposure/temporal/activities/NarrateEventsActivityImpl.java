@@ -18,8 +18,6 @@ import java.sql.Timestamp;
 import java.sql.Types;
 
 import java.time.LocalDate;
-import java.util.HashSet;
-import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -56,20 +54,10 @@ public final class NarrateEventsActivityImpl implements NarrateEventsActivity {
 
         ObjectMapper json = new ObjectMapper();
         LlamaClient llama = LlamaClient.fromEnv();
+        NarrationPipeline pipeline = new NarrationPipeline(llama, MODEL_ID);
 
         try (Connection conn = openConnection()) {
             SchemaManager.apply(conn);
-
-            // Load the ticker reference set once for the run. The
-            // GroundingVerifier uses this to reject narrations that
-            // mention any ticker other than the event's subject —
-            // catches the ODDTX-from-ODTX class of hallucination.
-            // Empty if the symbols table hasn't been populated yet, in
-            // which case the verifier degrades to "must equal event
-            // symbol" only.
-            Set<String> validSymbols = loadValidSymbols(conn);
-            LOG.info("loaded valid symbols  count={}", validSymbols.size());
-            NarrationPipeline pipeline = new NarrationPipeline(llama, MODEL_ID, validSymbols);
 
             // Stream selected events for the day, ordered by narration_rank so
             // the top-scoring of each scorer gets narrated first.
@@ -178,24 +166,6 @@ public final class NarrateEventsActivityImpl implements NarrateEventsActivity {
             st.setString(13, verifierNotes);
             st.executeUpdate();
         }
-    }
-
-    /**
-     * Load every known ticker from the {@code symbols} reference table
-     * into a Set. Returns an empty Set on any failure so narration can
-     * still proceed (verifier just degrades to "must equal event
-     * symbol"). Sub-second query, runs once per activity invocation.
-     */
-    private static Set<String> loadValidSymbols(final Connection conn) {
-        Set<String> out = new HashSet<>(20_000);
-        try (PreparedStatement st = conn.prepareStatement("SELECT symbol FROM symbols");
-             ResultSet rs = st.executeQuery()) {
-            while (rs.next()) out.add(rs.getString(1));
-        } catch (Exception e) {
-            LOG.warn("symbols table not readable; verifier ticker-check degrades to event-symbol-only: {}",
-                    e.getMessage());
-        }
-        return out;
     }
 
     private static Connection openConnection() throws Exception {

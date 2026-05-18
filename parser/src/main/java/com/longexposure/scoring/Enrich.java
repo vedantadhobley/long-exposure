@@ -29,7 +29,16 @@ public final class Enrich {
      * place. Null-safe on all branches.
      */
     public static void symbol(final ObjectNode breakdown, final ScoringContext ctx, final String symbol) {
-        if (breakdown == null || ctx == null || symbol == null) return;
+        if (breakdown == null || symbol == null) return;
+
+        // The ticker itself goes in unconditionally — independent of
+        // whether reference metadata exists. Downstream consumers
+        // (notably GroundingVerifier) rely on the breakdown carrying
+        // the canonical symbol so they can confirm it's present
+        // in narration prose.
+        breakdown.put("symbol", symbol);
+
+        if (ctx == null) return;
         SymbolMetadata m = ctx.lookupSymbol(symbol);
         if (m == null) return;
 
