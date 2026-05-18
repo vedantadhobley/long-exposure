@@ -69,28 +69,25 @@ The dev stack is identical with `-dev` suffixes and bind-mounted source.
 
 `DailyPipelineWorkflow` runs nightly at 00:00 America/New_York (Tue–Sat, schedule paused by default during dev). T+1 HIST data is usually available between 22:32 ET and 00:11 ET; midnight gives the workflow a 3-hour retry budget on the upstream-resolve step without spilling into the morning.
 
-Activities are listed in execution order. Steps 1 and 2 fan out into 3 parallel branches (one per IEX feed: DPLS / DEEP / TOPS). The 3 validators after parsing run concurrently. The full activity catalog + retry policies live in @temporal-design.md.
+The orchestrator is **pure orchestration** — it calls child workflows for each phase, plus `PipelineRunRecorderActivity` for cross-cutting metadata. Every phase is independently invokable for replay / backfill / iterative development. Full layout in @temporal-design.md.
 
-| # | Activity | Purpose | Long-running? |
-|---|---|---|---|
-| 1 | `ResolveUrlActivity` ×3 | Hit `iextrading.com/api/1.0/hist?date=…`, pick GCS download URLs for each of the three feeds | no |
-| 2 | `DownloadFileActivity` ×3 | HTTPS stream each `.pcap.gz` to `/storage/raw/` (resumable, short-circuits on existing file) | yes (heartbeat) |
-| 3 | `ParseAndWriteDplsActivity` | Java parser → 13 hypertables via JDBC `COPY` (DPLS feed only; idempotent pre-clean) | yes (heartbeat) |
-| 4 | `DplsDeepValidatorActivity` + `DplsTopsValidatorActivity` + `DeepTopsValidatorActivity` (parallel) | Triangle cross-validation: DPLS book ↔ DEEP price levels (100 %); DPLS / DEEP derived BBO vs TOPS Quote Updates (99.4 %) | yes |
-| 5 | `RecordValidationActivity` | Upsert the three validator results into `validation_runs`, classify run status | no |
-| 6 | `MaterializeOrderLifecycleActivity` | Pair Add ↔ Delete + last Execute per order_id into the `order_lifecycle` hypertable (one expensive JOIN amortized across all downstream scorers) | yes |
-| 7 | `ScoreEventsActivity` | Run the 7-scorer registry against parsed + materialized data, write to `scored_events` | yes |
-| 8 | `SelectTopEventsActivity` | Per-scorer top-N pull from `scored_events` into `selected_events` | no |
-| 9 | `NarrateEventsActivity` | Two-pass extract → render → pure-code grounding verify against `llama-large.joi`; cache by `event_hash`; write `narratives` | yes (heartbeat) |
-| 10 | `CleanupFilesActivity` | Delete the 3 `.pcap.gz` files (only when `runRetentionSweep=true AND status='passed'`) | no |
-| 11 | `RetentionSweepActivity` | `drop_chunks` older than 30 days from DPLS hypertables; per-row `DELETE` on shared TOPS-validation tables | no |
-| 12 | `PipelineRunRecorderActivity` (start/end) | Tag the run in `pipeline_runs` for replayability and the idempotency short-circuit | no |
+| # | Phase | Workflow | What it does | Parallelism |
+|---|---|---|---|---|
+| 1 | Download | `DownloadWorkflow` | Resolve 3 IEX HIST URLs + download 3 `.pcap.gz` files to `/storage/raw/` | 6 activities in parallel inside the child |
+| 2 | Parse | `ParseWorkflow` | DPLS .pcap.gz → 13 hypertables via JDBC COPY | sequential within child |
+| 2′ | Validate | `ValidateWorkflow` | Triangle cross-validation: DPLS book ↔ DEEP price levels (100 %); DPLS/DEEP derived BBO vs TOPS Quote Updates (99.4 %). Upserts `validation_runs`. | 3 validator legs in parallel inside the child; **runs in parallel with Parse from the orchestrator's POV** (validators read raw files, not DB) |
+| 3 | Score | `ScoreWorkflow` | Materialize `order_lifecycle` (one JOIN once per day) → run 7 scorers → select top-N | sequential |
+| 4 | Narrate | `NarrateWorkflow` | Two-pass LLM (extract → render) + pure-code grounding verify against `llama-large.joi`; cache by `event_hash`; write `narratives` | sequential today; per-event activity parallelism queued |
+| 5 | Cleanup | `CleanupWorkflow` | Delete the 3 `.pcap.gz` files (only on success) + `drop_chunks` older than 30 days | sequential |
 
-Two ancillary workflows on the same task queue:
+The orchestrator itself only retains direct activity calls for **cross-cutting metadata** — `PipelineRunRecorderActivity` for the idempotency short-circuit, run-start, and run-completion bookkeeping. These aren't a coherent phase; they thread through the orchestration and stay as direct activity calls.
+
+Ancillary workflows on the same task queue:
 
 - `RefreshSymbolsWorkflow` — weekly cron (Sun 02:00 ET, paused). Refreshes the `symbols` reference table from NASDAQ public listings + local IEX SecurityDirectory data. Read by `ScoreEventsActivity` to enrich event breakdown JSONs (company name, ETF flag, round lot, prev close) so the LLM narrator has structured per-ticker context.
+- `MaterializeWorkflow` / `SelectWorkflow` — ad-hoc replay entry points; DailyPipeline invokes the underlying activities via `ScoreWorkflow` rather than these.
 
-A failed validation flags the day's events as `unverified` rather than publishing them. Failed parse fails the workflow (no scoring/narration runs against incomplete data).
+A failed validation flags the day's events as `unverified` rather than publishing them. Failed parse short-circuits scoring + narration but doesn't fail the workflow (operators can re-run via `ScoreWorkflow` / `NarrateWorkflow` after fixing the underlying issue).
 
 ## Data layout
 

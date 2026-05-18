@@ -9,21 +9,34 @@ responsible for. Reflects what's actually running in `parser/src/main/java/com/l
 
 ## Workflows
 
-Seven workflows registered on task queue `long-exposure-daily-pipeline`:
+Ten workflows registered on task queue `long-exposure-daily-pipeline`. The orchestrator (`DailyPipelineWorkflow`) only calls child workflows + metadata bookkeeping activities — every phase is its own child workflow.
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `DailyPipelineWorkflow` | cron (midnight ET, paused) + ad-hoc | Top-level orchestrator. Resolves URLs, downloads 3 feeds, parses DPLS, then calls `ValidateWorkflow` + `ScoreWorkflow` + `NarrateWorkflow` as **child workflows**. Finishes with cleanup + retention. |
-| `ValidateWorkflow` | child of DailyPipeline + ad-hoc | Runs the 3 validators in parallel against pcap.gz files already on disk and upserts `validation_runs`. |
-| `MaterializeWorkflow` | ad-hoc only | Builds the `order_lifecycle` table for a date whose DPLS data is already in Postgres. Used for backfilling lifecycle data or after schema changes. (DailyPipeline invokes the materialize activity inline via `ScoreWorkflow`, not this workflow.) |
+| `DailyPipelineWorkflow` | cron (midnight ET, paused) + ad-hoc | Top-level orchestrator. Calls **only** child workflows + `PipelineRunRecorderActivity` for metadata. ~30 lines of orchestration logic. |
+| `DownloadWorkflow` | child of DailyPipeline + ad-hoc | Resolves 3 IEX HIST URLs + downloads 3 `.pcap.gz` files (all 6 ops in parallel). Throws `NotATradingDay` for weekends/holidays so the parent short-circuits. |
+| `ParseWorkflow` | child of DailyPipeline + ad-hoc | Parses the DPLS feed into 13 hypertables via JDBC COPY. Idempotent (pre-cleans by trading_date). |
+| `ValidateWorkflow` | child of DailyPipeline + ad-hoc | Runs the 3 validators in parallel and upserts `validation_runs`. Returns the per-leg result for the parent to record. |
+| `MaterializeWorkflow` | ad-hoc only | Builds the `order_lifecycle` table for a date whose DPLS data is already in Postgres. (DailyPipeline invokes the materialize step via `ScoreWorkflow`, not this workflow, but this exists for ad-hoc backfilling.) |
 | `ScoreWorkflow` | child of DailyPipeline + ad-hoc | Materialize lifecycle → run scoring → select top-N. |
 | `SelectWorkflow` | ad-hoc only | Just SelectTopEvents — pulls top-N from existing `scored_events` to `selected_events`. For iterating on per-scorer caps without re-scoring. |
 | `NarrateWorkflow` | child of DailyPipeline + ad-hoc | Two-pass extract → render → verify against the LLM. Writes `narratives`. |
-| `RefreshSymbolsWorkflow` | weekly cron (Sun 02:00 ET, paused) + ad-hoc | Refreshes the `symbols` reference table from NASDAQ public listings + local IEX SecurityDirectory data. Once-per-week is plenty; symbol metadata changes slowly. |
+| `CleanupWorkflow` | child of DailyPipeline + ad-hoc | Deletes the day's `.pcap.gz` files (only on success) + drops Postgres chunks older than the retention window. |
+| `RefreshSymbolsWorkflow` | weekly cron (Sun 02:00 ET, paused) + ad-hoc | Refreshes the `symbols` reference table from NASDAQ public listings + local IEX SecurityDirectory data. |
 
-**Composition model.** `DailyPipelineWorkflow` is the orchestrator. The Validate / Score / Narrate phases are owned by their own workflows, called as child workflows from `DailyPipelineWorkflow` via `Workflow.newChildWorkflowStub()`. This way the cron path and the ad-hoc developer-invoked path run the *identical code* for each phase — no duplicated wiring. Child workflow IDs are auto-generated (avoiding collisions with ad-hoc workflow IDs); `ParentClosePolicy=TERMINATE` ensures killing the parent cleanly cascades.
+**Composition model.**
 
-All share the same activity registry on a single task queue — only the orchestration logic differs.
+`DailyPipelineWorkflow` is *purely* orchestration — its `run()` body reads top-to-bottom as phase names (Download → Parse + Validate in parallel → Score → Narrate → Cleanup) with no embedded activity wiring. Each phase is owned by its child workflow, called via `Workflow.newChildWorkflowStub()`. This way:
+
+1. **No duplicated wiring** between the cron-driven path and ad-hoc developer-invoked paths. `ScoreWorkflow` is one workflow with one implementation; both paths run the identical code.
+2. **Each phase is independently invokable** for replay, backfill, or iterative development.
+3. **Each phase has its own retry semantics, history, and Temporal-UI visibility.**
+
+The only direct activity calls remaining in `DailyPipelineWorkflow` are `PipelineRunRecorderActivity.isAlreadyIngested()` / `startRun()` / `completeRun()` — cross-cutting metadata that threads through the orchestration (idempotency check fires first; row gets started at the beginning and updated at the end). Forcing these into a child workflow would invert the natural control flow without any benefit.
+
+Child workflow IDs are auto-generated (avoiding collisions with ad-hoc workflow IDs); `ParentClosePolicy=TERMINATE` ensures killing the parent cleanly cascades to in-flight children.
+
+All workflows share the same activity registry on a single task queue — only the orchestration logic differs.
 
 ---
 
@@ -538,8 +551,9 @@ short-circuits the workflow regardless of which leg threw it.
 | File | Role |
 |---|---|
 | `parser/src/main/java/com/longexposure/temporal/WorkerMain.java` | Worker bootstrap: connect to Temporal, register workflows + activities, register cron schedule (paused) |
-| `parser/src/main/java/com/longexposure/temporal/workflows/DailyPipelineWorkflow{,Impl,Input}.java` | Top-level orchestrator workflow |
-| `parser/src/main/java/com/longexposure/temporal/workflows/{Validate,Materialize,Score,Select,Narrate}Workflow{,Impl}.java` | Phase workflows — each owns one phase of the pipeline; called as child workflows from `DailyPipelineWorkflow` and as standalone entry points for ad-hoc developer invocation |
+| `parser/src/main/java/com/longexposure/temporal/workflows/DailyPipelineWorkflow{,Impl,Input}.java` | Top-level orchestrator. Pure orchestration logic — calls only child workflows + `PipelineRunRecorderActivity` for metadata. |
+| `parser/src/main/java/com/longexposure/temporal/workflows/{Download,Parse,Validate,Materialize,Score,Select,Narrate,Cleanup}Workflow{,Impl}.java` | Phase workflows — each owns one phase. Called as child workflows from `DailyPipelineWorkflow` and as standalone entry points for ad-hoc developer invocation. |
+| `parser/src/main/java/com/longexposure/temporal/workflows/{DownloadResult,DailyPipelineWorkflowInput,DownloadWorkflow.Input,ParseWorkflow.Input,CleanupWorkflow.Input}.java` | Records used as phase-workflow inputs/outputs |
 | `parser/src/main/java/com/longexposure/temporal/workflows/RefreshSymbolsWorkflow{,Impl}.java` | Weekly symbols-refresh workflow (separate cron) |
 | `parser/src/main/java/com/longexposure/temporal/activities/*.java` | 14 activity interfaces + impls |
 | `parser/src/main/resources/schema.sql` | `pipeline_runs` + `validation_runs` table DDL |

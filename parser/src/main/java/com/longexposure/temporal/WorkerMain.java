@@ -15,20 +15,18 @@ import com.longexposure.temporal.activities.ResolveUrlActivityImpl;
 import com.longexposure.temporal.activities.RetentionSweepActivityImpl;
 import com.longexposure.temporal.activities.ScoreEventsActivityImpl;
 import com.longexposure.temporal.activities.SelectTopEventsActivityImpl;
+import com.longexposure.temporal.workflows.CleanupWorkflowImpl;
 import com.longexposure.temporal.workflows.DailyPipelineWorkflow;
 import com.longexposure.temporal.workflows.DailyPipelineWorkflowImpl;
 import com.longexposure.temporal.workflows.DailyPipelineWorkflowInput;
-import com.longexposure.temporal.workflows.MaterializeWorkflow;
+import com.longexposure.temporal.workflows.DownloadWorkflowImpl;
 import com.longexposure.temporal.workflows.MaterializeWorkflowImpl;
-import com.longexposure.temporal.workflows.NarrateWorkflow;
 import com.longexposure.temporal.workflows.NarrateWorkflowImpl;
+import com.longexposure.temporal.workflows.ParseWorkflowImpl;
 import com.longexposure.temporal.workflows.RefreshSymbolsWorkflow;
 import com.longexposure.temporal.workflows.RefreshSymbolsWorkflowImpl;
-import com.longexposure.temporal.workflows.ScoreWorkflow;
 import com.longexposure.temporal.workflows.ScoreWorkflowImpl;
-import com.longexposure.temporal.workflows.SelectWorkflow;
 import com.longexposure.temporal.workflows.SelectWorkflowImpl;
-import com.longexposure.temporal.workflows.ValidateWorkflow;
 import com.longexposure.temporal.workflows.ValidateWorkflowImpl;
 import io.temporal.client.WorkflowClient;
 import io.temporal.client.schedules.Schedule;
@@ -90,11 +88,14 @@ public final class WorkerMain {
         Worker worker = factory.newWorker(DailyPipelineWorkflow.TASK_QUEUE);
         worker.registerWorkflowImplementationTypes(
                 DailyPipelineWorkflowImpl.class,
+                DownloadWorkflowImpl.class,
+                ParseWorkflowImpl.class,
                 ValidateWorkflowImpl.class,
                 MaterializeWorkflowImpl.class,
                 ScoreWorkflowImpl.class,
                 SelectWorkflowImpl.class,
                 NarrateWorkflowImpl.class,
+                CleanupWorkflowImpl.class,
                 RefreshSymbolsWorkflowImpl.class);
         worker.registerActivitiesImplementations(
                 new ResolveUrlActivityImpl(),
