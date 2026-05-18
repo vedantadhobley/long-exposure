@@ -43,6 +43,24 @@ docker compose -f docker-compose.yml restart api
 docker compose -f docker-compose.yml restart worker
 ```
 
+## Restart the whole dev stack (recover any stopped services)
+
+When iterating on a specific service (e.g. `docker compose ... up -d postgres worker` after a compose-file change), `up -d <service>` only starts the named services and their declared dependencies. Anything else that was already stopped — like `temporal-ui` or `adminer`, which aren't dependencies of `worker` — will remain stopped.
+
+To recover a clean dev stack with everything running, use the no-args form:
+
+```bash
+docker compose -f docker-compose.dev.yml up -d
+```
+
+This is idempotent: services that are already running keep running; only stopped/missing containers get started. Use it as the default "bring things back up" command after any targeted restart sequence. The full prod equivalent is `docker compose -f docker-compose.yml up -d`.
+
+Diagnose what's stopped vs running:
+
+```bash
+docker compose -f docker-compose.dev.yml ps -a   # -a includes stopped containers
+```
+
 ## Rebuild after a code change (prod stack)
 
 ```bash
