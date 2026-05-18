@@ -30,11 +30,13 @@ No HTTP API in this repo. The public `/api/long-exposure/*` routes are served by
 ## Where to look first
 
 - @README.md — public-facing project description (motivation, architecture, alternatives considered, protocol notes)
+- @docs/concepts.md — **conceptual primer**: order books, what IEX data does and doesn't show, the 4-layer pipeline (raw → patterns → narrated → synthesis), current methodology, and improvements lined up. Start here if you don't already know what an order book is or what events look like at each layer.
 - @docs/architecture.md — service layout + data flow diagram
 - @docs/plan.md — sprint-by-sprint build plan with current progress (was 22-day plan; compressed substantially)
 - @docs/todo.md — active checklist; **paste-ready start-of-session block at the top**
 - @docs/decisions.md — append-only log of architectural decisions
 - @docs/scoring-and-narration.md — design reference for the EventScorer + LLM prompt engineering (DEEP+ pattern catalog, narration grounding rules, output structure)
+- @docs/temporal-design.md — workflow + activity layout (Mermaid diagrams, retry policies)
 - @docs/protocol-notes.md — IEX-TP + TOPS + DEEP+ spec notes, parser gotchas
 - @docs/operations.md — runbook (bring-up, restart, schema refresh, replay a day)
 - @deploy/INFRA-NOTES.md — Caddyfile entries + vedanta-systems wiring needed outside this repo
