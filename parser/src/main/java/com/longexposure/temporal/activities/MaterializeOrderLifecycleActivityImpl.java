@@ -56,6 +56,30 @@ public final class MaterializeOrderLifecycleActivityImpl implements MaterializeO
             // actually allocate that much unless every worker fills its
             // budget, which it won't for a single JOIN). Survives only
             // for this transaction.
+            // Idempotency-skip: if order_lifecycle already has rows for
+            // this date, the previous materialize succeeded and there's
+            // no benefit to redoing it. Production cron always starts
+            // with 0 lifecycle rows (fresh parse + first materialize),
+            // so the skip is harmless there; dev re-runs save 50 min.
+            currentStage.set("idempotency_check");
+            long existing;
+            try (PreparedStatement st = conn.prepareStatement(
+                    "SELECT COUNT(*) FROM order_lifecycle WHERE trading_date = ? LIMIT 1")) {
+                st.setObject(1, tradingDate);
+                try (java.sql.ResultSet rs = st.executeQuery()) {
+                    rs.next();
+                    existing = rs.getLong(1);
+                }
+            }
+            if (existing > 0) {
+                LOG.info("materialize skip  date={} reason=already_populated rows_present={}",
+                        tradingDate, existing);
+                long elapsedMs = (System.nanoTime() - t0) / 1_000_000L;
+                LOG.info("materialize done  date={} rows_written={} elapsed_ms={} (skipped)",
+                        tradingDate, existing, elapsedMs);
+                return existing;
+            }
+
             try (Statement st = conn.createStatement()) {
                 st.execute("SET work_mem = '4GB'");
                 st.execute("SET max_parallel_workers_per_gather = 16");

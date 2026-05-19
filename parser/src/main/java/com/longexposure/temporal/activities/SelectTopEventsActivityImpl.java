@@ -8,43 +8,51 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.time.LocalDate;
-import java.util.LinkedHashMap;
-import java.util.Map;
 
 public final class SelectTopEventsActivityImpl implements SelectTopEventsActivity {
 
     private static final Logger LOG = LoggerFactory.getLogger(SelectTopEventsActivityImpl.class);
 
     /**
-     * Per-scorer top-N caps. LinkedHashMap so log output is deterministic.
+     * Selection rule: percentile rank within each scorer's daily events,
+     * with a floor and ceiling on count. For each scorer:
      *
-     * <p>v1 starting points — informed by the 2026-05-08 scored_events
-     * counts. Halts (105 raw) and large trades (149 raw) are inherently
-     * narratable so we keep most. Pattern scorers fire 73K-343K raw
-     * events; even the top 10 each are likely the genuinely-notable
-     * ones with the rest being noise.
+     * <pre>
+     *   selected_count = clamp(
+     *       round(PERCENTILE_TOP * scorer_event_count),
+     *       PER_SCORER_FLOOR,
+     *       PER_SCORER_CEILING
+     *   )
+     * </pre>
+     *
+     * <p>Then we take the top-N events of that scorer by score
+     * descending. The percentile is a "what fraction of this scorer's
+     * events deserve narration" knob; floor + ceiling bound the count
+     * on tiny-distribution and huge-distribution scorers respectively.
+     *
+     * <p>Why percentile-of-rank instead of percentile-of-score: scores
+     * have wildly different distributions across scorers (linear for
+     * halt, log-scale for large_trade, multiplicative for pattern
+     * scorers). Rank percentile is scorer-agnostic.
+     *
+     * <p>v1 numbers picked to produce ~100-200 narrations/day on the
+     * 2026-05-08 reference set. Tune by observation; this is one of
+     * the few hardcoded knobs the project deliberately retains.
      */
-    private static final Map<String, Integer> PER_SCORER_CAPS = new LinkedHashMap<>();
-    static {
-        PER_SCORER_CAPS.put("halt",                  20);
-        PER_SCORER_CAPS.put("large_trade",           20);
-        PER_SCORER_CAPS.put("sweep",                 10);
-        PER_SCORER_CAPS.put("post_cancel_cluster",   10);
-        PER_SCORER_CAPS.put("layering",              10);
-        PER_SCORER_CAPS.put("iceberg",               10);
-        PER_SCORER_CAPS.put("liquidity_withdrawal",  10);
-    }
+    private static final double PERCENTILE_TOP    = 0.05;   // top 5% by rank
+    private static final int    PER_SCORER_FLOOR  = 1;      // never drop a scorer's top
+    private static final int    PER_SCORER_CEILING = 30;    // never let a scorer dominate
 
     @Override
     public long selectTopEvents(final LocalDate tradingDate) {
-        LOG.info("select start  date={}", tradingDate);
+        LOG.info("select start  date={} percentile_top={} floor={} ceiling={}",
+                tradingDate, PERCENTILE_TOP, PER_SCORER_FLOOR, PER_SCORER_CEILING);
 
-        long total = 0;
+        long total;
         try (Connection conn = openConnection()) {
             SchemaManager.apply(conn);
             conn.setAutoCommit(false);
 
-            // Pre-clean
             try (PreparedStatement st = conn.prepareStatement(
                     "DELETE FROM selected_events WHERE trading_date = ?")) {
                 st.setObject(1, tradingDate);
@@ -53,12 +61,7 @@ public final class SelectTopEventsActivityImpl implements SelectTopEventsActivit
             }
             conn.commit();
 
-            // Per-scorer INSERT ... SELECT ... LIMIT N
-            for (Map.Entry<String, Integer> entry : PER_SCORER_CAPS.entrySet()) {
-                long n = insertTopForScorer(conn, tradingDate, entry.getKey(), entry.getValue());
-                LOG.info("selected  scorer={} cap={} rows={}", entry.getKey(), entry.getValue(), n);
-                total += n;
-            }
+            total = insertSelected(conn, tradingDate);
             conn.commit();
         } catch (Exception e) {
             throw new RuntimeException("selectTopEvents failed for date=" + tradingDate, e);
@@ -68,29 +71,63 @@ public final class SelectTopEventsActivityImpl implements SelectTopEventsActivit
         return total;
     }
 
-    private long insertTopForScorer(final Connection conn,
-                                    final LocalDate tradingDate,
-                                    final String scorerId,
-                                    final int cap) throws Exception {
+    /**
+     * Single SQL pass that:
+     * <ol>
+     *   <li>Filters {@code scored_events} for the date, excluding subsumed
+     *       constituents (those are already represented by a
+     *       {@code combined} row).
+     *   <li>Ranks events within each scorer by score descending.
+     *   <li>Computes each scorer's selection budget as
+     *       {@code clamp(round(percentile × count), floor, ceiling)}.
+     *   <li>Selects rows whose rank is within their scorer's budget.
+     * </ol>
+     *
+     * <p>The CTE chain reads top-to-bottom as the rule.
+     */
+    private long insertSelected(final Connection conn, final LocalDate date) throws Exception {
         String sql = """
+                WITH scoped AS (
+                    -- All non-subsumed events for the date. Subsumed
+                    -- constituents are already represented by their
+                    -- 'combined' parent row.
+                    SELECT event_id, trading_date, symbol, ts, ts_end, scorer_id,
+                           score, breakdown, source_refs
+                    FROM scored_events
+                    WHERE trading_date = ?
+                      AND subsumed_by_event_id IS NULL
+                ),
+                ranked AS (
+                    SELECT s.*,
+                           row_number() OVER (PARTITION BY scorer_id ORDER BY score DESC, ts) AS rk,
+                           count(*)    OVER (PARTITION BY scorer_id) AS scorer_count
+                    FROM scoped s
+                ),
+                budgeted AS (
+                    -- Compute per-scorer budget = clamp(round(p × count), floor, ceiling)
+                    SELECT *,
+                           GREATEST(?, LEAST(?, CEIL(? * scorer_count)::int)) AS scorer_budget
+                    FROM ranked
+                ),
+                qualifying AS (
+                    SELECT *
+                    FROM budgeted
+                    WHERE rk <= scorer_budget
+                )
                 INSERT INTO selected_events (
                     event_id, trading_date, symbol, ts, ts_end, scorer_id,
                     score, breakdown, source_refs, narration_rank
                 )
-                SELECT
-                    event_id, trading_date, symbol, ts, ts_end, scorer_id,
-                    score, breakdown, source_refs,
-                    row_number() OVER (ORDER BY score DESC, ts) AS narration_rank
-                FROM scored_events
-                WHERE trading_date = ?
-                  AND scorer_id    = ?
-                ORDER BY score DESC, ts
-                LIMIT ?
+                SELECT event_id, trading_date, symbol, ts, ts_end, scorer_id,
+                       score, breakdown, source_refs, rk AS narration_rank
+                FROM qualifying
+                ORDER BY scorer_id, rk
                 """;
         try (PreparedStatement st = conn.prepareStatement(sql)) {
-            st.setObject(1, tradingDate);
-            st.setString(2, scorerId);
-            st.setInt(3, cap);
+            st.setObject(1, date);
+            st.setInt(2, PER_SCORER_FLOOR);
+            st.setInt(3, PER_SCORER_CEILING);
+            st.setDouble(4, PERCENTILE_TOP);
             return st.executeLargeUpdate();
         }
     }

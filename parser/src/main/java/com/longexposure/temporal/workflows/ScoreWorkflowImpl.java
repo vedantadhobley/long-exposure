@@ -38,6 +38,17 @@ public final class ScoreWorkflowImpl implements ScoreWorkflow {
                     .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(2).build())
                     .build());
 
+    // NOTE: Cross-event linking (combine) is disabled as of 2026-05-19.
+    // The interval-overlap rule produced clusters dominated by nested
+    // events (e.g., post_cancel/layering events occurring INSIDE long
+    // liquidity_withdrawal intervals), yielding 28-36-constituent
+    // combined events whose narrations were awkward and broke the
+    // verifier (nested breakdowns the verifier couldn't resolve).
+    // The CombineRelatedEventsActivity + CombineWorkflow remain in the
+    // codebase for future iteration on a smarter combining rule
+    // (e.g., time-scale-aware, or absorbed-vs-adjacent distinction).
+    // See docs/decisions.md.
+
     @Override
     public long run(final LocalDate date) {
         LOG.info("score start  date={}", date);

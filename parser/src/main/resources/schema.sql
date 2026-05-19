@@ -479,22 +479,32 @@ CREATE INDEX IF NOT EXISTS order_lifecycle_order_id_idx
 -- LLM narrator: every claim in narration must trace to a field here.
 
 CREATE TABLE IF NOT EXISTS scored_events (
-    event_id           BIGSERIAL        PRIMARY KEY,
-    trading_date       DATE             NOT NULL,
-    symbol             TEXT             NOT NULL,
-    ts                 TIMESTAMPTZ      NOT NULL,
-    ts_end             TIMESTAMPTZ,                       -- null for instantaneous events
-    scorer_id          TEXT             NOT NULL,          -- 'halt' | 'large_trade' | 'sweep' | ...
-    score              DOUBLE PRECISION NOT NULL,
-    breakdown          JSONB            NOT NULL,          -- transparency: facts the narrator can use
-    source_refs        JSONB            NOT NULL,          -- array of {"table":..., "ts_nanos":...}
-    scored_at          TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
-    pipeline_run       UUID                                -- nullable; ties to pipeline_runs.run_id
+    event_id              BIGSERIAL        PRIMARY KEY,
+    trading_date          DATE             NOT NULL,
+    symbol                TEXT             NOT NULL,
+    ts                    TIMESTAMPTZ      NOT NULL,
+    ts_end                TIMESTAMPTZ,                       -- null for instantaneous events
+    scorer_id             TEXT             NOT NULL,          -- 'halt' | 'large_trade' | 'sweep' | 'combined' | ...
+    score                 DOUBLE PRECISION NOT NULL,
+    breakdown             JSONB            NOT NULL,          -- transparency: facts the narrator can use
+    source_refs           JSONB            NOT NULL,          -- array of {"table":..., "ts_nanos":...}
+    scored_at             TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
+    pipeline_run          UUID,                               -- nullable; ties to pipeline_runs.run_id
+    subsumed_by_event_id  BIGINT                              -- nullable; set on constituent rows when a
+                                                              -- 'combined' row references them. Selection
+                                                              -- filters these out so we don't double-count.
 );
 
 CREATE INDEX IF NOT EXISTS scored_events_date_score_idx ON scored_events (trading_date, score DESC);
 CREATE INDEX IF NOT EXISTS scored_events_symbol_idx     ON scored_events (symbol, ts DESC);
 CREATE INDEX IF NOT EXISTS scored_events_scorer_idx     ON scored_events (scorer_id, trading_date);
+CREATE INDEX IF NOT EXISTS scored_events_subsumed_idx   ON scored_events (subsumed_by_event_id)
+    WHERE subsumed_by_event_id IS NOT NULL;
+
+-- Existing dev/prod DBs need the new column added; the production path is one-time:
+--   ALTER TABLE scored_events ADD COLUMN IF NOT EXISTS subsumed_by_event_id BIGINT;
+-- Worker startup's SchemaManager.apply() doesn't run ALTERs, only CREATE IF NOT EXISTS.
+-- Applied manually for 2026-05-08 dev state.
 
 -- ─── Selected events (narration-eligible subset of scored_events) ────────────
 -- Written by SelectTopEventsActivity after ScoreEventsActivity. Per-scorer

@@ -8,6 +8,7 @@ import com.longexposure.temporal.activities.DplsTopsValidatorActivityImpl;
 import com.longexposure.temporal.activities.MaterializeOrderLifecycleActivityImpl;
 import com.longexposure.temporal.activities.ParseAndWriteDplsActivityImpl;
 import com.longexposure.temporal.activities.PipelineRunRecorderActivityImpl;
+import com.longexposure.temporal.activities.CombineRelatedEventsActivityImpl;
 import com.longexposure.temporal.activities.ListSelectedEventsActivityImpl;
 import com.longexposure.temporal.activities.NarrateEventActivityImpl;
 import com.longexposure.temporal.activities.RecordValidationActivityImpl;
@@ -17,6 +18,7 @@ import com.longexposure.temporal.activities.RetentionSweepActivityImpl;
 import com.longexposure.temporal.activities.ScoreEventsActivityImpl;
 import com.longexposure.temporal.activities.SelectTopEventsActivityImpl;
 import com.longexposure.temporal.workflows.CleanupWorkflowImpl;
+import com.longexposure.temporal.workflows.CombineWorkflowImpl;
 import com.longexposure.temporal.workflows.DailyPipelineWorkflow;
 import com.longexposure.temporal.workflows.DailyPipelineWorkflowImpl;
 import com.longexposure.temporal.workflows.DailyPipelineWorkflowInput;
@@ -98,6 +100,7 @@ public final class WorkerMain {
                 ValidateWorkflowImpl.class,
                 MaterializeWorkflowImpl.class,
                 ScoreWorkflowImpl.class,
+                CombineWorkflowImpl.class,
                 SelectWorkflowImpl.class,
                 NarrateWorkflowImpl.class,
                 CleanupWorkflowImpl.class,
@@ -112,6 +115,7 @@ public final class WorkerMain {
                 new RecordValidationActivityImpl(),
                 new MaterializeOrderLifecycleActivityImpl(),
                 new ScoreEventsActivityImpl(),
+                new CombineRelatedEventsActivityImpl(),
                 new SelectTopEventsActivityImpl(),
                 new ListSelectedEventsActivityImpl(),
                 new CleanupFilesActivityImpl(),
