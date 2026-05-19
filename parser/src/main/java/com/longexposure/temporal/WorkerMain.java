@@ -8,7 +8,8 @@ import com.longexposure.temporal.activities.DplsTopsValidatorActivityImpl;
 import com.longexposure.temporal.activities.MaterializeOrderLifecycleActivityImpl;
 import com.longexposure.temporal.activities.ParseAndWriteDplsActivityImpl;
 import com.longexposure.temporal.activities.PipelineRunRecorderActivityImpl;
-import com.longexposure.temporal.activities.NarrateEventsActivityImpl;
+import com.longexposure.temporal.activities.ListSelectedEventsActivityImpl;
+import com.longexposure.temporal.activities.NarrateEventActivityImpl;
 import com.longexposure.temporal.activities.RecordValidationActivityImpl;
 import com.longexposure.temporal.activities.RefreshSymbolMetadataActivityImpl;
 import com.longexposure.temporal.activities.ResolveUrlActivityImpl;
@@ -85,6 +86,10 @@ public final class WorkerMain {
         WorkflowClient client = WorkflowClient.newInstance(service);
         WorkerFactory factory = WorkerFactory.newInstance(client);
 
+        // Main worker: everything except the LLM-bound narration activity.
+        // Uses Temporal's default concurrency (200 activity slots), which
+        // is fine because none of these activities saturate a shared
+        // bottleneck.
         Worker worker = factory.newWorker(DailyPipelineWorkflow.TASK_QUEUE);
         worker.registerWorkflowImplementationTypes(
                 DailyPipelineWorkflowImpl.class,
@@ -108,14 +113,31 @@ public final class WorkerMain {
                 new MaterializeOrderLifecycleActivityImpl(),
                 new ScoreEventsActivityImpl(),
                 new SelectTopEventsActivityImpl(),
-                new NarrateEventsActivityImpl(),
+                new ListSelectedEventsActivityImpl(),
                 new CleanupFilesActivityImpl(),
                 new RetentionSweepActivityImpl(),
                 new PipelineRunRecorderActivityImpl(),
                 new RefreshSymbolMetadataActivityImpl());
 
+        // Dedicated narration worker: a second worker pool on a separate
+        // task queue with max concurrent execution = 2. Caps LLM
+        // concurrency at the Temporal-dispatch level so when
+        // NarrateWorkflow fans out 90 activities, only 2 are pulled
+        // into local execution; the other 88 sit in Temporal's queue
+        // and their start-to-close timer doesn't begin until they're
+        // actually dispatched. The LlamaClient JVM-wide Semaphore(2)
+        // remains as second-line defense.
+        Worker narrationWorker = factory.newWorker(
+                DailyPipelineWorkflow.NARRATION_TASK_QUEUE,
+                io.temporal.worker.WorkerOptions.newBuilder()
+                        .setMaxConcurrentActivityExecutionSize(2)
+                        .build());
+        narrationWorker.registerActivitiesImplementations(new NarrateEventActivityImpl());
+
         factory.start();
-        LOG.info("worker started  task_queue={}", DailyPipelineWorkflow.TASK_QUEUE);
+        LOG.info("workers started  main_queue={} narration_queue={} narration_concurrency=2",
+                DailyPipelineWorkflow.TASK_QUEUE,
+                DailyPipelineWorkflow.NARRATION_TASK_QUEUE);
 
         // Schedule registration is best-effort: if it fails, the worker
         // still runs and ad-hoc executions work.

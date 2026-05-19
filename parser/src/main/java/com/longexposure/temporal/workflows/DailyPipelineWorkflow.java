@@ -21,8 +21,20 @@ import io.temporal.workflow.WorkflowMethod;
 @WorkflowInterface
 public interface DailyPipelineWorkflow {
 
-    /** Task queue this workflow + its activities are registered on. */
+    /** Task queue this workflow + most of its activities are registered on. */
     String TASK_QUEUE = "long-exposure-daily-pipeline";
+
+    /**
+     * Dedicated task queue for LLM-bound activities (currently just
+     * {@code NarrateEventActivity}). Has its own worker pool with
+     * {@code setMaxConcurrentActivityExecutionSize(2)} so the
+     * single-GPU {@code llama-large.joi} sees at most 2 concurrent
+     * inference requests. Separated from the main pipeline queue so
+     * heavy workflow fan-outs ({@code NarrateWorkflow} fires 90
+     * activities) don't tie up worker threads — the surplus sits in
+     * Temporal's queue until a slot is free.
+     */
+    String NARRATION_TASK_QUEUE = "long-exposure-narration";
 
     /** Workflow ID prefix; full ID is {@code daily-pipeline-{trading_date}}. */
     String WORKFLOW_ID_PREFIX = "daily-pipeline-";
