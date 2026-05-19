@@ -16,25 +16,41 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Narration workflow. Reads the day's {@code selected_events}, fans
- * out one {@link NarrateEventActivity} invocation per event, and
- * waits for all of them.
+ * Narration workflow. Reads the day's {@code selected_events} and
+ * processes them through a sliding-window of at most
+ * {@link #MAX_IN_FLIGHT} activities at any given moment. Matches the
+ * spin-cycle Python project's workflow-side {@code asyncio.Semaphore}
+ * pattern.
  *
- * <p>Effective concurrency comes from the worker config —
- * {@code setMaxConcurrentActivityExecutionSize(2)} on the
- * {@code NarrateEventActivity} type — not from the workflow code.
- * The workflow can fire 90 activities; Temporal dispatches at most
- * 2 simultaneously to the worker. The {@link com.longexposure.llm.LlamaClient}
- * semaphore is the JVM-level physical guard.
+ * <p>Three layers of concurrency control, defense-in-depth:
+ * <ol>
+ *   <li><b>Workflow-side sliding window</b> (this class): the workflow
+ *       blocks on {@code Promise.anyOf(inFlight).get()} before dispatching
+ *       the next activity, so Temporal only sees ~{@link #MAX_IN_FLIGHT}
+ *       activities scheduled at any moment. Keeps the Temporal UI clean.
+ *   <li><b>Worker-side cap</b> ({@code setMaxConcurrentActivityExecutionSize(2)}
+ *       on the {@link DailyPipelineWorkflow#NARRATION_TASK_QUEUE} worker):
+ *       even if the workflow's window grew, the worker pulls at most 2
+ *       activities into local execution.
+ *   <li><b>JVM-side semaphore</b> ({@code Semaphore(2, fair)} inside
+ *       {@link com.longexposure.llm.LlamaClient}): hard physical guard
+ *       around the GPU. Engages regardless of how the activities got
+ *       there.
+ * </ol>
  *
- * <p>The selected-event lookup is done via a non-Temporal local query
- * inside the workflow's initial query step (NOT a workflow activity).
- * Actually scratch that — workflow code can't do JDBC. We pull the
- * list of selected_ids via a separate small activity.
+ * <p>The selected-event id list comes from a tiny
+ * {@link ListSelectedEventsActivity} — workflow code can't touch JDBC,
+ * so even sub-second SQL goes through an activity.
  */
 public final class NarrateWorkflowImpl implements NarrateWorkflow {
 
     private static final Logger LOG = Workflow.getLogger(NarrateWorkflowImpl.class);
+
+    /**
+     * Max activities the workflow has in flight at any one moment.
+     * Matches the worker-side cap, so the workflow doesn't overshoot.
+     */
+    private static final int MAX_IN_FLIGHT = 2;
 
     private final NarrateEventActivity narrate = Workflow.newActivityStub(
             NarrateEventActivity.class,
@@ -78,23 +94,35 @@ public final class NarrateWorkflowImpl implements NarrateWorkflow {
         LOG.info("narrate start  date={}", date);
 
         List<Long> selectedIds = lister.list(date);
-        LOG.info("fan out  date={} events={}", date, selectedIds.size());
+        LOG.info("fan out (windowed, max_in_flight={})  date={} events={}",
+                MAX_IN_FLIGHT, date, selectedIds.size());
 
-        // Fan out: one activity invocation per event. Worker concurrency
-        // cap (set in WorkerMain via setMaxConcurrentActivityExecutionSize)
-        // throttles to 2 in flight regardless of how many we fire here.
-        List<Promise<Long>> promises = new ArrayList<>(selectedIds.size());
+        // Sliding-window dispatch: at any moment, at most MAX_IN_FLIGHT
+        // activities are scheduled/running. The workflow holds back the
+        // rest until a slot frees up. This keeps the Temporal UI showing
+        // ~2 activities at a time rather than all 164 scheduled at once.
+        List<Promise<Long>> all = new ArrayList<>(selectedIds.size());
+        List<Promise<Long>> inFlight = new ArrayList<>(MAX_IN_FLIGHT);
+
         for (Long selectedId : selectedIds) {
-            promises.add(Async.function(narrate::narrate, date, selectedId));
+            while (inFlight.size() >= MAX_IN_FLIGHT) {
+                // Block until any in-flight activity completes. Promise.anyOf
+                // returns a promise of the index of the first completed input;
+                // we just need to wait, then prune completed ones.
+                Promise.anyOf(inFlight.toArray(new Promise[0])).get();
+                inFlight.removeIf(Promise::isCompleted);
+            }
+            Promise<Long> p = Async.function(narrate::narrate, date, selectedId);
+            all.add(p);
+            inFlight.add(p);
         }
 
-        // Wait for all. Each activity has its own retry; tolerate
-        // individual failures so one bad event doesn't kill the run.
+        // Drain remaining in-flight activities + collect outcomes
         long narrated = 0;
         long failed = 0;
-        for (int i = 0; i < promises.size(); i++) {
+        for (int i = 0; i < all.size(); i++) {
             try {
-                narrated += promises.get(i).get();
+                narrated += all.get(i).get();
             } catch (ActivityFailure af) {
                 failed++;
                 LOG.warn("event narration exhausted retries  selected_id={} err={}",
