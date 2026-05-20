@@ -31,8 +31,8 @@ The seven scorers — halt, large_trade, sweep, post_cancel_cluster, layering, i
 
 ### Immediate (in order)
 
-1. **Co-occurrence enrichment** (~2 hr) — `EnrichWithCoOccurrenceActivity` slots between Score and Select. For each scored event in a parent's interval, query co-occurring same-symbol other-scorer events and merge summary stats into the parent's `breakdown.co_occurring` block. Mark children with `subsumed_by_event_id`. Solves the "nested signals inside signals" problem deterministically without any time-window knob. See "Scoring + narration roadmap" section below for details.
-2. **Delete the retired combining code** (~10 min) — `CombineRelatedEventsActivity[Impl]`, `CombineWorkflow[Impl]`, WorkerMain registrations. `subsumed_by_event_id` column stays (reused by enrichment).
+1. ✅ **Co-occurrence enrichment** (2 hr — done 2026-05-20) — `EnrichWithCoOccurrenceActivity` slots between Score and Select. For each scored event in a parent's interval, queries co-occurring same-symbol other-scorer events and merges summary stats into the parent's `breakdown.co_occurring` block. Marks children with `subsumed_by_event_id`. Validated on 2026-05-08: 164 candidates identified, **80 enriched** parents (absorbed 2 443 nested children); IWM 14:00 withdrawal absorbed 52 children (26 post_cancel, 25 layering, 1 sweep). Selection unchanged at 164.
+2. ✅ **Delete the retired combining code** (done 2026-05-20) — `CombineRelatedEventsActivity[Impl]`, `CombineWorkflow[Impl]` files removed. WorkerMain registrations cleaned. `subsumed_by_event_id` column stays (reused by enrichment).
 3. **Layer 3 daily synthesis** (~half day) — `SynthesizeDayWorkflow` reads the day's narrations + day metadata, produces a "today's themes" paragraph. Handles same-symbol same-scorer repetition (the TQQQ-bursts pattern) dynamically — the LLM judges what's worth threading into the day-level story, no hardcoded gap thresholds.
 
 ### Next session (after the above settles)
@@ -332,7 +332,7 @@ The wrong abstraction is "combine overlapping events into one richer event" (we 
 
   **No knob for time-window.** Parent's own `[ts, ts_end]` defines the lookup window. **Cross-scorer only** — a sweep doesn't enrich with sweeps on the same symbol (that's the repetition problem, not the nesting problem). **Idempotent**: pre-clean by trading_date.
 
-- [ ] **Delete the retired combine code** — `CombineRelatedEventsActivity[Impl]`, `CombineWorkflow[Impl]`, and their WorkerMain registrations. `subsumed_by_event_id` column stays (used by enrichment).
+- [x] **Delete the retired combine code** (done 2026-05-20) — `CombineRelatedEventsActivity[Impl]`, `CombineWorkflow[Impl]` files removed. WorkerMain registrations cleaned. `subsumed_by_event_id` column stays (used by enrichment).
 
 - [ ] **Verifier check** — confirm `GroundingVerifier.appendAllValues()` recurses into the `co_occurring` object so numbers like "28" and "413" are in the haystack. Should work without changes; add a test case.
 
