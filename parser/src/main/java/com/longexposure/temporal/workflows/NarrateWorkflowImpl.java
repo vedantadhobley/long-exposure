@@ -106,10 +106,19 @@ public final class NarrateWorkflowImpl implements NarrateWorkflow {
 
         for (Long selectedId : selectedIds) {
             while (inFlight.size() >= MAX_IN_FLIGHT) {
-                // Block until any in-flight activity completes. Promise.anyOf
-                // returns a promise of the index of the first completed input;
-                // we just need to wait, then prune completed ones.
-                Promise.anyOf(inFlight.toArray(new Promise[0])).get();
+                // Block until any in-flight activity completes. Wrap .get()
+                // in try/catch — Promise.anyOf().get() rethrows whatever
+                // exception the first-completing promise carries, which
+                // would kill the whole workflow on a single LLM hiccup.
+                // We just need to detect "something completed" to move the
+                // dispatch loop forward; per-event outcome is captured in
+                // the drain loop below where we have proper try/catch.
+                try {
+                    Promise.anyOf(inFlight.toArray(new Promise[0])).get();
+                } catch (Exception ignored) {
+                    // An in-flight activity failed; that's fine here —
+                    // its error gets logged in the drain loop.
+                }
                 inFlight.removeIf(Promise::isCompleted);
             }
             Promise<Long> p = Async.function(narrate::narrate, date, selectedId);
