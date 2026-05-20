@@ -71,14 +71,16 @@ public final class GroundingVerifier {
     public Result verify(final String prose, final JsonNode blueprint, final JsonNode breakdown) {
         List<String> mismatches = new ArrayList<>();
 
-        // Layer 1: every key_number.source_field must exist in breakdown
+        // Layer 1: every key_number.source_field must exist in breakdown.
+        // Supports dotted paths (e.g. "co_occurring.during_event.post_cancel_cluster.sum_total_shares")
+        // so enrichment-derived numbers can be cited by their nested location.
         JsonNode keyNumbers = blueprint.path("key_numbers");
         if (keyNumbers.isArray()) {
             for (JsonNode kn : keyNumbers) {
                 String src = kn.path("source_field").asText("");
                 if (src.isEmpty()) {
                     mismatches.add("blueprint key_number missing source_field: " + kn);
-                } else if (!breakdown.has(src)) {
+                } else if (!hasPath(breakdown, src)) {
                     mismatches.add("blueprint key_number source_field=\"" + src + "\" not present in breakdown");
                 }
             }
@@ -126,6 +128,29 @@ public final class GroundingVerifier {
 
         boolean passed = mismatches.isEmpty();
         return new Result(passed, mismatches, proseNumbers.size());
+    }
+
+    /**
+     * Resolve a dotted path against a JSON object. Returns true iff every
+     * segment exists and the leaf is a non-null value.
+     *
+     * <p>Examples (with the breakdown JSON above an enriched
+     * liquidity_withdrawal):
+     * <ul>
+     *   <li>{@code "deletes"} → true (top-level key)
+     *   <li>{@code "co_occurring.during_event.post_cancel_cluster.sum_total_shares"} → true
+     *   <li>{@code "co_occurring.during_event.iceberg.count"} → false (iceberg subkey absent)
+     * </ul>
+     */
+    static boolean hasPath(final JsonNode root, final String dotted) {
+        if (root == null || root.isNull() || dotted == null || dotted.isEmpty()) return false;
+        JsonNode cur = root;
+        for (String seg : dotted.split("\\.")) {
+            if (cur == null || cur.isNull() || !cur.isObject()) return false;
+            if (!cur.has(seg)) return false;
+            cur = cur.get(seg);
+        }
+        return cur != null && !cur.isNull();
     }
 
     /** Find every number-token in the haystack and canonicalize each. */
