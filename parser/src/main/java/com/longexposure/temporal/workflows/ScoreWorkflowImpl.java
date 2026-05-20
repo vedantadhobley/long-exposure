@@ -1,5 +1,6 @@
 package com.longexposure.temporal.workflows;
 
+import com.longexposure.temporal.activities.EnrichWithCoOccurrenceActivity;
 import com.longexposure.temporal.activities.MaterializeOrderLifecycleActivity;
 import com.longexposure.temporal.activities.ScoreEventsActivity;
 import com.longexposure.temporal.activities.SelectTopEventsActivity;
@@ -31,6 +32,16 @@ public final class ScoreWorkflowImpl implements ScoreWorkflow {
                     .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(1).build())
                     .build());
 
+    private final EnrichWithCoOccurrenceActivity enrich = Workflow.newActivityStub(
+            EnrichWithCoOccurrenceActivity.class,
+            ActivityOptions.newBuilder()
+                    // Per-symbol nested-interval lookup for the top
+                    // candidates. Even 1000 candidates × ~10ms each
+                    // would finish well within the budget.
+                    .setStartToCloseTimeout(Duration.ofMinutes(15))
+                    .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(2).build())
+                    .build());
+
     private final SelectTopEventsActivity selectTopEvents = Workflow.newActivityStub(
             SelectTopEventsActivity.class,
             ActivityOptions.newBuilder()
@@ -38,26 +49,17 @@ public final class ScoreWorkflowImpl implements ScoreWorkflow {
                     .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(2).build())
                     .build());
 
-    // NOTE: Cross-event linking (combine) is disabled as of 2026-05-19.
-    // The interval-overlap rule produced clusters dominated by nested
-    // events (e.g., post_cancel/layering events occurring INSIDE long
-    // liquidity_withdrawal intervals), yielding 28-36-constituent
-    // combined events whose narrations were awkward and broke the
-    // verifier (nested breakdowns the verifier couldn't resolve).
-    // The CombineRelatedEventsActivity + CombineWorkflow remain in the
-    // codebase for future iteration on a smarter combining rule
-    // (e.g., time-scale-aware, or absorbed-vs-adjacent distinction).
-    // See docs/decisions.md.
-
     @Override
     public long run(final LocalDate date) {
         LOG.info("score start  date={}", date);
         long materialized = materialize.materializeOrderLifecycle(date);
         LOG.info("order_lifecycle materialized  date={} rows={}", date, materialized);
         long scored = scoreEvents.scoreEvents(date, null);
+        long enriched = enrich.enrichWithCoOccurrence(date);
+        LOG.info("co-occurrence enrichment done  date={} parents_enriched={}", date, enriched);
         long selected = selectTopEvents.selectTopEvents(date);
-        LOG.info("score done  date={} lifecycle={} scored_events={} selected_events={}",
-                date, materialized, scored, selected);
+        LOG.info("score done  date={} lifecycle={} scored_events={} enriched={} selected_events={}",
+                date, materialized, scored, enriched, selected);
         return scored;
     }
 }

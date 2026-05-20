@@ -9,6 +9,7 @@ import com.longexposure.temporal.activities.MaterializeOrderLifecycleActivityImp
 import com.longexposure.temporal.activities.ParseAndWriteDplsActivityImpl;
 import com.longexposure.temporal.activities.PipelineRunRecorderActivityImpl;
 import com.longexposure.temporal.activities.CombineRelatedEventsActivityImpl;
+import com.longexposure.temporal.activities.EnrichWithCoOccurrenceActivityImpl;
 import com.longexposure.temporal.activities.ListSelectedEventsActivityImpl;
 import com.longexposure.temporal.activities.NarrateEventActivityImpl;
 import com.longexposure.temporal.activities.RecordValidationActivityImpl;
@@ -116,6 +117,7 @@ public final class WorkerMain {
                 new MaterializeOrderLifecycleActivityImpl(),
                 new ScoreEventsActivityImpl(),
                 new CombineRelatedEventsActivityImpl(),
+                new EnrichWithCoOccurrenceActivityImpl(),
                 new SelectTopEventsActivityImpl(),
                 new ListSelectedEventsActivityImpl(),
                 new CleanupFilesActivityImpl(),
