@@ -160,6 +160,18 @@ because JDBC interpreted both `?` as positional placeholders.
 
 Hit this in `EnrichWithCoOccurrenceActivityImpl.preClean()` 2026-05-20 — wasted ~13 minutes of compute on a re-run before catching it.
 
+## Gotcha — `restart: unless-stopped` doesn't recover from host-port bind failures
+
+A container in `Exited (128)` with `restartCount=0` is the smoking gun. Docker's `restart` policy only handles **runtime process exits** — when the container started, ran, and then the process died. **Port-bind failures during container setup happen BEFORE the process starts and are NOT covered by the restart policy.** The container goes to `Exited (128)`, `restartCount` stays 0, and it sits there forever until someone runs `docker compose up -d` (which recreates).
+
+This bit us twice — May 17 and May 20 — on both `proxy-dnsmasq` containers (luv and joi). Trigger: a system update SIGTERMs docker, tailscaled restarts, the tailscale IP is briefly unassigned, docker tries to recreate dnsmasq and fails to bind `${HOST_TAILNET_IP}:53` with `cannot assign requested address`. DNS dies for everything depending on `*.luv` / `*.joi` resolution.
+
+**Codified fix (applied 2026-05-20 to both luv and joi `~/workspace/proxy/docker-compose.yml`)**: dnsmasq uses `network_mode: host` instead of docker port-publishing, and binds itself via `--listen-address=${HOST_TAILNET_IP} --listen-address=127.0.0.1 --bind-dynamic`. The bind decision now lives inside dnsmasq, where `--bind-dynamic` watches for the listed IPs appearing/disappearing and rebinds accordingly. Any future failure is a runtime exit, which `restart: unless-stopped` actually covers.
+
+Why `0.0.0.0:53` doesn't work: `systemd-resolved` already owns `127.0.0.53:53` on both hosts, so docker can't publish `0.0.0.0:53` without conflict. Host networking sidesteps this by letting dnsmasq bind only to the tailscale IP and 127.0.0.1.
+
+If a docker container ever lands in `Exited` with `restartCount=0`, treat it as a setup-time (not runtime) failure and look at `docker inspect <name> --format '{{.State.Error}}'` for the actual reason.
+
 ## LLM endpoint (joi)
 
 Qwen3.5-122B-A10B served from joi (Framework Desktop, 128 GB unified, Strix Halo APU) via llama.cpp. Observed throughput **~23 tokens/sec**. Budget-comfortable for 5–50 narrations/day at ~150 tokens each.
