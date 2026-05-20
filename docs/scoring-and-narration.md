@@ -86,6 +86,47 @@ The cutting-edge LLM techniques as of early 2026 and where we land on each:
 
 **The throughline**: pre-fetched deterministic context goes in the breakdown; the verifier is pure code; the LLM's job is purely "render the known facts as prose."
 
+## Sampling parameters (2026-05-20)
+
+Qwen3.5-122B-A10B's model card publishes recommended sampling parameters per task mode. We follow them with one deliberate deviation for extraction. Code lives in `parser/src/main/java/com/longexposure/llm/SamplingParams.java` as named presets.
+
+| Preset | Used by | temp | top_p | top_k | min_p | presence_penalty | repetition_penalty |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `EXTRACT` | `BlueprintExtractor` (pass 1) | 0.1 | 0.8 | 20 | 0.0 | 0.0 | 1.0 |
+| `RENDER` | `ProseRenderer` (pass 2) — Qwen "instruct general" verbatim | 0.7 | 0.8 | 20 | 0.0 | 1.5 | 1.0 |
+| `SYNTHESIZE` (future) | Layer 3 daily synthesis — Qwen "instruct reasoning" verbatim | 1.0 | 1.0 | 40 | 0.0 | 2.0 | 1.0 |
+
+**Why we don't use thinking mode:** the scorer does the reasoning; the LLM only renders or synthesizes. Thinking mode would ~10× cost for no measurable quality benefit on tasks where the answer is already determined.
+
+**`EXTRACT` departure from Qwen base:** the extractor produces strict JSON, not prose. Variety hurts here (the JSON schema is a known shape), so we pin temperature low and drop presence_penalty to zero. Other knobs match the Qwen instruct base for consistency.
+
+**Empirical validation (2026-05-08, 164 events):** v3 (Qwen RENDER with old prompt) produced ~10% qualitative-filler narrations because presence_penalty=1.5 + temp=0.7 pushed the model to invent context to vary phrasing. v4 (Qwen RENDER + tightened prompt with adaptive length + explicit anti-filler rules) brought filler back to the pre-Qwen baseline (~0.6%). The Qwen params are usable, but only with a prompt that absorbs their incentive to introduce new vocabulary.
+
+## Known prompt-level limitations (open)
+
+Captured 2026-05-20 from a 164-event re-narration run under Qwen RENDER + v4 prompt. None are blockers; all are candidate work for the next prompt iteration.
+
+1. **Residual current-state filler.** A small fraction (~0.6 %, 1/164 in the latest run) of narrations end with claims like "the security is now trading normally" or "regular market activity resumed." These are mild — they're inferred from the breakdown's halt-end timestamp but stated as current-state assertions. The v4 prompt's adaptive-length rule reduced this dramatically; making it fully zero needs another prompt iteration explicitly forbidding current-state claims, since the breakdown describes events that *occurred*, not the current state.
+
+2. **Ticker/word collisions when symbol enrichment is incomplete.** When a ticker spells a real English noun ("ETN" = exchange-traded note, "ET" = Eastern Time, "GE" / "FOR" / "AT") and the `symbols` table doesn't have a `company_name` for that row, the model treats the ticker as the common noun. Observed example: "A large block trade of 20,786 shares in *an ETN* executed on the NYSE…" — should have been "Eaton Corporation plc (ETN)." Root cause is enrichment-side (the `symbols` table missing rows / company_name fields for some tickers), not prompt-side. Prompt could add a defensive "the breakdown's `symbol` field is ALWAYS a ticker, even if it spells a real word" rule as a band-aid.
+
+3. **Uneven enrichment narration.** The `breakdown.co_occurring` block (post_cancel/layering/sweep nested inside a parent liquidity_withdrawal) is integrated well by some narrations (IWM, INTC) and skipped entirely by others (some icebergs with 285+ children). When enrichment is present, narration *should* reference it — currently the LLM decides freely whether to surface it. Fix: prompt rule "if the blueprint contains co_occurring values, your narration must reference at least one of them."
+
+4. **Run-to-run variance higher than pre-Qwen.** RENDER preset's temp=0.7 means the same event re-narrated produces different sentence orderings. Verifier still passes both. Not a quality regression — but reproducibility is weaker than at temp=0.3. Acceptable tradeoff for the journalistic prose variety; revisit if it ever causes operational pain.
+
+5. **No interpretive layer yet.** Narrations describe the *shape* of events ("8,456 shares swept across 39 executions at 11 levels in 18.1 ms") but don't explain *what that means* ("classic aggressive market-buy hitting the offer ladder, consistent with an algo crossing the spread"). That's the Layer 0 expansion + Layer 3 synthesis work, queued separately.
+
+## Layer 3 daily synthesis (design, pre-implementation)
+
+Single LLM call per day, runs after all per-event narrations are complete. Input: the day's narratives (prose + blueprint + breakdown) plus day-level metadata (date, session phases, total event count). Output: one paragraph identifying recurring themes across the day's events.
+
+Differs structurally from per-event narration:
+- **Looser grounding.** The synthesis paragraph isn't constrained to a single breakdown — it's *interpreting* the corpus of narrated events. The pure-code verifier doesn't apply here in the same way; we'd verify only that named tickers / scorer names / numerical claims that appear actually come from the day's narratives.
+- **Reasoning-shaped task.** "Identify the day's themes" requires the model to find patterns across 90-164 narrations. Qwen's "Instruct mode for reasoning tasks" sampling preset fits this: `temperature=1.0, top_p=1.0, top_k=40, min_p=0.0, presence_penalty=2.0`. The increased variety + high presence_penalty discourages narrow repetition across the synthesis paragraph.
+- **One per day, not one per event.** No fan-out, no concurrent-call gate to worry about. Single activity, single LLM call.
+
+Will use the new `SamplingParams.SYNTHESIZE` preset (added when the activity is built). Codification of the Layer 3 sampling decision lives in this doc + the SamplingParams class.
+
 ## Operational constraints — `llama-large.joi`
 
 The LLM endpoint is a **local model** running on a single Strix Halo GPU (Framework Desktop, 128 GB unified memory, Qwen3.5-122B-A10B via llama.cpp/Vulkan). Observed throughput ~23 tok/sec end-of-stream. This produces specific operational rules:

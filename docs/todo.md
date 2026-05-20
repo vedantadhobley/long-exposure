@@ -33,7 +33,19 @@ The seven scorers — halt, large_trade, sweep, post_cancel_cluster, layering, i
 
 1. ✅ **Co-occurrence enrichment** (2 hr — done 2026-05-20) — `EnrichWithCoOccurrenceActivity` slots between Score and Select. For each scored event in a parent's interval, queries co-occurring same-symbol other-scorer events and merges summary stats into the parent's `breakdown.co_occurring` block. Marks children with `subsumed_by_event_id`. Validated on 2026-05-08: 164 candidates identified, **80 enriched** parents (absorbed 2 443 nested children); IWM 14:00 withdrawal absorbed 52 children (26 post_cancel, 25 layering, 1 sweep). Selection unchanged at 164.
 2. ✅ **Delete the retired combining code** (done 2026-05-20) — `CombineRelatedEventsActivity[Impl]`, `CombineWorkflow[Impl]` files removed. WorkerMain registrations cleaned. `subsumed_by_event_id` column stays (reused by enrichment).
-3. **Layer 3 daily synthesis** (~half day) — `SynthesizeDayWorkflow` reads the day's narrations + day metadata, produces a "today's themes" paragraph. Handles same-symbol same-scorer repetition (the TQQQ-bursts pattern) dynamically — the LLM judges what's worth threading into the day-level story, no hardcoded gap thresholds.
+3. ✅ **Sampling params: Qwen3.5 published recommendations** (done 2026-05-20) — `SamplingParams` record + `EXTRACT` / `RENDER` named presets. Aligns with Qwen's published instruct-mode guidance.
+4. ✅ **Verifier dotted-path fix + v4 prompt** (done 2026-05-20) — Verifier now walks dotted source-field paths into nested breakdown values. Prompt rewritten with adaptive length ("1-3 sentences, stop when facts run out") + explicit forbidden categories (comparative claims, current-state assertions, intent speculation). Empirical: v3 Qwen+old prompt was 10 % filler; v4 brings it to 0.6 % (parity with pre-Qwen baseline).
+5. **Prompt iteration v5** (queued — see "Prompt-level limitations" below) — address residual MOBI-style current-state filler + uneven co_occurring narration + ETN-style ticker/word collision.
+6. **Layer 3 daily synthesis** (~half day) — `SynthesizeDayWorkflow` reads the day's narrations + day metadata, produces a "today's themes" paragraph. Handles same-symbol same-scorer repetition (the TQQQ-bursts pattern) dynamically — the LLM judges what's worth threading into the day-level story, no hardcoded gap thresholds. Will use new `SamplingParams.SYNTHESIZE` preset (Qwen instruct-reasoning: temp=1.0, top_p=1.0, top_k=40, presence_penalty=2.0).
+
+### Prompt-level limitations (queued for v5)
+
+Captured 2026-05-20 from the v4 re-narration run. Empirically ~0.6 % filler rate but the residual cases are predictable:
+
+- **Residual current-state filler** — "the security is now trading normally" / "regular market activity resumed". The breakdown describes events that *occurred*; current state isn't in it. Prompt fix: explicit rule "describe only what happened during the event window — do not assert current or post-event state."
+- **Uneven co_occurring narration** — IWM/INTC liquidity_withdrawals integrate enrichment beautifully ("Co-occurring activity included 565,131 shares in layering orders and $199,041.20 in sweep notional volume"). Iceberg events with 285+ child orders just skip the enrichment. Prompt fix: "if the blueprint contains `co_occurring` values, your narration must reference at least one of them."
+- **ETN-style ticker/word collision** — when a ticker spells a real English noun (ETN, ET, GE, FOR, AT) and the `symbols` table lacks `company_name` for it, the model treats the ticker as the common noun. Real fix is enrichment-side (fill missing rows). Prompt band-aid: "the `symbol` field is ALWAYS a ticker, even if it spells a real English word."
+- **Higher run-to-run variance** under Qwen RENDER (temp=0.7) — same event re-narrated produces different sentence orderings. Verifier still passes both. Acceptable tradeoff for prose variety; not a v5 item.
 
 ### Next session (after the above settles)
 
