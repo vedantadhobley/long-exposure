@@ -120,6 +120,46 @@ http://long-exposure-prod-adminer.luv — server is preset to `long-exposure-pro
 
 http://long-exposure-prod-temporal-ui.luv — full execution history, retry counts, activity heartbeats. The source of truth for pipeline-execution debugging.
 
+## Gotcha — JDBC `?` parameter placeholders clash with JSONB key-exists operators
+
+PostgreSQL's JSONB operators `?`, `?|`, and `?&` (check whether a key or set of keys exists in a JSONB object) **collide with JDBC's `?` parameter placeholder** in prepared statements. The driver scans the SQL string for `?` characters and binds them to `setX()` calls in order. A query like
+
+```sql
+UPDATE scored_events
+   SET breakdown = breakdown - 'co_occurring'
+ WHERE trading_date = ?
+   AND breakdown ? 'co_occurring'
+```
+
+with `st.setObject(1, date)` errors out at execution time with
+
+```
+PSQLException: No value specified for parameter 2.
+```
+
+because JDBC interpreted both `?` as positional placeholders.
+
+**Workarounds** (any of these is fine):
+
+1. **`->` accessor returning NULL** (clearest, what we use):
+   ```sql
+   WHERE breakdown->'co_occurring' IS NOT NULL
+   ```
+2. **`jsonb_exists(col, key)` function form**:
+   ```sql
+   WHERE jsonb_exists(breakdown, 'co_occurring')
+   ```
+3. **Escaped operator** (JDBC unescapes `??` → `?` at parse time):
+   ```sql
+   WHERE breakdown ?? 'co_occurring'
+   ```
+4. **`@>` containment** when checking for both key + value:
+   ```sql
+   WHERE breakdown @> '{"co_occurring": {}}'::jsonb
+   ```
+
+Hit this in `EnrichWithCoOccurrenceActivityImpl.preClean()` 2026-05-20 — wasted ~13 minutes of compute on a re-run before catching it.
+
 ## LLM endpoint (joi)
 
 Qwen3.5-122B-A10B served from joi (Framework Desktop, 128 GB unified, Strix Halo APU) via llama.cpp. Observed throughput **~23 tokens/sec**. Budget-comfortable for 5–50 narrations/day at ~150 tokens each.
