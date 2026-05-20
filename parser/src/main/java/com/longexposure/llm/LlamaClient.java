@@ -64,14 +64,17 @@ public final class LlamaClient {
     }
 
     /**
-     * Single-turn chat completion. Returns the assistant's content string.
+     * Single-turn chat completion with explicit sampling parameters.
+     * Two ready-made presets live on {@link SamplingParams}:
+     * {@link SamplingParams#EXTRACT} (tight, for JSON) and
+     * {@link SamplingParams#RENDER} (Qwen-recommended instruct-general).
      *
      * @param systemPrompt  system message (instructions / role / constraints)
      * @param userPrompt    user message (the actual input)
-     * @param temperature   sampling temperature; 0.0–0.3 for factual narration
+     * @param params        decoder sampling knobs
      */
-    public String chat(final String systemPrompt, final String userPrompt, final double temperature) {
-        ObjectNode body = buildBody(systemPrompt, userPrompt, temperature);
+    public String chat(final String systemPrompt, final String userPrompt, final SamplingParams params) {
+        ObjectNode body = buildBody(systemPrompt, userPrompt, params);
         Request req = new Request.Builder()
                 .url(endpoint + "/chat/completions")
                 .post(RequestBody.create(body.toString(), JSON_TYPE))
@@ -112,15 +115,25 @@ public final class LlamaClient {
         }
     }
 
-    /** Convenience: temperature defaults to 0.2 (factual, low-variance). */
+    /** Convenience: defaults to {@link SamplingParams#RENDER} (Qwen instruct-general). */
     public String chat(final String systemPrompt, final String userPrompt) {
-        return chat(systemPrompt, userPrompt, 0.2);
+        return chat(systemPrompt, userPrompt, SamplingParams.RENDER);
     }
 
-    private ObjectNode buildBody(final String systemPrompt, final String userPrompt, final double temperature) {
+    private ObjectNode buildBody(final String systemPrompt, final String userPrompt, final SamplingParams p) {
         ObjectNode body = json.createObjectNode();
         body.put("model", model);
-        body.put("temperature", temperature);
+        // OpenAI-compatible fields llama.cpp recognizes. repetition_penalty
+        // is sent only when != 1.0 (server treats 1.0 as disabled but we
+        // skip transmitting to keep the wire payload clean).
+        body.put("temperature", p.temperature());
+        body.put("top_p", p.topP());
+        body.put("top_k", p.topK());
+        body.put("min_p", p.minP());
+        body.put("presence_penalty", p.presencePenalty());
+        if (p.repetitionPenalty() != 1.0) {
+            body.put("repeat_penalty", p.repetitionPenalty());
+        }
         ArrayNode messages = body.putArray("messages");
         if (systemPrompt != null && !systemPrompt.isBlank()) {
             ObjectNode sys = messages.addObject();

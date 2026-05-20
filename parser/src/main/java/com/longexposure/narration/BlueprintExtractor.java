@@ -3,6 +3,7 @@ package com.longexposure.narration;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.longexposure.llm.LlamaClient;
+import com.longexposure.llm.SamplingParams;
 
 /**
  * Pass 1 of the two-pass narration model. Takes a {@code selected_events}
@@ -67,9 +68,9 @@ public final class BlueprintExtractor {
                 "Breakdown (input — every source_field must be a key here):\n" +
                 breakdown.toPrettyString();
 
-        // Use a low temperature for extraction — we want deterministic JSON,
-        // not creative output.
-        String raw = llama.chat(SYSTEM_PROMPT, userPrompt, 0.1);
+        // EXTRACT preset: low temperature + Qwen instruct base. Pass-1 wants
+        // deterministic JSON, not prose variety, so presence_penalty is 0.
+        String raw = llama.chat(SYSTEM_PROMPT, userPrompt, SamplingParams.EXTRACT);
         return parseJson(raw);
     }
 
