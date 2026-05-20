@@ -14,7 +14,7 @@ Distilled from the project-positioning + design discussion (captured 2026-05-11)
 
 ## The 7 scorers in plain English
 
-The detection vocabulary of the whole project. Every narrated event falls into one of these seven buckets (or — once cross-event linking ships — a `combined` row tying 2+ of them together on the same symbol).
+The detection vocabulary of the whole project. Every narrated event falls into one of these seven buckets. High-scoring events may get *enriched* at scoring time with deterministic summary stats about co-occurring same-symbol events of OTHER types whose intervals fall inside the parent's window — this is the "nested signals inside signals" mechanism (a liquidity_withdrawal absorbing the post_cancel/layering events that nested within its duration). See `## Scoring architecture` below.
 
 | Scorer id | What it detects | Plain-English signal | Source data |
 |---|---|---|---|
@@ -158,32 +158,56 @@ These are the high-signal microstructure patterns that DEEP+ uniquely makes visi
 
 ## Scoring architecture
 
-How the pattern catalog above maps onto code. Three abstractions:
+How the pattern catalog above maps onto code. Four pipeline stages, each its own activity inside `ScoreWorkflow`:
 
 ```
-Raw events                  Derived events
-(hypertable rows)           (scored_events rows)
-─────────────────           ─────────────────────
-trades, orders_*,           one per "thing worth
-status_events, etc.         narrating"
-        │                            ▲
-        │   ┌─────────────────┐      │
-        ├──▶│ Intraday scorer │──────┤   (only needs today's data)
-        │   └─────────────────┘      │
-        │                            │
-        │   ┌─────────────────┐      │
-        └──▶│ Interday scorer │──────┘   (also reads BaselineProvider)
-            └─────────────────┘
-                    │
-                    ▼
-            BaselineProvider
-            (cagg / view query; returns empty if no history yet)
+Raw events              Scored events              Enriched events             Selected events
+(hypertable rows)       (one per detection)        (top events absorb           (the narratable subset)
+─────────────────       ─────────────────          co-occurring children)       ─────────────────
+trades, orders_*,                ▲                          ▲                          ▲
+status_events, etc.              │                          │                          │
+        │                        │                          │                          │
+        │     ┌───────────────┐  │   ┌──────────────────┐   │   ┌───────────────────┐  │
+        ├────▶│ ScoreEvents   │──┴──▶│ EnrichWith        │───┴──▶│ SelectTopEvents   │──┘
+        │     │ (7 scorers,   │      │ CoOccurrence      │       │ (percentile rank, │
+        │     │  intraday)    │      │ (nested-sigs)     │       │  floor+ceiling)   │
+        │     └───────────────┘      └──────────────────┘       └───────────────────┘
+        │              ▲
+        │              │
+        │     ┌───────────────┐
+        └────▶│ Interday      │   (queued; needs BaselineProvider + 30-day backfill)
+              │  scorer       │
+              └───────────────┘
 ```
 
 Raw events live in the existing 13 hypertables and don't move. Scored
 events are anything worth narrating — could be a single row (halt, large
 trade) or a synthesized pattern across many rows (sweep, post-cancel
 cluster). Scorers are the extension point.
+
+**Enrichment is the new (2026-05-20) middle stage.** Replaces the earlier
+"cross-event combining" attempt (see decisions.md 2026-05-20). For each
+scored event whose score qualifies as "interest-floor passing", the
+enrichment activity looks up other-scorer events on the same symbol whose
+intervals fall *inside* the parent's `[ts, ts_end]` window. Those nested
+events' summary stats get merged into the parent's `breakdown.co_occurring`
+JSON block; the children get `subsumed_by_event_id = parent.event_id` so
+selection skips them.
+
+The mental model: a long sec-scale event (liquidity_withdrawal lasting
+11 s) often CONTAINS a swarm of ms-scale events (28 post_cancel bursts +
+6 layering bursts during those 11 s). Those ms-scale events ARE the
+withdrawal at finer resolution — they're not separate stories. Enrichment
+makes that nesting explicit in the parent's breakdown without forcing a
+synthetic "combined" row.
+
+What enrichment does NOT do:
+- Does not merge same-scorer events on the same symbol — those are
+  repetition (different question; handled in Layer 3 daily synthesis).
+- Does not introduce a time-window knob — the parent's own duration
+  defines the lookup window. No `MAX_GAP_MINUTES` constant.
+- Does not infer intent or interpretation — that's still future Layer 0
+  expansion work. Enrichment is purely deterministic counts.
 
 ### The interfaces
 

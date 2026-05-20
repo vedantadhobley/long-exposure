@@ -27,27 +27,27 @@ The seven scorers — halt, large_trade, sweep, post_cancel_cluster, layering, i
 
 ---
 
-## What's next, in order
+## What's next, in order (revised 2026-05-20)
 
-### Today's session
+### Immediate (in order)
 
-1. **Confirm in-flight materialize+score completes cleanly** — passive wait, sanity-check that the lifecycle table delivers the promised sub-second PostCancel/Layering scans.
-2. **Threshold-based selection** (~2 hr) — kill the hardcoded `PER_SCORER_CAPS`. Replace with within-scorer percentile rank + unified threshold + per-scorer floor/ceiling. Daily narration count becomes variable: quiet days produce ~30, dramatic days ~150. Pure SQL change to `SelectTopEventsActivity`.
-3. **Cross-event linking, before selection** (~3-4 hr) — new `CombineRelatedEventsActivity` between Score and Select, groups overlapping `(symbol, ts→ts_end)` events into `scorer_id='combined'` rows with nested `constituents[]`. Linking signal is interval overlap (data-driven, not arbitrary time windows) with a tiny pair-table exception for non-overlapping but related events (e.g. halt → post-halt large_trade). See "Scoring + narration roadmap" section below for the full design.
+1. **Co-occurrence enrichment** (~2 hr) — `EnrichWithCoOccurrenceActivity` slots between Score and Select. For each scored event in a parent's interval, query co-occurring same-symbol other-scorer events and merge summary stats into the parent's `breakdown.co_occurring` block. Mark children with `subsumed_by_event_id`. Solves the "nested signals inside signals" problem deterministically without any time-window knob. See "Scoring + narration roadmap" section below for details.
+2. **Delete the retired combining code** (~10 min) — `CombineRelatedEventsActivity[Impl]`, `CombineWorkflow[Impl]`, WorkerMain registrations. `subsumed_by_event_id` column stays (reused by enrichment).
+3. **Layer 3 daily synthesis** (~half day) — `SynthesizeDayWorkflow` reads the day's narrations + day metadata, produces a "today's themes" paragraph. Handles same-symbol same-scorer repetition (the TQQQ-bursts pattern) dynamically — the LLM judges what's worth threading into the day-level story, no hardcoded gap thresholds.
 
-### Next session (after today is solid)
+### Next session (after the above settles)
 
 4. **Score weight audit** — sort top-20 events per scorer per day, eyeball whether the multipliers (`log10(shares) × count`, etc.) actually surface "trader-flag-worthy" events. Adjust by feel; document why.
 5. **Per-symbol liquidity-tier weighting** — multiply scores by a tier factor so a halt on AAPL ranks higher than a halt on a micro-cap. Requires symbol enrichment (already shipped) + a tier classification (mega-cap / large / mid / small / micro from `prev_close × shares_outstanding`).
-6. **Layer 3 daily synthesis** — one LLM call per day that reads all narrations and produces a "today's themes" hero paragraph for the frontend. Full session of work.
+6. **Layer 0 expansion** (per-event interpretation pass) — per-event interpretive second LLM pass that says what a pattern likely *means*, grounded in a pattern catalog + surrounding wire context. Different concern from Layer 3 — Layer 0 enriches individual narrations with interpretation; Layer 3 ties the day's narrations into a single thematic paragraph.
 
 ### Explicitly NOT doing yet
 
 - **30-day backfill** — deferred until single-day output is rock-solid. No point burning 30 hours of compute on a pipeline we're still tuning.
 - **Inter-day scorers** (`VolumeDeviationScorer`, `TimeInBookDriftScorer`) — blocked on the 30-day backfill that we're not yet doing.
-- **Layer-0 expansion** (the "recursive deeper dives" — per-event LLM pass that reads surrounding wire data) — full session of focused LLM-prompt work. Worth doing after threshold-selection + cross-event-linking land.
 - **Parser-side lifecycle emission** (eliminating the JOIN entirely) — the architecturally cleanest fix, but the activity-level materialize already gives 95 % of the win. Not worth the parser refactor right now.
 - **TimescaleDB columnar compression** on old chunks — only matters once we have multi-day history.
+- **Cross-event combining of any kind at the data layer** — explicitly retired 2026-05-20 after testing showed it conflates two different concerns (nested mechanism vs cross-day repetition). The two replacement layers (co-occurrence enrichment + Layer 3 synthesis) handle each concern at the appropriate abstraction.
 
 ---
 
@@ -72,10 +72,11 @@ Honest list of things that are weak, undertested, or might bite us. Order is by 
 - **Single point of failure on `llama-large.joi`.** If the host is down, narration fails. The pipeline degrades gracefully (workflow continues, narratives just don't get written) but the user-facing site shows yesterday's narrations until joi recovers.
 - **Throughput cap of 2 concurrent LLM calls** is fine at 50–100 narrations/day but bottlenecks any future fan-out (e.g. a Layer-0 expansion pass that calls the LLM per-event would need careful concurrency budgeting against the cap).
 
-### Cross-event linking (proposed, not built)
+### Cross-event combining — built, tested, RETIRED 2026-05-20
 
-- **Interval-overlap rule will sometimes link unrelated events.** Two `post_cancel_cluster` bursts on the same symbol at 09:31:00 and 09:31:08, intervals [09:31:00.100, 09:31:00.420] and [09:31:07.890, 09:31:08.150], won't overlap → won't merge. Good. But two clusters at 09:31:00.100 and 09:31:00.500, intervals [...0.100,...0.420] and [...0.500,...0.890] also don't overlap. Are they the same underlying event? Probably yes for a trader. We'll likely need a small "merge if gap < N ms" knob in addition to overlap.
-- **`scored_events.subsumed_by_event_id` is a non-trivial schema change.** Backfilling existing scored_events rows with NULL (the new column) is safe, but anyone doing cross-day analytics needs to know about it.
+- `CombineRelatedEventsActivity` was built, tested on 2026-05-08, and disabled because the interval-overlap rule absorbed ms-scale events into sec-scale events (28-36 constituents per combined event, mostly nested-mechanism cases like a liquidity_withdrawal absorbing post_cancel/layering events happening inside it). The combined narrations were unreadable and the verifier couldn't validate dotted source-field paths into nested breakdowns.
+- The replacement architecture (co-occurrence enrichment + Layer 3 synthesis) is the new direction. See @decisions.md 2026-05-20 for the full rationale.
+- The combine code stays in the repo until Phase B of the new plan deletes it. `scored_events.subsumed_by_event_id` column stays — it gets reused by enrichment.
 
 ### Operational
 
@@ -277,38 +278,88 @@ Both TOPS and DEEP code stay in the repo and earn their keep on every validation
 
 ---
 
-## Scoring + narration roadmap (next major work, post symbol enrichment)
+## Scoring + narration roadmap (revised 2026-05-20)
 
-Captured 2026-05-18. These are the user-facing-quality improvements queued. Performance work in the next section is a prerequisite for some (especially the 30-day backfill).
+Originally captured 2026-05-18 and majorly revised after testing the cross-event combining experiment. See @decisions.md 2026-05-20 for the full retrospective on what was tried, what failed, and why the new architecture is shaped the way it is.
 
-### A. Cross-event linking — merge constituents into a richer parent event
+### The architectural insight (read this first)
 
-- [ ] **Cross-event linking** — events on the same symbol within 1 s (configurable per scorer-pair, default 1 s, override e.g. `halt+large_trade` to 5 min) merge into a single `combined` row in `selected_events`. Breakdown shape:
+Market events happen at **multiple time scales simultaneously**:
+- ms-scale events (post_cancel_cluster, layering, sweep) — typically the *mechanism* by which larger events manifest.
+- sec-scale events (liquidity_withdrawal, iceberg) — composed of multiple ms-scale events nested inside their interval.
+- minutes-scale events (halts, daily-level patterns).
+
+A liquidity_withdrawal lasting 11 seconds CONTAINS 28 post_cancel bursts within it — those bursts ARE the withdrawal at finer resolution. They aren't separate stories.
+
+The wrong abstraction is "combine overlapping events into one richer event" (we tried this — produced 28-36 constituent clusters). The right abstractions split the concern by scale:
+
+| Concern | Layer that handles it |
+|---|---|
+| **Nested signals inside signals** (one phenomenon at multiple scales) | `EnrichWithCoOccurrenceActivity` — deterministic, scoring-time |
+| **Same-symbol same-scorer repetition across the day** (TQQQ's 11 morning withdrawal bursts vs 14:00 isolated event) | Layer 3 daily synthesis (LLM with day context) |
+| **Cross-symbol coherence** (multiple 3x ETFs sharing a pattern) | Layer 3 daily synthesis |
+| **Identifying individual events** | Scorers (unchanged) |
+| **Selecting which events deserve narration** | Percentile-rank within scorer (unchanged) |
+| **Per-event description** | Per-event narration (unchanged) |
+| **What does a pattern signify** ("looks like spoofing", "post-halt unwind") | Interpretation layer (queued separately — see C) |
+
+### A. Co-occurrence enrichment (NEW — replaces the retired combining work)
+
+- [ ] **`EnrichWithCoOccurrenceActivity`** — slots between `ScoreEventsActivity` and `SelectTopEventsActivity` in `ScoreWorkflowImpl`. For each scored event above an interest floor, queries other-scorer events on the same symbol whose intervals fall inside the parent's `[ts, ts_end]`. Aggregates summary stats per scorer type into a `co_occurring` block on the parent's breakdown. Sets `subsumed_by_event_id` on each child row so selection skips them.
+
+  Resulting breakdown shape on a parent event:
   ```json
-  { "kind": "combined",
-    "primary_scorer": "liquidity_withdrawal",
-    "constituent_scorers": ["liquidity_withdrawal", "post_cancel_cluster"],
-    "time_span_ms": 300,
-    "constituents": [ {"scorer_id":"…", "score":…, "breakdown":{…}}, … ],
-    "company_name": "...", "listing_exchange": "...", ... }
+  {
+    "symbol": "IWM",
+    "deletes": 4895,
+    "duration_s": 11.7,
+    "rate_per_sec": 417.64,
+    "company_name": "iShares Russell 2000 ETF",
+    "listing_exchange": "NYSE Arca",
+    "co_occurring": {
+      "during_event": {
+        "post_cancel_clusters": 28,
+        "layering_events": 6,
+        "median_concurrent_post_cancel_lifetime_us": 413,
+        "total_concurrent_orders": 7843
+      }
+    }
+  }
   ```
-  LLM gets one nested object and narrates one paragraph mentioning both aspects. Verifier needs to recurse into `constituents[].breakdown` — `GroundingVerifier.appendAllValues()` already walks arrays + objects so it Just Works; add a unit test. UI implication: the `long-exposure-browser` component needs tag chips like "✓ Liquidity withdrawal + ✓ Post-cancel cluster" above the paragraph.
 
-### B. Threshold-based selection (replace hardcoded top-N caps)
+  Narration becomes deterministically interpretive:
+  > "IWM experienced a liquidity withdrawal on IEX lasting 11.7 seconds, during which 4,895 orders were deleted. The withdrawal coincided with 28 rapid post-cancel bursts and 6 layering events on the same symbol during the same window, consistent with depth being pulled across multiple price levels simultaneously."
 
-- [ ] **Replace per-scorer top-N with percentile + threshold + floor.** Today's `PER_SCORER_CAPS` map (halt=20, large_trade=20, rest=10) produces exactly 90/day regardless of how dramatic the session was. Replace with:
-    1. **Normalize within each scorer** — replace raw score with percentile rank within today's distribution for that scorer. Brings all scorers to a `[0,1]` scale.
-    2. **Apply a unified threshold** — narrate everything > 99th percentile (tunable).
-    3. **Per-scorer floor + ceiling** — guarantees catalog coverage on quiet days (floor ≥ 1) and bounds runaway dramatic days (ceiling ≤ 50).
-  Net effect: quiet days produce ~30 narrations, dramatic days ~200, slow Tuesday ≠ Tesla-earnings day.
+  **No knob for time-window.** Parent's own `[ts, ts_end]` defines the lookup window. **Cross-scorer only** — a sweep doesn't enrich with sweeps on the same symbol (that's the repetition problem, not the nesting problem). **Idempotent**: pre-clean by trading_date.
 
-### C. Recursive deeper dives ("events within events")
+- [ ] **Delete the retired combine code** — `CombineRelatedEventsActivity[Impl]`, `CombineWorkflow[Impl]`, and their WorkerMain registrations. `subsumed_by_event_id` column stays (used by enrichment).
 
-- [ ] **Layer-0 expansion per Layer-2 event** — a second LLM call per scored event that reads the Layer-2 narration + a slice of surrounding Layer-0 data (price 5 min before/after, surrounding events on same symbol, day's volume context, related events on correlated symbols) and produces an "expansion" — "the layering came right before an 8,000-share market buy at the same price." See @concepts.md §5 + §10C. Cost: +1 LLM call per narrated event (~90/day → 90 extra LLM calls). Trade-off: doubles per-event budget for materially richer narration.
+- [ ] **Verifier check** — confirm `GroundingVerifier.appendAllValues()` recurses into the `co_occurring` object so numbers like "28" and "413" are in the haystack. Should work without changes; add a test case.
 
-### D. Layer 3 — daily synthesis
+### B. Threshold-based selection (replace hardcoded top-N caps)  ✅ DONE 2026-05-19
 
-- [ ] **One LLM call per day** that reads all 90 Layer-2 narratives + their Layer-0 expansions and produces a top-of-page paragraph: "today saw heavy halt activity at the open in small caps; IWM and TQQQ had coordinated liquidity events at 14:00 ET; large blocks concentrated in semiconductors." Drives the front-page hero text in the long-exposure-browser UI. Design contract: this LLM call reads the *structured outputs* of Layer 2 (prose + blueprint + expansion), never the raw firehose.
+- [x] **Replaced `PER_SCORER_CAPS` map with percentile-rank rule** in `SelectTopEventsActivityImpl`:
+  - Within each scorer, rank by score descending
+  - Budget per scorer = `clamp(round(0.05 × event_count), 1, 30)`
+  - Take top-`budget` events
+- 2026-05-08 result: 164 events selected across 7 scorers (halt 6, iceberg 30, large_trade 8, layering 30, liquidity_withdrawal 30, post_cancel 30, sweep 30). Reasonable per-scorer balance.
+
+### C. Layer 3 — daily synthesis (NEW priority — addresses the repetition problem)
+
+- [ ] **`SynthesizeDayWorkflow`** — runs once at end of `DailyPipelineWorkflow`, after narration. One LLM call per day. Reads all the day's narrations + day metadata (date, session phases, day-of-week). Produces a single "today's themes" paragraph that handles:
+  - Same-symbol same-scorer repetition narration ("TQQQ had 11 liquidity withdrawal events concentrated in the first 15 min of trading, with isolated events at 10:00, 11:30, and 14:00 ET — typical of 3x leveraged ETFs at the open")
+  - Cross-symbol coherence ("similar morning bursts in TQQQ, SQQQ, and IWM")
+  - Session-phase framing ("today's pattern was concentrated open volatility followed by a quiet midday")
+- Slot at top of the daily page in vedanta-systems frontend.
+- Design contract: reads the *structured outputs* of per-event narrations (prose + blueprint + breakdown), never the raw firehose. Same grounding discipline as per-event narration.
+
+### D. Layer 0 expansion (queued — for when we want richer single-event interpretation)
+
+- [ ] **Per-event interpretive second pass** — for selected events, an extra LLM call that reads the descriptive narration + the surrounding wire context (price 5 min before/after, symbol's typical activity) + the symbols-table enrichment, and produces an *interpretive* sentence explaining what the pattern likely means. See @concepts.md §5 + §10C. Cost: +1 LLM call per narrated event (~90/day). Likely paired with a "pattern catalog" of microstructure interpretations per scorer type.
+
+### E. Layer 4 — inter-day rollups
+
+- [ ] **Weekly / monthly synthesis** — periodic LLM call producing "this week" / "this month" themes, reading multiple Layer-3 outputs. Needs ≥ 30 days of Layer-3 history before it's useful. Depends on (C) + 30-day backfill.
 
 ### E. Layer 4 — inter-day rollups
 

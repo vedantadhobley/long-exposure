@@ -4,6 +4,78 @@ Append-only record of architectural and operational decisions, ordered by date. 
 
 ---
 
+## 2026-05-20 — Cross-event combining is the wrong abstraction; replace with co-occurrence enrichment + Layer 3 synthesis
+
+**Context.** Built `CombineRelatedEventsActivity` to handle the IWM-style use case: two events on the same symbol firing 300 ms apart should narrate as one paragraph instead of two repetitive ones. The implementation merged any two events on the same symbol whose `[ts, ts_end]` intervals overlapped, packaging them under a synthetic `scorer_id = 'combined'` row with a nested `constituents[]` breakdown.
+
+**What we observed on 2026-05-08 real data.** The combine algorithm produced **181 888 combined events absorbing 506 630 constituents** out of 660 949 raw scored events. The clusters were dominated by 28–36-constituent groupings, almost all of the form "one long sec-scale event + dozens of ms-scale events happening inside its interval":
+
+- A liquidity_withdrawal lasting 11.7 s on IWM absorbed 28 post_cancel_clusters and 6 layering events occurring during those 11.7 s.
+- Layering events were 100 % subsumed across the day (every layering event happened inside some larger interval).
+- The combined narrations were unreadable: "involving 28 constituents" leaked metadata into prose, and the verifier couldn't validate dotted source-field paths into nested breakdowns.
+
+We also looked at TQQQ: 14 liquidity_withdrawal events selected for the day, 11 of them concentrated in the first 15 minutes after market open (consecutive gaps 5 s–5 min), three isolated events at 10:00, 11:30, and 14:00 ET. Naively merging "same symbol same scorer" across the day would have collapsed all 14 into one narrative, destroying the distinction between the open burst and the midday isolated events — a market-structure error, not a taste call.
+
+**Root cause analysis.** The combine activity was trying to solve TWO different problems with one rule:
+
+1. **Nested signals inside signals (mechanism nesting)** — a long sec-scale event whose mechanism IS the dozens of ms-scale events happening inside it. The IWM liquidity withdrawal at 14:00:31 IS the rapid post-cancel bursts and layering activity that occurred during it. These aren't independent stories; they're one phenomenon at different zoom levels.
+
+2. **Same-symbol same-scorer repetition across the day** — TQQQ's 11 morning liquidity_withdrawal bursts vs the isolated 10:00 / 11:30 / 14:00 events. Whether to group these is a *narrative* judgment that depends on market session phase, news context, and other meta-information the data layer doesn't have.
+
+A single overlap-based rule treats (1) and (2) identically — and gets both wrong. (1) gets over-absorbed (every nested ms-event becomes a constituent). (2) gets under-handled (events spanning open + midday + close don't overlap so don't combine, even when a trader would consider them one symbol's bad day).
+
+We also explored "make the combine rule smarter" — adaptive gap detection, elbow detection on the gap distribution, time-of-day phases. Each adaptive rule either still required a knob (split-ratio threshold; sparse-data fallback) or violated market microstructure semantics. There is no knob-free deterministic rule for "same burst" that's correct across the data we observed.
+
+**Decided.** Split the two concerns into separate layers:
+
+| Concern | Where it's solved |
+|---|---|
+| Nested signals inside signals | New `EnrichWithCoOccurrenceActivity` at scoring time (deterministic) |
+| Same-symbol repetition across the day | Future Layer 3 daily synthesis (LLM-based, runs after narration) |
+| Identifying individual events | `ScoreEventsActivity` (unchanged) |
+| Selecting which events deserve narration | `SelectTopEventsActivity` (unchanged — percentile rank within scorer) |
+| Per-event description | `NarrateEventActivity` (unchanged — one paragraph per selected event) |
+
+`CombineRelatedEventsActivity` + `CombineRelatedEventsActivityImpl` + `CombineWorkflow` + `CombineWorkflowImpl` get deleted. The `subsumed_by_event_id` column on `scored_events` stays — it's reused by enrichment to mark child events that have been absorbed into a parent's `co_occurring` block.
+
+**Why this is the right shape.**
+
+1. *One abstraction per phenomenon.* Nesting is structural (always present in market microstructure); deterministic enrichment is the right tool. Cross-day storytelling is judgment-shaped; an LLM with day context is the right tool. Forcing both through one mechanism was the original mistake.
+
+2. *Enrichment has no knob.* The parent event's own `[ts, ts_end]` defines the lookup window. No `MAX_GAP_MINUTES` or `MIN_CLUSTER_SIZE` constants. The data carries its own grouping signal.
+
+3. *Layer 3 dynamism beats hardcoded grouping.* The TQQQ case (open burst vs midday isolated events) requires session-phase awareness, news context, and cross-symbol coherence to narrate well. None of that lives in a fixed rule. An LLM reading the day's narrations can synthesize correctly without a maintained per-scorer time threshold.
+
+4. *Per-event narrations stay ground truth.* Anyone clicking through to investigate a specific event sees an unmerged narration. Repetition is handled at the *presentation* level (Layer 3 synthesis at the top of the daily page, optional UI grouping in the per-event list), not by destroying data.
+
+**Implementation plan.**
+
+Phase A: Build `EnrichWithCoOccurrenceActivity` (~2 hr)
+- New activity slots between `ScoreEventsActivity` and `SelectTopEventsActivity` in `ScoreWorkflowImpl`.
+- For each scored event above an interest floor (e.g., score in top percentile within its scorer), query other-scorer scored_events on the same symbol whose intervals fall inside the parent's `[ts, ts_end]`.
+- Aggregate summary stats per scorer type ({count, total_shares, median_lifetime, etc.}) into a `co_occurring` block on the parent's breakdown.
+- Set `subsumed_by_event_id` on each child row so `SelectTopEventsActivity` skips them.
+- Idempotent: pre-clean by trading_date.
+
+Phase B: Delete the disabled combine code (~10 min)
+- Remove `CombineRelatedEventsActivity` + `Impl`, `CombineWorkflow` + `Impl`.
+- Remove their `WorkerMain` registrations.
+- Remove the temporal-design.md + roadmap references.
+
+Phase C: Build Layer 3 daily synthesis (queued, ~half day)
+- New `SynthesizeDayWorkflow` runs after narration completes.
+- One LLM call per day. Input: list of all the day's narrations + day metadata (date, session phases, etc.). Output: a single "today's themes" paragraph.
+- Slot at top of the daily page in the vedanta-systems frontend.
+
+**Open follow-ups.**
+
+- *Decide enrichment's "interest floor."* Probably the top percentile (same threshold as selection) — only events selected for narration get enriched. Saves compute. Alternative: enrich everything in scored_events. Decide during build.
+- *Co-occurring scorer-type pairs.* Should a sweep's co_occurring include sweeps on the same symbol? Probably no (would double-count if both are selected); cross-scorer only. Confirm via test data.
+- *Cross-symbol enrichment.* Out of scope for now. Eventually: when AAPL is halted, AAPL-derivative ETF activity is relevant context. Requires correlated-symbol table (we don't have).
+- *Verifier extension for `co_occurring` block.* The verifier already walks all JSON values via `appendAllValues()`, so numbers in `co_occurring.during_event.post_cancel_clusters` are in the haystack. Should work without changes. Confirm during build.
+
+---
+
 ## 2026-05-18 — `order_lifecycle` materialized table between Parse and Score
 
 **Context.** Two of the seven event scorers — `PostCancelClusterScorer` and `LayeringScorer` — both ask the same underlying question: *"for every order placed on the book today, when (if ever) was it cancelled, and what was the gap?"* Both implementations queried `orders_add ⨝ orders_delete ON order_id` at scoring time, then post-filtered to lifetime < 50 ms.

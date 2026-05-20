@@ -141,6 +141,25 @@ That second pass costs another LLM call per event but produces narrations that *
 
 We haven't built this yet. The current Layer-2 narrations describe shape, not causation.
 
+### 5a. Events at multiple time scales — nested vs adjacent (2026-05-20)
+
+There's a related but separate phenomenon worth naming: the **same market dynamic** shows up across the scorer catalog at multiple time scales simultaneously.
+
+- A market maker pulling liquidity manifests at the sec-scale as `liquidity_withdrawal` (≥50 cancels with <100 ms gaps; the event might span 11 seconds).
+- The same activity manifests at the ms-scale as `post_cancel_cluster` events (≥20 orders posted-and-cancelled within tight windows; each cluster spans 10-50 ms).
+- And as `layering` events when those rapid cancellations span multiple price levels.
+- All three scorer types fire on the same wire-level events, just summarizing them at different resolutions.
+
+We tried initially to merge these into a single "combined" event via interval-overlap. **It overshot:** an 11-second liquidity_withdrawal would absorb 28+ post_cancel/layering events nested inside it, producing a 28-constituent "combined" event whose narration was unreadable. See decisions.md 2026-05-20.
+
+The right architectural distinction is **nested** vs **adjacent**:
+
+- **Nested**: a long-duration event contains many short-duration events of *different* scorer types. They're the same phenomenon at different zoom levels — one is the *mechanism* of the other. *Solution*: enrich the long event's breakdown with summary counts of the short ones (`co_occurring` block), suppress the short events from selection. One narrative, deterministic context.
+
+- **Adjacent**: same-symbol same-scorer events happening at different points in the day (e.g., TQQQ's 11 morning liquidity_withdrawals vs three isolated midday/afternoon ones). These are *different* phenomena that happen to be on the same symbol and scorer — markets behave structurally differently at different sessions. *Solution*: narrate each per-event independently. The day-level story is composed at Layer 3 daily synthesis, which uses an LLM with full-day context to thread the narrative dynamically without hardcoded gap thresholds.
+
+This distinction is the architectural correction that came out of the 2026-05-08 combine experiment.
+
 ## 6. The hierarchical context-cascade architecture
 
 ```
