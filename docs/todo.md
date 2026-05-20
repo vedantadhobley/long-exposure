@@ -381,6 +381,42 @@ The wrong abstraction is "combine overlapping events into one richer event" (we 
 
 ---
 
+## Parallelization audit (2026-05-20)
+
+End-to-end walkthrough of pipeline stages — what's parallel, what could be, what isn't worth doing.
+
+### Already parallel — no action
+
+| Stage | What's parallel | How |
+|---|---|---|
+| `DownloadWorkflow` | 3 URL resolves + 3 file downloads | `Async.function()` × 6 in workflow code |
+| `ValidateWorkflow` | 3 validator legs (DPLS↔DEEP, DPLS→TOPS, DEEP→TOPS) | `Async.function()` × 3, then `RecordValidationActivity` |
+| `MaterializeOrderLifecycleActivity` | Within-Postgres parallel workers on the JOIN | `max_parallel_workers_per_gather=16` server-side |
+| `SelectTopEventsActivity` | Postgres window functions | Single SQL, parallel inside PG |
+| `NarrateEventActivity` | 2 events at a time | Dedicated task queue + worker cap + workflow-side sliding window |
+
+### Queued — worth doing under specific triggers
+
+- [ ] **Parallelize the 7 scorers in `ScoreEventsActivity`.** **Trigger: before 30-day backfill or when dev iteration cost gets painful.** Sequential scoring of 7 scorers takes ~13 min on 2026-05-08 data, dominated by 3 heavies (PostCancel ~3:44, Layering ~3:27, LiquidityWithdrawal ~3:50; everything else <10 s combined). Running them in parallel would bound total at the slowest individual scorer ≈ 4 min — **saves ~9 min per scoring run**. Implementation: split `ScoreEventsActivity` into N activities (likely one per scorer or per scorer-group), fire from `ScoreWorkflowImpl` via `Async.function()`. Each parallel activity needs its own JDBC connection + `work_mem` setting + COPY buffer. **Risk**: PostCancel + Layering both read `order_lifecycle`, running them simultaneously could re-introduce the spill-to-disk problem we fixed via the lifecycle table — need to verify under load. Effort: ~3 hours of careful work.
+
+- [ ] **Day-level parallelism for the 30-day backfill.** **Trigger: only when actually running the backfill.** Each trading day's pipeline (parse → score → narrate) is independent. Sequential: 30 days × ~30 min = ~15 hours. Running 3-5 days concurrently could bring that down to ~5-6 hours. **Risks**: (1) Postgres mem pressure — running 5 days' scoring + materializing in parallel could OOM the host; need throttle (probably 3 max). (2) The narration task queue's worker cap is `2` global across all days, so concurrent days' narrations still serialize across the GPU cap. Concurrency is most effective on the parse + score + materialize stages, less on narration. Implementation: parent workflow that fires N `DailyPipelineWorkflow` child workflows in parallel with a configurable concurrency window (e.g., 3 at a time). Effort: 1-2 days of work.
+
+### Considered — rejected for now
+
+- **Parallelize `EnrichWithCoOccurrenceActivity` candidate processing.** ~350 candidates × ~10 ms each = 3.5 sec serial. Parallel would be ~ms. Not worth the engineering cost for sub-second savings.
+
+- **Parallel symbol-metadata HTTP fetches** in `RefreshSymbolMetadataActivityImpl`. NASDAQ-listed + other-listed currently fetched sequentially; could be parallel. Saves ~500 ms per weekly refresh. Not worth ~30 min of work.
+
+- **Parallel parse** — split pcap-ng stream across N worker threads. Currently ~35 min for 364 M rows. Hypothetical N-way parallelism could save 30-50 %. **Skip unless parse becomes a bottleneck**: production cron has plenty of headroom (35 min at midnight). High complexity, low marginal benefit, real risk of destabilizing a stable parser.
+
+### Ranking
+
+1. **#1 priority**: Parallel scorers — saves ~9 min/run, biggest single optimization.
+2. **#2 priority**: Day-level parallelism — only matters once for backfill, but saves ~10 hours one-time.
+3. Everything else: explicitly rejected.
+
+---
+
 ## Performance — scoring layer
 
 - [ ] **`order_lifecycle` materialized table** (the RIGHT fix to the PostCancel/Layering JOIN problem). Today PostCancel + Layering each run `orders_add ⨝ orders_delete ON (symbol, order_id)` over 162 M × 160 M rows on every scoring run. The hash table is ~13 GB, larger than any reasonable per-worker `work_mem`, so it spills to temp files (~9 GB observed). Each scorer runs this JOIN independently, so we pay the cost twice. Right shape: a new activity `MaterializeOrderLifecycleActivity` running once between Parse and Score that builds an `order_lifecycle` hypertable (one row per order: `order_id, symbol, side, add_ts, add_price, add_size, delete_ts, execute_ts, lifetime_ns, terminal_state`). PostCancel + Layering + future order-lifecycle scorers query that table as a sequential scan with an index on `(symbol, add_ts)`. Sub-second per scorer. Even better long-term: emit lifecycle rows directly from the parser since `OrderBook` already pairs Add+Delete at parse time — but that's a bigger refactor (touches writer + breaks the "one table per wire message" convention) and the activity-level materialization gets 95 % of the win for 10 % of the work. Defer the parser-side emission to a separate item.
