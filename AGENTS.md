@@ -25,7 +25,7 @@ No HTTP API in this repo. The public `/api/long-exposure/*` routes are served by
 - **Workflow orchestration**: Temporal (its own Postgres for metadata, separate from the events DB).
 - **Database**: Postgres 16 + TimescaleDB extension (`timescale/timescaledb:latest-pg16`). Hypertable for events; continuous aggregates for T-30 baselines.
 - **API**: FastAPI 3.12 (asyncpg + psycopg + pydantic + structlog).
-- **External LLM**: `Qwen3.5-122B-A10B` 4-bit quant via llama.cpp on `joi` (Framework Desktop Strix Halo, 128 GB unified). Observed throughput **~23 tok/sec** end-of-stream, which is the relevant number for capacity planning the narration loop (5–50 narrations/day × ~150 tokens each = budget-comfortable). OpenAI-compatible HTTP; reachable as `llama-large.joi` from the worker via the `luv-prod` / `luv-dev` shared docker network. Live model IDs may shift; check `curl http://joi.<tailnet>:3101/v1/models` before relying on them.
+- **External LLM**: `Qwen3.5-122B-A10B` 4-bit quant via llama.cpp on `joi` (Framework Desktop Strix Halo, 128 GB unified). Observed throughput **~23 tok/sec** end-of-stream, which is the relevant number for capacity planning the narration loop (5–50 narrations/day × ~150 tokens each = budget-comfortable). OpenAI-compatible HTTP; reachable as `llama-large.joi` from the worker via the `luv-prod` / `luv-dev` shared docker network (which is the shared network joi's caddy lives on via tailnet split-DNS for `*.joi`). Live model IDs may shift; check `curl http://llama-large.joi/v1/models` before relying on them.
 
 ## Where to look first
 
