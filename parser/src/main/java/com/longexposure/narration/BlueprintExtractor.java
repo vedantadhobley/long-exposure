@@ -2,6 +2,7 @@ package com.longexposure.narration;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.longexposure.llm.LlamaClient;
 import com.longexposure.llm.SamplingParams;
 
@@ -71,7 +72,22 @@ public final class BlueprintExtractor {
         // EXTRACT preset: low temperature + Qwen instruct base. Pass-1 wants
         // deterministic JSON, not prose variety, so presence_penalty is 0.
         String raw = llama.chat(SYSTEM_PROMPT, userPrompt, SamplingParams.EXTRACT);
-        return parseJson(raw);
+        JsonNode blueprint = parseJson(raw);
+
+        // Pass-through string fields the renderer needs but the extractor
+        // shouldn't waste tokens deciding about. company_name is the
+        // canonical company display string for the subject — sourced from
+        // the breakdown (which Enrich already normalized via
+        // CompanyNameNormalizer). Copied deterministically so the renderer
+        // sees ground truth without the LLM having a chance to paraphrase.
+        if (blueprint instanceof ObjectNode obj) {
+            JsonNode cn = breakdown.path("company_name");
+            if (cn.isTextual() && !cn.asText().isBlank()) {
+                obj.put("company_name", cn.asText());
+            }
+        }
+
+        return blueprint;
     }
 
     /**
