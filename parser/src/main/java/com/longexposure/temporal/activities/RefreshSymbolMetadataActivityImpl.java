@@ -1,5 +1,7 @@
 package com.longexposure.temporal.activities;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.longexposure.storage.SchemaManager;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -15,6 +17,7 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.Types;
 import java.time.Duration;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -26,11 +29,33 @@ public final class RefreshSymbolMetadataActivityImpl implements RefreshSymbolMet
             "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt";
     private static final String OTHER_LISTED_URL =
             "https://www.nasdaqtrader.com/dynamic/symdir/otherlisted.txt";
+    /**
+     * SEC EDGAR's canonical ticker → CIK + entity name mapping. Updated daily,
+     * one row per current ticker, ~13K entries. The {@code title} field is
+     * the SEC-registered entity name without filing-class decoration —
+     * "Apple Inc.", not "Apple Inc. - Common Stock". This is the cleanest
+     * public source for ticker → company-name lookups; we prefer it over
+     * the NASDAQ Security Name field whenever EDGAR has the ticker.
+     */
+    private static final String SEC_EDGAR_TICKERS_URL =
+            "https://www.sec.gov/files/company_tickers.json";
+
+    /**
+     * SEC's fair-access policy (https://www.sec.gov/os/accessing-edgar-data)
+     * requires a User-Agent containing a real contact email. Requests
+     * without one return 403. Override at deploy time via
+     * {@code SEC_USER_AGENT} env var if needed.
+     */
+    private static final String SEC_USER_AGENT = System.getenv().getOrDefault(
+            "SEC_USER_AGENT",
+            "LongExposure/1.0 admin@vedanta.systems");
 
     private final OkHttpClient http = new OkHttpClient.Builder()
             .connectTimeout(Duration.ofSeconds(15))
             .readTimeout(Duration.ofMinutes(2))
             .build();
+
+    private final ObjectMapper json = new ObjectMapper();
 
     @Override
     public long refreshSymbolMetadata() {
@@ -56,6 +81,16 @@ public final class RefreshSymbolMetadataActivityImpl implements RefreshSymbolMet
             throw new RuntimeException("otherlisted fetch failed", e);
         }
 
+        // Step 2.5: Overlay SEC EDGAR's canonical company names. Failure here
+        // is non-fatal — NASDAQ Security Names + the normalizer are an
+        // adequate fallback if SEC is unreachable.
+        try {
+            int n = overlayEdgarTitles(fetch(SEC_EDGAR_TICKERS_URL, SEC_USER_AGENT), merged);
+            LOG.info("edgar titles applied  rows_overlaid={}", n);
+        } catch (Exception e) {
+            LOG.warn("edgar fetch failed — falling back to NASDAQ Security Name only", e);
+        }
+
         // Step 3: merge in IEX SecurityDirectory data from our existing securities table
         long iexAugmented = 0;
         try (Connection conn = openConnection()) {
@@ -77,8 +112,13 @@ public final class RefreshSymbolMetadataActivityImpl implements RefreshSymbolMet
     // ─── HTTP ────────────────────────────────────────────────────────────────
 
     private String fetch(final String url) throws IOException {
-        Request req = new Request.Builder().url(url).get().build();
-        try (Response resp = http.newCall(req).execute()) {
+        return fetch(url, null);
+    }
+
+    private String fetch(final String url, final String userAgent) throws IOException {
+        Request.Builder b = new Request.Builder().url(url).get();
+        if (userAgent != null) b.header("User-Agent", userAgent);
+        try (Response resp = http.newCall(b.build()).execute()) {
             if (!resp.isSuccessful()) {
                 throw new IOException("HTTP " + resp.code() + " from " + url);
             }
@@ -175,6 +215,133 @@ public final class RefreshSymbolMetadataActivityImpl implements RefreshSymbolMet
             case "V" -> "IEX";
             default  -> code;
         };
+    }
+
+    // ─── SEC EDGAR overlay ───────────────────────────────────────────────────
+
+    /**
+     * SEC publishes {@code company_tickers.json} as a JSON object keyed by
+     * numeric index, each value containing {@code cik_str}, {@code ticker},
+     * and {@code title}. The {@code title} is the registrant's name with
+     * no filing-class decoration — what we want.
+     *
+     * <p>For symbols we already have in {@code merged}, overlay EDGAR's
+     * {@code title} on top of NASDAQ's {@code Security Name}. Symbols
+     * absent from EDGAR keep the NASDAQ value (which {@link
+     * com.longexposure.narration.CompanyNameNormalizer} cleans at score
+     * time as a fallback). Symbols present in EDGAR but absent from
+     * NASDAQ are ignored — without exchange / round-lot metadata they
+     * aren't useful for narration.
+     */
+    private int overlayEdgarTitles(final String body, final Map<String, Row> out) throws IOException {
+        JsonNode root = json.readTree(body);
+        if (!root.isObject()) {
+            throw new IOException("EDGAR ticker file was not a JSON object");
+        }
+        int overlaid = 0;
+        Iterator<Map.Entry<String, JsonNode>> it = root.fields();
+        while (it.hasNext()) {
+            JsonNode entry = it.next().getValue();
+            String ticker = entry.path("ticker").asText("");
+            String title  = entry.path("title").asText("");
+            if (ticker.isEmpty() || title.isEmpty()) continue;
+            Row row = out.get(ticker);
+            if (row == null) continue;   // not in our NASDAQ-listed universe
+            if (preferEdgar(row.companyName, title)) {
+                row.companyName = titleCase(title);
+                overlaid++;
+            }
+        }
+        return overlaid;
+    }
+
+    /**
+     * Whether EDGAR's title should overlay the NASDAQ Security Name.
+     * Logic: EDGAR wins unless NASDAQ has good mixed-case content that
+     * EDGAR's all-caps version would degrade. Mixed-case carries brand
+     * styling ("NVIDIA Corporation", "FuelCell Energy, Inc.") that an
+     * all-caps EDGAR entry would lose through naive title-casing.
+     *
+     * <ul>
+     *   <li>NASDAQ absent → EDGAR wins
+     *   <li>EDGAR mixed-case → EDGAR wins (canonical, no decoration)
+     *   <li>EDGAR all-caps + NASDAQ mixed-case → NASDAQ wins
+     *   <li>Both all-caps → EDGAR wins (we'll title-case it; NASDAQ has
+     *       filing decoration that the normalizer needs to strip anyway)
+     * </ul>
+     */
+    static boolean preferEdgar(final String nasdaqName, final String edgarTitle) {
+        if (nasdaqName == null || nasdaqName.isBlank()) return true;
+        boolean edgarMixed  = isMixedCase(edgarTitle);
+        boolean nasdaqMixed = isMixedCase(nasdaqName);
+        if (edgarMixed) return true;
+        return !nasdaqMixed;
+    }
+
+    private static boolean isMixedCase(final String s) {
+        if (s == null) return false;
+        boolean hasLower = false, hasUpper = false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (Character.isLowerCase(c)) hasLower = true;
+            else if (Character.isUpperCase(c)) hasUpper = true;
+            if (hasLower && hasUpper) return true;
+        }
+        return false;
+    }
+
+    /**
+     * SEC titles are inconsistent in case ("Apple Inc." vs "MICROSOFT
+     * CORP" vs "Vanguard Index Funds"). Title-case the all-uppercase ones
+     * conservatively — preserve already-mixed-case titles untouched (they
+     * encode meaningful case like "plc" or "iShares" the title-case rule
+     * would damage).
+     */
+    static String titleCase(final String s) {
+        if (s == null || s.isBlank()) return s;
+        // Already mixed case? Leave it alone.
+        boolean hasLower = false, hasUpper = false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (Character.isLowerCase(c)) hasLower = true;
+            else if (Character.isUpperCase(c)) hasUpper = true;
+        }
+        if (hasLower && hasUpper) return s;
+        if (!hasUpper) return s;     // all lowercase, also unusual but leave
+
+        // All-caps input → title-case word by word, preserving entity-type
+        // tokens in their canonical form.
+        String[] words = s.toLowerCase().split("\\s+");
+        StringBuilder out = new StringBuilder(s.length());
+        for (int i = 0; i < words.length; i++) {
+            if (i > 0) out.append(' ');
+            out.append(capitalizeEntityAware(words[i]));
+        }
+        return out.toString();
+    }
+
+    private static String capitalizeEntityAware(final String word) {
+        if (word == null || word.isEmpty()) return word;
+        // Common entity tokens have canonical forms not produced by naive title-case.
+        return switch (word.replaceAll("[^a-z]", "")) {
+            case "inc"   -> applyCaseTemplate(word, "Inc");
+            case "corp"  -> applyCaseTemplate(word, "Corp");
+            case "ltd"   -> applyCaseTemplate(word, "Ltd");
+            case "plc"   -> applyCaseTemplate(word, "plc");
+            case "llc"   -> applyCaseTemplate(word, "LLC");
+            case "lp"    -> applyCaseTemplate(word, "LP");
+            case "nv"    -> applyCaseTemplate(word, "N.V.");
+            case "ag"    -> applyCaseTemplate(word, "AG");
+            case "sa"    -> applyCaseTemplate(word, "S.A.");
+            default      -> Character.toUpperCase(word.charAt(0)) + word.substring(1);
+        };
+    }
+
+    /** Apply replacement while preserving trailing punctuation. */
+    private static String applyCaseTemplate(final String original, final String canonical) {
+        int idx = original.length() - 1;
+        while (idx >= 0 && !Character.isLetterOrDigit(original.charAt(idx))) idx--;
+        return canonical + original.substring(idx + 1);
     }
 
     // ─── IEX SecurityDirectory augmentation ──────────────────────────────────
