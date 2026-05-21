@@ -4,6 +4,129 @@ Append-only record of architectural and operational decisions, ordered by date. 
 
 ---
 
+## 2026-05-21 — SEC EDGAR as the canonical source for company names
+
+**Context.** After landing structured render output (entry below) we observed a residual failure mode: the model would invent company names from training memory when the breakdown's `company_name` came from NASDAQ's `Security Name` field carrying SEC filing decoration ("Odyssey Therapeutics, Inc. - Common Stock"). The model would "improve" the noisy string and sometimes substitute a completely different company ("Oculus Dynamics Inc." for ODTX, "Mayweather Inc." for an AllianzIM ETF, "Anterix Inc." for Antelope Enterprise Holdings).
+
+The root cause wasn't a prompt failure — it was a *data source* problem. NASDAQ's `nasdaqlisted.txt` and `otherlisted.txt` publish `Security Name`, which is designed to *identify a security* (and therefore needs filing class info to disambiguate common stock vs warrant vs preferred). It does not expose a clean "company name" field separately. The normalizer was extracting the company name from a security identifier — fighting the source.
+
+**Decided.** Add SEC EDGAR's `company_tickers.json` as the primary source for `breakdown.company_name`, with NASDAQ Security Name as fallback for the long tail (mostly ETFs and warrants EDGAR doesn't list).
+
+- `RefreshSymbolMetadataActivityImpl` fetches `https://www.sec.gov/files/company_tickers.json` (10,365 tickers as of 2026-05-21) after parsing the NASDAQ files
+- EDGAR's `title` field is the SEC-registered entity name without filing decoration — "Apple Inc." rather than "Apple Inc. - Common Stock"
+- Per-ticker preference rule: EDGAR wins when EDGAR is mixed-case; NASDAQ wins when EDGAR returns all-caps and NASDAQ has brand-correct mixed case (`NVDA` → NASDAQ's "NVIDIA Corporation" beats EDGAR's "NVIDIA CORP"; same for `FCEL` → "FuelCell Energy, Inc." beats "FUELCELL ENERGY INC")
+- SEC's fair-access policy requires a User-Agent containing a contact email; we send `LongExposure/1.0 admin@vedanta.systems` and the policy is overridable via `SEC_USER_AGENT` env
+- EDGAR fetch failure is non-fatal — falls back to NASDAQ + `CompanyNameNormalizer` cleanup
+
+**Alternatives considered and rejected.**
+
+| Alternative | Why rejected |
+|---|---|
+| Extend `FILING_DECORATION` to cover MLP/ETN suffixes via more tokens | Some words (`limited`, `partner`) collide with legitimate entity-type suffixes ("Antelope Enterprise Holdings Limited"). Token-walking can't distinguish suffix-as-decoration from suffix-as-identity. |
+| Use OpenFIGI (Bloomberg's free reference data API) | Requires API key + per-request rate limits; SEC EDGAR is the official US issuer name source and is bulk-downloadable. |
+| Maintain a static ticker → company-name lookup file | Works but requires manual updates; SEC EDGAR updates daily and is canonical. |
+| Use the LLM itself to clean company names ("given this ticker, what's the clean company name?") | Re-introduces the fabrication risk the entire architecture is designed to prevent. |
+
+**Tradeoffs accepted.**
+
+- EDGAR's coverage is operating companies + most US-registered ETFs but not all ETNs / warrants / foreign listings. The 2026-05-21 refresh overlaid 4,668 of the 12,637 symbols. Fallback path (NASDAQ + normalizer with multi-word MLP/ETN-due-date pre-strip) handles the rest.
+- EDGAR sometimes drops articles ("Trade Desk, Inc." for TTD where NASDAQ has "The Trade Desk, Inc."). Acceptable — both forms are journalistically valid.
+- EDGAR is inconsistent in case: some titles mixed-case ("Apple Inc."), some all-caps ("MICROSOFT CORP", "NVIDIA CORP"). The preference rule handles this by keeping NASDAQ when its mixed case is the brand-correct form.
+
+**Why the architecture is now stable.**
+
+The normalizer (token-based, no maintained pattern list) is now a fallback that runs essentially as a no-op on EDGAR's clean output and only does meaningful work for NASDAQ-sourced names. The combined data flow is:
+
+```
+NASDAQ Security Name (noisy)  ┐
+                              ├──> symbols.company_name
+EDGAR title (clean, primary)  ┘             │
+                                            ▼
+                              Enrich.symbol() — normalizer (idempotent for clean)
+                                            │
+                                            ▼
+                              breakdown.company_name (always clean)
+                                            │
+                                            ▼
+                              BlueprintExtractor pass-through to blueprint
+                                            │
+                                            ▼
+                              ProseRenderer uses verbatim in lead slot
+                                            │
+                                            ▼
+                              GroundingVerifier Layer-4: agreement check
+```
+
+Every layer has one job. No code-side "substitution" rewriting the LLM's output.
+
+---
+
+## 2026-05-21 — Structured JSON output for the prose-render pass
+
+**Context.** Prose iterations v3–v5 repeatedly leaked qualitative filler when the breakdown was thin. The v4 prompt brought filler down to ~0.6% via explicit forbidden-categories rules, but the residual cases all shared a shape: the model had unconstrained "freestyle space" to fill when there weren't enough facts to support a 2-3 sentence paragraph. Examples like "the security is now trading normally" and "marking the end of one of the longer trading interruptions recorded that day" — factually unsupported claims invented to satisfy the implicit length expectation.
+
+Reactive prompt rules to forbid each filler pattern would not generalize; new patterns would appear with every run. The root issue was that prose has unbounded surface area.
+
+**Decided.** Replace free-form prose output with a three-slot JSON object enforced at the sampler via OpenAI-compatible `response_format: json_schema, strict: true`.
+
+```json
+{
+  "lead":         "<one sentence — subject + action + ≥1 key_number>",
+  "facts":        ["<sentence>", "<sentence>", ...],
+  "co_occurring": "<one sentence>" | null
+}
+```
+
+`RenderResult` is the corresponding Java record; `stitched()` joins the slots into the final prose with single-space separators. The `narratives` table gets a `render_structured JSONB` column alongside the existing `narrative TEXT`, so downstream consumers can read prose or query semantically.
+
+**Why this works structurally.**
+
+- The model has nowhere to write filler. Every output token lives in a named slot whose semantics are constrained by the prompt and validated by the schema.
+- `co_occurring` is `required` in the schema and nullable in type, with the user prompt explicitly indicating presence/absence based on the breakdown. The slot can't silently disappear (must be set to `null` or a sentence).
+- Schema enforcement is at the sampler, not post-hoc validation. llama.cpp zeros the logits of tokens that would break the JSON structure, so what comes back is guaranteed parseable.
+
+**Empirical validation (2026-05-08 dataset, 164 events).**
+
+| Run | Verifier pass | Filler patterns |
+|---|---|---|
+| pre-Qwen RENDER (free prose, old prompt) | 164/164 | 1/164 (0.6%) |
+| v3 Qwen RENDER (free prose, old prompt) | 41/41 (partial) | 4/41 (~10%) |
+| v4 Qwen RENDER (free prose, adaptive length + forbid-list) | 164/164 | 1/164 (0.6%) |
+| v6 Qwen RENDER (structured output, schema-enforced) | 164/164 | 0/164 (0%) |
+
+Qualitative filler patterns ("now trading normally", "regular market activity") absent from v6 by construction; they had no slot to live in.
+
+**Alternatives considered and rejected.**
+
+| Alternative | Why rejected |
+|---|---|
+| Tighter prompt with explicit forbidden phrases | Reactive and unbounded — every new filler pattern would add a rule. The same anti-pattern as a maintained denylist, just in prompt-text form. |
+| GBNF grammar (llama.cpp-native grammar constraint) | More powerful than JSON Schema for non-JSON outputs, but JSON Schema is more portable (any OpenAI-compatible server supports it) and easier to maintain. Reserved for future non-JSON structured-output needs. |
+| Per-scorer-type prompts | Would diverge fast and require maintenance per scorer. Single prompt + schema handles all 7 scorer types. |
+| Cap output via `max_tokens` | Mechanical but blunt — would truncate legitimately rich narrations. |
+
+**Tradeoffs accepted.**
+
+- Sentence ordering within the lead is fixed (subject + action + primary number). Free prose allowed reorderings that read more naturally for some events; structured output is more uniform.
+- The model's prose-flow creativity is limited to intra-sentence word choice, not paragraph structure.
+- Schema-enforcement is llama.cpp-specific syntax under the hood, though the OpenAI-compatible `response_format` shape is portable.
+
+---
+
+## 2026-05-21 — Don't pass company name through code substitution; pass through data instead
+
+**Context.** A failed iteration during today's work, preserved here as a worked counterexample. After observing the v6 structured output had moved fabrication from "occasional in free prose" to "frequent in the lead slot" (model invented "Oculus Dynamics Inc." for ODTX, "Mayweather Inc." for an AllianzIM ETF, etc.), the first proposed fix was a `SubjectSubstitution` post-render transform: strip `company_name` from what the model sees, let it write the ticker, then code substitutes `"<company> (TICKER)"` into the prose after the verifier runs.
+
+That approach was implemented (small helper class + tests + pipeline step) and then deliberately reverted before deployment, after user pushback identified it as overcomplicated. The issue: it makes the published prose diverge from what the model produced, requires handling parenthetical-vs-bare-ticker edge cases, and adds a presentation transform downstream of the verifier (so the verifier validates one thing and we publish another).
+
+**Decided.** Use a data-pass-through architecture instead. The breakdown's `company_name` (cleaned via `CompanyNameNormalizer`, sourced primarily from EDGAR per the entry above) gets carried into the blueprint by `BlueprintExtractor.extract()` as a deterministic code-level copy after the LLM call returns. The renderer sees the canonical name in its input and uses it verbatim. The verifier's Layer-4 check enforces agreement between the prose's parenthetical-company form and `breakdown.company_name`.
+
+**Architectural principle established.** The LLM is for prose flow, not for table lookups. When data is unambiguously known (ticker → company name), the right move is to plumb the data through cleanly, not to ask the LLM to retrieve it from memory. Code transformations should improve *what the model sees* (clean inputs), not *what the user sees* (post-render rewrites).
+
+**The reverted attempt is preserved in git history** (commits 1410e09, 420d63c, 8cc3256, f7e536f and their reverts 45d5cb8, ce42d0d, dd6dd85). Future readers asking "why didn't we substitute company names in code?" can read the reverted diff and this entry to understand the bound.
+
+---
+
 ## 2026-05-20 — Cross-event combining is the wrong abstraction; replace with co-occurrence enrichment + Layer 3 synthesis
 
 **Context.** Built `CombineRelatedEventsActivity` to handle the IWM-style use case: two events on the same symbol firing 300 ms apart should narrate as one paragraph instead of two repetitive ones. The implementation merged any two events on the same symbol whose `[ts, ts_end]` intervals overlapped, packaging them under a synthetic `scorer_id = 'combined'` row with a nested `constituents[]` breakdown.
