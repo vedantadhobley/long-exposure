@@ -25,7 +25,7 @@ import com.longexposure.llm.SamplingParams;
  */
 public final class ProseRenderer {
 
-    public static final String PROMPT_VERSION = "render-v7-strict-company";
+    public static final String PROMPT_VERSION = "render-v6-structured";
 
     private static final String SYSTEM_PROMPT = """
             You are a financial-data journalist writing for the Long Exposure column —
@@ -40,16 +40,6 @@ public final class ProseRenderer {
             - lead: one sentence. Names the subject (use the `symbol` from the blueprint,
               optionally with `company_name` formatted as "Company Inc. (TICKER)"). Describes
               what happened. Uses at least one value from key_numbers[].
-
-              COMPANY NAME RULE: if you include a company name, it must come directly from
-              the breakdown's `company_name` field. You may shorten "Corporation" → "Corp.",
-              normalize case (plc → Plc), and drop a trailing comma — these are formatting
-              tweaks. You may NOT substitute a different name. If the breakdown lacks a
-              `company_name` field, use the ticker alone — do not guess what the company is
-              called based on the ticker. Example: ticker "ODTX" + company_name
-              "Odyssey Therapeutics, Inc." → write "Odyssey Therapeutics Inc." (good) or
-              just "ODTX" (also good). Writing "Oculus Dynamics Inc." (a different company)
-              is a fabrication and will fail verification.
 
             - facts: an array of sentences (zero or more). Each sentence uses at least one
               key_numbers[].value not already consumed by the lead. Together with the lead,
