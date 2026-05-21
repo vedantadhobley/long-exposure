@@ -63,9 +63,11 @@ public final class CompanyNameNormalizer {
                     "\\s*-?\\s*Common\\s+Units\\s+representing\\s+Limited\\s+Partner\\s+Interests\\s*$",
                     Pattern.CASE_INSENSITIVE),
             // ETN-style "due <Date>" maturity suffixes — informative for
-            // structured-product accuracy but not part of issuer name
+            // structured-product accuracy but not part of issuer name.
+            // Matches "due October", "due October 2030", "due October 30",
+            // "due October 30, 2043", and variants with separating commas.
             Pattern.compile(
-                    "\\s+due\\s+[A-Za-z]+(?:\\s+\\d{4})?\\s*$",
+                    "\\s+due\\s+[A-Za-z]+(?:\\s+\\d{1,2})?(?:,?\\s+\\d{4})?\\s*$",
                     Pattern.CASE_INSENSITIVE),
     };
 

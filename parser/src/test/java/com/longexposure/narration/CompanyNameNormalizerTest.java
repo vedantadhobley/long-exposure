@@ -101,5 +101,10 @@ final class CompanyNameNormalizerTest {
                 CompanyNameNormalizer.normalize("MAX S&P 500 4X Leveraged ETNs due October"));
         assertEquals("MAX S&P 500 4X Leveraged ETNs",
                 CompanyNameNormalizer.normalize("MAX S&P 500 4X Leveraged ETNs due October 2030"));
+        // Real SPYU format observed in NASDAQ otherlisted: "due October 30, 2043"
+        assertEquals("MAX S&P 500 4X Leveraged ETNs",
+                CompanyNameNormalizer.normalize("MAX S&P 500 4X Leveraged ETNs due October 30, 2043"));
+        assertEquals("MAX S&P 500 4X Leveraged ETNs",
+                CompanyNameNormalizer.normalize("MAX S&P 500 4X Leveraged ETNs due October 30"));
     }
 }
