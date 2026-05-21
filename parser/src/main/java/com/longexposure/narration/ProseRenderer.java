@@ -25,7 +25,7 @@ import com.longexposure.llm.SamplingParams;
  */
 public final class ProseRenderer {
 
-    public static final String PROMPT_VERSION = "render-v7-blueprint-only";
+    public static final String PROMPT_VERSION = "render-v8-tight-slots";
 
     private static final String SYSTEM_PROMPT = """
             You are a financial-data journalist writing for the Long Exposure column —
@@ -52,6 +52,13 @@ public final class ProseRenderer {
               part of the parent's story, not separate phenomena. Set to null if the
               breakdown contains no `co_occurring` block.
 
+              IDENTIFYING CO_OCCURRING VALUES: in the blueprint, any `key_numbers[]`
+              entry whose `source_field` begins with `"co_occurring."` (e.g.
+              `"co_occurring.during_event.post_cancel_cluster.sum_orders"`) is
+              co_occurring data. These values belong in the `co_occurring` slot, NOT
+              in the `facts[]` array. Conversely, values whose source_field is a
+              top-level breakdown field belong in `lead` or `facts[]`.
+
             GROUNDING — THIS IS THE PRIMARY RULE:
 
             The blueprint is your only source of truth. Use only:
@@ -65,6 +72,12 @@ public final class ProseRenderer {
             only as they appear in the blueprint — no rounding, paraphrasing, or
             approximating.
 
+            NO REDUNDANT TAIL SENTENCES: do not append sentences that merely restate what
+            the existing facts already convey. If you have stated a halt's start time and
+            end time, do not also write "Trading resumed following the suspension" — the
+            end-time fact already conveys that. The reader infers the obvious from the
+            data; only narrate facts that add information.
+
             STYLE:
 
             - Use exchange and timezone abbreviations naturally ("on the NYSE", "at 14:00 ET").
@@ -73,10 +86,27 @@ public final class ProseRenderer {
             """;
 
     /**
-     * JSON Schema sent to llama.cpp via {@code response_format} so the
-     * sampler is constrained to a parseable shape. Built once + reused.
+     * Two pre-built schema variants. The schema is selected per-call
+     * based on whether the breakdown contains a co_occurring block:
+     *
+     * <ul>
+     *   <li>{@link #schemaWithCoOccurring} — co_occurring is a
+     *       required non-null string. The model MUST emit a sentence
+     *       there; it cannot dump the data into facts[] and leave the
+     *       slot null.
+     *   <li>{@link #schemaWithoutCoOccurring} — co_occurring is
+     *       required to be null. There's no enrichment data to surface,
+     *       so the slot must be null.
+     * </ul>
+     *
+     * <p>Branching the schema per-call (rather than using a single
+     * nullable schema) is what enforces the semantic separation —
+     * before this, the schema allowed null even when data was present,
+     * and the model always chose null and stuffed the co_occurring
+     * data into facts[] instead.
      */
-    private final JsonNode schema;
+    private final JsonNode schemaWithCoOccurring;
+    private final JsonNode schemaWithoutCoOccurring;
     private final LlamaClient llama;
     private final ObjectMapper json;
 
@@ -87,20 +117,24 @@ public final class ProseRenderer {
     public ProseRenderer(final LlamaClient llama, final ObjectMapper json) {
         this.llama  = llama;
         this.json   = json;
-        this.schema = buildSchema(json);
+        this.schemaWithCoOccurring    = buildSchema(json, /*coOccurringNullable=*/ false);
+        this.schemaWithoutCoOccurring = buildSchema(json, /*coOccurringNullable=*/ true);
     }
 
     public RenderResult render(final JsonNode blueprint) {
         boolean hasCoOccurring = hasCoOccurringBlock(blueprint);
+        JsonNode schema = hasCoOccurring ? schemaWithCoOccurring : schemaWithoutCoOccurring;
         String userPrompt =
                 "Blueprint (your only source of facts):\n" +
                 blueprint.toPrettyString() +
                 "\n\n" +
                 (hasCoOccurring
-                        ? "The blueprint's breakdown contains co_occurring data — the "
-                          + "co_occurring slot is REQUIRED and must reference at least "
-                          + "one number from that block."
-                        : "No co_occurring block in the breakdown — set co_occurring to null.") +
+                        ? "The blueprint's breakdown contains co_occurring data. The schema "
+                          + "REQUIRES the co_occurring slot to be a non-null sentence — "
+                          + "it cannot be null. Reference at least one number from the "
+                          + "co_occurring block in that sentence."
+                        : "No co_occurring block in the breakdown — the schema requires "
+                          + "co_occurring to be null.") +
                 "\n\nEmit the JSON object now.";
 
         // RENDER preset = Qwen3.5 "Instruct mode for general tasks" verbatim
@@ -116,23 +150,41 @@ public final class ProseRenderer {
         }
     }
 
-    private static boolean hasCoOccurringBlock(final JsonNode blueprint) {
-        // Look in two places: the blueprint's own top-level co_occurring (if extractor
-        // surfaced it) and the embedded breakdown reference, since extractor prompts
-        // vary in whether they hoist nested fields.
-        JsonNode bd = blueprint.path("breakdown");
-        JsonNode co = bd.path("co_occurring");
-        if (!co.isMissingNode() && !co.isNull()) return true;
-        co = blueprint.path("co_occurring");
-        return !co.isMissingNode() && !co.isNull();
+    /**
+     * Detects whether this blueprint carries co_occurring data by
+     * inspecting {@code key_numbers[].source_field} for paths beginning
+     * with {@code "co_occurring."}. The extractor populates source_field
+     * with the dotted path through the breakdown, so any number sourced
+     * from the breakdown's co_occurring block has a source_field like
+     * {@code "co_occurring.during_event.post_cancel_cluster.sum_orders"}.
+     *
+     * <p>This is the load-bearing detection that decides which schema
+     * variant to send (co_occurring required vs co_occurring null).
+     */
+    static boolean hasCoOccurringBlock(final JsonNode blueprint) {
+        JsonNode keyNumbers = blueprint.path("key_numbers");
+        if (!keyNumbers.isArray()) return false;
+        for (JsonNode kn : keyNumbers) {
+            String src = kn.path("source_field").asText("");
+            if (src.startsWith("co_occurring.") || src.equals("co_occurring")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
      * JSON Schema for the render output. Top-level object with three
-     * required keys; {@code co_occurring} is nullable so the LLM can
-     * signal "no enrichment" cleanly.
+     * required keys.
+     *
+     * @param coOccurringNullable when true, co_occurring is {@code null}
+     *                            (the breakdown has no co_occurring block,
+     *                            so the slot must be empty). When false,
+     *                            co_occurring must be a non-null string
+     *                            with {@code minLength=1} (the breakdown
+     *                            has data the model must surface).
      */
-    private static JsonNode buildSchema(final ObjectMapper json) {
+    private static JsonNode buildSchema(final ObjectMapper json, final boolean coOccurringNullable) {
         ObjectNode root = json.createObjectNode();
         root.put("type", "object");
         root.put("additionalProperties", false);
@@ -149,7 +201,14 @@ public final class ProseRenderer {
         factsItems.put("minLength", 1);
 
         ObjectNode coOccurring = props.putObject("co_occurring");
-        coOccurring.putArray("type").add("string").add("null");
+        if (coOccurringNullable) {
+            // No co_occurring data in the breakdown — must be null.
+            coOccurring.put("type", "null");
+        } else {
+            // Breakdown has co_occurring data — must be a non-empty sentence.
+            coOccurring.put("type", "string");
+            coOccurring.put("minLength", 1);
+        }
 
         root.putArray("required").add("lead").add("facts").add("co_occurring");
         return root;
