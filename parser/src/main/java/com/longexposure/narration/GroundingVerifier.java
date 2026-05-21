@@ -17,7 +17,7 @@ import java.util.regex.Pattern;
  * the narration pipeline. Trusts the LLM to write natural financial
  * prose; checks only the two things that can go genuinely wrong.
  *
- * <p>Three checks:
+ * <p>Four checks:
  * <ol>
  *   <li><b>blueprint key_numbers ⊆ breakdown</b> — every
  *       {@code source_field} reference in the blueprint must be a real
@@ -32,6 +32,12 @@ import java.util.regex.Pattern;
  *       in the prose. Catches the ODDTX-from-ODTX class of
  *       hallucination: if the model fabricates a symbol variant, the
  *       real symbol won't be in prose anywhere.
+ *   <li><b>prose company name ⊆ breakdown company_name</b> — when the
+ *       prose introduces the subject in "<Words> (TICKER)" form, the
+ *       words must token-subset agree with the breakdown's
+ *       {@code company_name}. Catches the model substituting a company
+ *       name from training memory when its memory disagrees with the
+ *       breakdown.
  * </ol>
  *
  * <p><b>Explicitly NOT doing</b>: scanning prose for all-caps tokens
@@ -126,8 +132,73 @@ public final class GroundingVerifier {
                     + "\" not found in prose — possible fabrication or wrong-subject hallucination");
         }
 
+        // Layer 4: if the prose introduces the subject in "<Words> (TICKER)"
+        // form (the journalist "Company (TICKER)" pattern), the <Words> must
+        // agree with the breakdown's company_name. Token-subset comparison —
+        // accepts standard abbreviation ("Intel Corp." for "Intel Corporation")
+        // but rejects substitution from training memory.
+        if (!eventSymbol.isEmpty()) {
+            String bdCompany = breakdown.path("company_name").asText("");
+            if (!bdCompany.isEmpty()) {
+                String proseCompany = extractParentheticalCompany(prose, eventSymbol);
+                if (proseCompany != null && !companyNamesAgree(proseCompany, bdCompany)) {
+                    mismatches.add("prose company \"" + proseCompany
+                            + "\" does not match breakdown company_name \"" + bdCompany
+                            + "\" for ticker " + eventSymbol);
+                }
+            }
+        }
+
         boolean passed = mismatches.isEmpty();
         return new Result(passed, mismatches, proseNumbers.size());
+    }
+
+    /** Matches "<Words> (TICKER)" — pulls out the <Words> capture. */
+    static String extractParentheticalCompany(final String prose, final String symbol) {
+        Pattern p = Pattern.compile(
+                "([A-Z][A-Za-z0-9. ,&'-]{1,80}?)\\s+\\(" + Pattern.quote(symbol) + "\\)");
+        Matcher m = p.matcher(prose);
+        return m.find() ? m.group(1).trim() : null;
+    }
+
+    /**
+     * Token-subset agreement: lowercase + strip punctuation + drop
+     * entity-type tokens (Inc, Corp, Ltd, etc.) + drop filing-decoration
+     * tokens (Common, Stock, Class, etc.), then check every significant
+     * prose token appears in the breakdown's token set.
+     *
+     * <p>Accepts: "Intel Corp." ↔ "Intel Corporation"; "Toast, Inc." ↔
+     * "Toast, Inc. Class A Common Stock"; "Accenture Plc" ↔ "Accenture plc".
+     * Rejects: "Anterix Inc." ↔ "Antelope Enterprise Holdings"; any
+     * substitution of unrelated words.
+     */
+    static boolean companyNamesAgree(final String proseCompany, final String bdCompany) {
+        Set<String> proseTokens = significantTokens(proseCompany);
+        if (proseTokens.isEmpty()) return true;   // only structural tokens — nothing to verify
+        Set<String> bdTokens = significantTokens(bdCompany);
+        return bdTokens.containsAll(proseTokens);
+    }
+
+    /** Tokens that are entity-type / filing-decoration noise (vs identity). */
+    private static final Set<String> STRUCTURAL_TOKENS = Set.of(
+            "inc", "incorporated", "corp", "corporation",
+            "co", "company", "companies",
+            "ltd", "limited", "plc", "llc", "lp", "lllp", "nv", "ag", "sa",
+            "the", "and", "of",
+            "common", "stock", "class", "series", "ordinary", "shares",
+            "trust", "fund", "etf", "etn", "adr"
+    );
+
+    private static Set<String> significantTokens(final String name) {
+        Set<String> out = new HashSet<>();
+        if (name == null || name.isBlank()) return out;
+        for (String raw : name.toLowerCase().split("[\\s.,&()/'\\-]+")) {
+            String t = raw.replaceAll("[^a-z0-9]", "");
+            if (t.length() < 2) continue;
+            if (STRUCTURAL_TOKENS.contains(t)) continue;
+            out.add(t);
+        }
+        return out;
     }
 
     /**

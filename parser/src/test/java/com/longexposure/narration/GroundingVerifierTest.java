@@ -4,7 +4,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -115,5 +117,63 @@ final class GroundingVerifierTest {
         assertFalse(r.passed());
         assertTrue(r.mismatches().stream().anyMatch(m -> m.contains("co_occurring.invented.path")),
                 "expected mismatch to cite the missing dotted path: " + r.mismatches());
+    }
+
+    @Test
+    void companyName_acceptsStandardAbbreviation() {
+        // Intel Corp. (INTC) — breakdown has "Intel Corporation" (post-normalizer)
+        assertTrue(GroundingVerifier.companyNamesAgree("Intel Corp.", "Intel Corporation"));
+        // Toast, Inc. ↔ Toast, Inc. (identical post-normalization)
+        assertTrue(GroundingVerifier.companyNamesAgree("Toast, Inc.", "Toast, Inc."));
+        // plc / Plc case differences
+        assertTrue(GroundingVerifier.companyNamesAgree("Accenture Plc", "Accenture plc"));
+        // The ETF identity stays intact
+        assertTrue(GroundingVerifier.companyNamesAgree("Vanguard Russell 2000 ETF",
+                "Vanguard Russell 2000 ETF"));
+    }
+
+    @Test
+    void companyName_rejectsSubstitution() {
+        // ODTX case from v6: model wrote "Oculus Dynamics Inc."
+        assertFalse(GroundingVerifier.companyNamesAgree("Oculus Dynamics Inc.",
+                "Odyssey Therapeutics, Inc."));
+        // AEHL: completely different company
+        assertFalse(GroundingVerifier.companyNamesAgree("Anterix Inc.",
+                "Antelope Enterprise Holdings Limited"));
+        // MAYW: invented name for an ETF
+        assertFalse(GroundingVerifier.companyNamesAgree("Mayweather Inc.",
+                "AllianzIM U.S. Large Cap Buffer20 May ETF"));
+        // LODE: added a word the breakdown doesn't have
+        assertFalse(GroundingVerifier.companyNamesAgree("Comstock Mining Inc.", "Comstock Inc."));
+    }
+
+    @Test
+    void extractParentheticalCompany_findsThePattern() {
+        assertEquals("Intel Corp.",
+                GroundingVerifier.extractParentheticalCompany(
+                        "Intel Corp. (INTC) experienced a layering event.", "INTC"));
+        assertNull(GroundingVerifier.extractParentheticalCompany(
+                "INTC experienced a layering event.", "INTC"));
+    }
+
+    @Test
+    void verify_failsWhenProseSubstitutesCompany() throws Exception {
+        JsonNode breakdown = JSON.readTree(
+                "{\"symbol\": \"ODTX\", \"company_name\": \"Odyssey Therapeutics, Inc.\"}");
+        JsonNode blueprint = JSON.readTree("{\"key_numbers\":[]}");
+        String prose = "Oculus Dynamics Inc. (ODTX) was halted.";
+        GroundingVerifier.Result r = new GroundingVerifier().verify(prose, blueprint, breakdown);
+        assertFalse(r.passed());
+        assertTrue(r.mismatches().stream().anyMatch(m -> m.contains("Oculus Dynamics")));
+    }
+
+    @Test
+    void verify_passesWhenProseUsesAbbreviation() throws Exception {
+        JsonNode breakdown = JSON.readTree(
+                "{\"symbol\": \"INTC\", \"company_name\": \"Intel Corporation\"}");
+        JsonNode blueprint = JSON.readTree("{\"key_numbers\":[]}");
+        String prose = "Intel Corp. (INTC) experienced a layering event.";
+        GroundingVerifier.Result r = new GroundingVerifier().verify(prose, blueprint, breakdown);
+        assertTrue(r.passed(), "expected pass for Corp ↔ Corporation: " + r.mismatches());
     }
 }
