@@ -28,7 +28,7 @@ This sprint runs straight into the start at IEX. The discipline is: **no bandaid
 
 | Day | Date | Primary stream | Milestone |
 |---|---|---|---|
-| 1 | **Thu 5/21** (today) | Issue fixes | All 5 audit findings resolved; re-narration validates 164/164 |
+| 1 | **Thu 5/21** ✅ done | Issue fixes | All 5 audit findings resolved; re-narration validated 163/164 (1 genuine number-fabrication catch by the verifier, not a regression) |
 | 2 | **Fri 5/22** | Layer 3 design + scaffolding | `SynthesizeDayWorkflow` interface, schema, sampling preset wired |
 | 3 | **Sat 5/23** | Layer 3 implementation | First daily-synthesis paragraph end-to-end; prompt iterated against ≥3 trading days |
 | 4 | **Sun 5/24** | Layer 0 design + scaffolding | Pattern catalog file + `InterpretEventActivity` skeleton |
@@ -59,6 +59,31 @@ Five issues from the audit. None are bandaids; each has a clean structural fix.
 | 5 | CORZ "/tx" suffix from NASDAQ | Add `\b[A-Z][a-z]?\/[a-z]{2,3}\b$` pattern to `CompanyNameNormalizer`'s multi-word pre-strip list. | 30m |
 
 Then a full re-narration to validate. Total: ~5 hours active work + 40-min re-run.
+
+### Day 1 — Results (2026-05-21 closeout)
+
+`narrate-v8c-154124` completed in 42 minutes after the issue-fix commits.
+
+| Metric | v8c result | vs v7 baseline |
+|---|---|---|
+| Verifier pass rate | 163/164 (99.4%) | 163/164 — same rate. The 1 failure is a genuine number-fabrication catch (SARO `$82,273 → $83,273`), not the prior IWM verb-led false positive. |
+| Number formatting (commas on 4-digit+ ints) | 100% applied | v7 had ~half missing |
+| co_occurring slot populated | **80/80 enriched events** | v7 had 0/80 |
+| - of which liquidity_withdrawal | 30/30 | v7 had 0/30 |
+| - of which iceberg | 21/21 | v7 had 0/21 |
+| - of which layering | 19/19 | v7 had 0/19 |
+| - of which post_cancel_cluster | 9/9 | v7 had 0/9 |
+| - of which sweep | 1/1 | v7 had 0/1 |
+| Vague "trading resumed" filler | 1/164 (BNZIW) | v7 had 3/6 halts |
+| Layer-4 false positives | 0/164 | v7 had 1 (IWM) |
+| /tx suffix leakage | 0/164 | v7 had 1 (CORZ) |
+| Raw `sum_X` field names in prose | 0/164 | new check (introduced in v8c) |
+
+**Commits landed today** (Day 1): d95ad68 d/tx-suffix, 1221771 verifier-window, b442a53 schema-branching+filler-rule, 47710eb humanize integers, eeeedd6 co_occurring pass-through, 61a8874 humanize labels.
+
+Residual:
+- BNZIW (1/164) still appends "Trading resumed following the halt" — soft prompt rule, accepted. Could be hardened in v9 if needed.
+- The SARO number-fabrication catch is a useful demonstration of the verifier earning its keep. Documented as a feature, not a bug.
 
 ### Day 2 — Layer 3 scaffolding (Friday 5/22)
 
