@@ -42,7 +42,7 @@ public final class Enrich {
         SymbolMetadata m = ctx.lookupSymbol(symbol);
         if (m == null) return;
 
-        if (m.companyName() != null)       breakdown.put("company_name",       CompanyNameNormalizer.normalize(m.companyName()));
+        if (m.companyName() != null)       breakdown.put("company_name",       m.companyName());
         if (m.listingExchange() != null)   breakdown.put("listing_exchange",   m.listingExchange());
         if (m.isEtf() != null)             breakdown.put("is_etf",             m.isEtf());
         if (m.roundLot() != null)          breakdown.put("round_lot",          m.roundLot());
