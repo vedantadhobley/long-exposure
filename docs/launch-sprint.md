@@ -226,6 +226,7 @@ The 10 items in the end-state checklist at the top of this doc. Each is a binary
 ## Notes
 
 - This sprint runs concurrently with the existing dev cycle. The cron schedule stays paused until Saturday so we don't accidentally ingest data into an in-flight migration.
+- **Hard rule: never run two LLM-bearing workflows concurrently.** The joi single-GPU caps at 2 concurrent decode streams; the per-workflow semaphore already saturates it. Two simultaneous LLM workflows compete for the same permits with no throughput gain and likely activity timeouts. Full rule in [`operations.md`](operations.md) under "Operational rule — never run two LLM-bearing workflows concurrently". Applies to NarrateWorkflow, future SynthesizeDayWorkflow, and Layer-0 interpret activity.
 - **No shortcuts.** The discipline that got us to a 99.4% verifier-pass rate is the same discipline that gets this to production-ready.
 - The whitepaper is Vedanta's piece, drafted Sunday from the now-phenomenal docs. Agent fact-checks but does not author.
 - Monday 6/1 doubles as: project launch + IEX announcement + last day off before starting work.

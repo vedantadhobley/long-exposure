@@ -172,6 +172,28 @@ Why `0.0.0.0:53` doesn't work: `systemd-resolved` already owns `127.0.0.53:53` o
 
 If a docker container ever lands in `Exited` with `restartCount=0`, treat it as a setup-time (not runtime) failure and look at `docker inspect <name> --format '{{.State.Error}}'` for the actual reason.
 
+## Operational rule — never run two LLM-bearing workflows concurrently
+
+**`llama-large.joi` is a single-GPU local model. Max throughput is 2 concurrent decode streams; above that, throughput collapses rather than scales.** The `LlamaClient.Semaphore(2, fair)` enforces this *within* a single workflow's activity fan-out, but it does NOT prevent two separate workflows from each spawning activities that compete for the same 2 slots.
+
+If two LLM-bearing workflows (e.g. `NarrateWorkflow` + a future `SynthesizeDayWorkflow`, or two `NarrateWorkflow` instances for different dates) are running concurrently, the semaphore serializes them at the activity level — but each workflow's sliding-window cap (`MAX_IN_FLIGHT=2`) keeps trying to push activities into a permit set already at capacity. The result is:
+
+- Both workflows technically "running" but only one making progress at a time
+- Confusing Temporal UI showing 4 pending activities, only 2 active
+- Wasted wall-clock — the second workflow waits without doing useful work
+- Eventually some activities will time out (start-to-close timer runs during the wait)
+
+**The rule**: only one LLM-bearing workflow runs at a time. Before kicking any LLM workflow (`NarrateWorkflow`, future `SynthesizeDayWorkflow`, future `InterpretEventActivity` invocations), confirm no other LLM workflow is in flight via:
+
+```bash
+docker exec long-exposure-dev-temporal temporal workflow list \
+  --query "(WorkflowType='NarrateWorkflow' OR WorkflowType='SynthesizeDayWorkflow') AND ExecutionStatus='Running'"
+```
+
+Should return no rows. If it does, terminate or wait for that workflow before starting another.
+
+Non-LLM workflows (`DownloadWorkflow`, `ParseWorkflow`, `ValidateWorkflow`, `ScoreWorkflow`, `MaterializeWorkflow`, `SelectWorkflow`, `CleanupWorkflow`, `RefreshSymbolsWorkflow`) can run concurrently with LLM workflows since they don't touch joi.
+
 ## LLM endpoint (joi)
 
 Qwen3.5-122B-A10B served from joi (Framework Desktop, 128 GB unified, Strix Halo APU) via llama.cpp. Observed throughput **~23 tokens/sec**. Budget-comfortable for 5–50 narrations/day at ~150 tokens each.

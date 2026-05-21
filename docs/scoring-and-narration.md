@@ -162,6 +162,10 @@ Will use the new `SamplingParams.SYNTHESIZE` preset (added when the activity is 
 
 ## Operational constraints — `llama-large.joi`
 
+**Hard rule: only one LLM-bearing workflow runs at a time.** The single-GPU joi node tops out at 2 concurrent decode streams (enforced JVM-wide via `LlamaClient.Semaphore(2, fair)`), and the workflow-side sliding window also caps at 2. If two LLM workflows are started concurrently, they compete for the same 2 slots — both technically "running" but only one making progress, with wasted wall-clock and likely activity timeouts. Full operational details in [`operations.md`](operations.md).
+
+
+
 The LLM endpoint is a **local model** running on a single Strix Halo GPU (Framework Desktop, 128 GB unified memory, Qwen3.5-122B-A10B via llama.cpp/Vulkan). Observed throughput ~23 tok/sec end-of-stream. This produces specific operational rules:
 
 - **Hard concurrency cap: 2 simultaneous chat calls.** Above 2 the per-call throughput collapses faster than the parallelism gains (the model's KV cache and compute share the GPU; more than 2 concurrent decode streams starves them all). All narration code that fans out events must enforce this — Java `Semaphore(2)`, Temporal `setMaxConcurrentActivityExecutionSize(2)` on narration activities, or both.
