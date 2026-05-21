@@ -69,6 +69,17 @@ public final class CompanyNameNormalizer {
             Pattern.compile(
                     "\\s+due\\s+[A-Za-z]+(?:\\s+\\d{1,2})?(?:,?\\s+\\d{4})?\\s*$",
                     Pattern.CASE_INSENSITIVE),
+            // NASDAQ "/<state-code>" state-of-incorporation suffix.
+            // Observed on CORZ → "Core Scientific, Inc./tx". The suffix
+            // identifies the post-reorganization domicile state, which
+            // is regulatory metadata, not part of the company identity.
+            // Bounded list of all 50 US states + DC; not a growing
+            // denylist since SEC filing conventions are stable.
+            Pattern.compile(
+                    "\\s*/(?:al|ak|az|ar|ca|co|ct|de|fl|ga|hi|id|il|in|ia|ks|ky|la|me|md|"
+                    + "ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|"
+                    + "tn|tx|ut|vt|va|wa|wv|wi|wy|dc)\\s*$",
+                    Pattern.CASE_INSENSITIVE),
     };
 
     /** Punctuation-only tokens (dashes, lone commas) act as separators. */

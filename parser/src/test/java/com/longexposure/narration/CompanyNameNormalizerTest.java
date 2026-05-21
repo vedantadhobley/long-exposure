@@ -96,6 +96,30 @@ final class CompanyNameNormalizerTest {
     }
 
     @Test
+    void stripsStateOfIncorporationSuffix() {
+        // CORZ case from v7 — NASDAQ has "Core Scientific, Inc./tx" for
+        // the Texas-reincorporated entity. The /tx suffix is regulatory
+        // metadata, not part of company identity.
+        assertEquals("Core Scientific, Inc.",
+                CompanyNameNormalizer.normalize("Core Scientific, Inc./tx"));
+        // Case-insensitive
+        assertEquals("Foo Holdings Ltd",
+                CompanyNameNormalizer.normalize("Foo Holdings Ltd/DE"));
+        // All 50 states covered; spot-check a few
+        assertEquals("X Corp",
+                CompanyNameNormalizer.normalize("X Corp/ny"));
+        assertEquals("Y Inc.",
+                CompanyNameNormalizer.normalize("Y Inc./ca"));
+    }
+
+    @Test
+    void doesNotStripSlashFollowedByNonStateToken() {
+        // A real slash inside a name (not state-suffix) must survive
+        assertEquals("Foo/Bar Corp.",
+                CompanyNameNormalizer.normalize("Foo/Bar Corp."));
+    }
+
+    @Test
     void stripsEtnDueSuffix() {
         assertEquals("MAX S&P 500 4X Leveraged ETNs",
                 CompanyNameNormalizer.normalize("MAX S&P 500 4X Leveraged ETNs due October"));
