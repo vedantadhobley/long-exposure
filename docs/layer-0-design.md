@@ -115,8 +115,104 @@ API surfaces it on `/event/:id` and includes it in the `/day/:date` per-event pa
 - **Layer-0 narration when Layer-2 prose already contains interpretation hints.** Some Layer-2 narrations naturally weave in some interpretation context ("an iceberg execution") — does Layer 0 then add value or just repeat?
 - **Catalog versioning + audit trail.** When catalog entries change, do we re-narrate past events with the new interpretations, or freeze them as-of-publication? Lean toward freezing.
 
+## First step — smoke-test path to LLM output (fastest decision input)
+
+The 3-4h production scaffolding path isn't needed to *decide* A vs B. For decision purposes we need only one thing: read actual LLM-driven interpretation output cold and judge whether it's noticeably better than what code-driven templates would produce.
+
+Smoke-test path (~45 min from start to first LLM output):
+
+1. New file: `parser/src/main/java/com/longexposure/narration/InterpretSmokeTest.java`
+   - Reads N narratives from `narratives` (sampled across all 7 scorer types)
+   - For each, loads the catalog entry for the scorer
+   - Constructs an interpretation prompt
+   - Calls `LlamaClient.chat(...)` with sampling params
+   - Prints results to stdout
+2. Triggered via `IEX_INTERPRET_SMOKE=<date>` env var, mirroring the existing `IEX_REVERIFY` pattern in `Main.java`
+3. Output: 14-21 interpretations (2-3 per scorer type) for read-cold review
+
+Promotion to production happens only after A vs B is decided. If A wins, 2-3 more hours wires `InterpretEventActivity` + `InterpretWorkflow` + `GroundingVerifier` Layer-5 + schema migration. If B wins, the smoke test is throwaway and we write the templated substituter (~1h).
+
+## Cross-layer benefit map
+
+How Layer 0 benefits (or affects) each other layer:
+
+| Layer | Direct benefit | Indirect benefit |
+|---|---|---|
+| **Layer 0 itself** | The artifact — per-event interpretation prose | — |
+| **Layer 1 (scoring)** | None at runtime | Catalog "drivers" lists are the design-time spec for future scorer fields (one-sidedness ratio, spread anomaly, etc.). Layer 1 is unchanged for launch. |
+| **Layer 2 (description)** | None | Catalog vocabulary may eventually influence Layer 2's prompt for consistent terminology |
+| **Layer 3 (daily synthesis)** | **Major.** Layer 3 reads per-event interpretations as input. Synthesis with interpretation context is qualitatively richer than synthesis with description-only. ("Today saw heavy layering with patterns consistent with rapid quote adjustment" only emerges when Layer 0 has classified mechanism per event.) | — |
+| **Layer 4 (inter-day, post-backfill)** | Same as Layer 3 — weekly/monthly synthesis benefits from per-event interpretation. | — |
+
+**Layer 1 changes required**: None at runtime. The catalog informs FUTURE Layer 1 work (new scorers, new breakdown fields) as a design roadmap, not a runtime dependency.
+
+## Concrete walkthrough — what each option produces
+
+### Option A (LLM-driven) on a VTWO iceberg
+
+Inputs to the LLM call:
+- Layer-2 narration: *"VTWO saw an iceberg execution of 12,600 shares at $114.84 over 22m 17s..."*
+- Breakdown JSON (full)
+- Catalog entry for `iceberg` (mechanism + drivers + inference limit + canonical interpretation)
+
+Plausible LLM output:
+> *"VTWO's 22-minute execution with 126 round-lot fills is consistent with the iceberg pattern — a small displayed tip refilling automatically from a hidden reserve, typical of institutional execution seeking minimal market impact."*
+
+The LLM contextualized the catalog content with this specific event's facts (22 minutes, 126 fills, round-lot tip size).
+
+### Option B (code-driven templated) on the same event
+
+Catalog entry adds a `templated_interpretation` field with `{placeholder}` substitutions:
+
+```
+"This {duration} iceberg execution of {total_shares} shares on {company_name} ({symbol})
+is consistent with the pattern of displayed tips refilling automatically from a hidden
+reserve. Common drivers include institutional execution seeking minimal market impact,
+algorithmic VWAP strategies, and market-making activity."
+```
+
+Code substitutes from breakdown. Result:
+> *"This 22m 17s iceberg execution of 12,600 shares on Vanguard Russell 2000 ETF (VTWO) is consistent with the pattern of displayed tips refilling automatically from a hidden reserve. Common drivers include institutional execution seeking minimal market impact, algorithmic VWAP strategies, and market-making activity."*
+
+Every iceberg event gets nearly-identical interpretation prose with different facts substituted.
+
+## What Option A uniquely provides
+
+| Capability | A | B |
+|---|---|---|
+| Natural prose flow integrating event context | ✓ | Limited to template substitution |
+| **Selective driver emphasis** based on data shape (e.g., a 166ms layering → emphasize "rapid quote adjustment"; a 2.6-second one → emphasize "smart-order-router probes") | ✓ | Would require multiple per-shape templates (catalog complexity) |
+| **Conditional inclusion of co_occurring context** ("preceded by liquidity withdrawal — consistent with pre-news de-risking") | ✓ | Would require complex conditional logic |
+| Voice consistency with Layer 2 prose | ✓ | Template prose feels distinct from LLM-generated Layer 2 |
+| Run-to-run variation for repeat-viewing | ✓ | Identical text every time |
+
+The two intellectually-meaningful items in this list are **selective driver emphasis** and **conditional co_occurring inclusion**. The other three are cosmetic.
+
+## Decision criteria — when to go to Option B
+
+We choose B if any of:
+
+- **Quality not noticeably better than templated.** Smoke-test output reads similar to "if we just substituted variables into the canonical_interpretation, this would be roughly as good"
+- **Vocabulary drift.** LLM uses words not in the catalog entry > ~5% of the time (verifier-fail rate)
+- **Genericity.** Every event of the same scorer gets nearly-identical interpretation prose regardless of data shape (LLM isn't using the contextualizing power)
+- **Run-to-run inconsistency.** Same event interpreted twice produces meaningfully different outputs
+
+If none of those is true, A wins.
+
+## What we'd lose with Option B (and how to mitigate)
+
+- **Some interpretive depth on enriched events.** A halt preceded by liquidity withdrawal can't easily get "consistent with pre-news de-risking" via template substitution — that requires noticing the co_occurring context. *Mitigation*: add per-data-shape template variants in the catalog (e.g., `templated_interpretation_with_co_occurring`).
+- **Voice consistency.** Layer 2 prose is LLM-generated; Option B interpretations would be more uniform. *Mitigation*: write templates in journalist register, identical to Layer 2's voice.
+- **Run-to-run variation.** Same event gets the same text every time. *Mitigation*: arguably a feature (reproducibility) not a bug.
+
+### What we'd gain downstream with Option B
+
+- **Layer 3 sees stable input.** Synthesis is easier when per-event interpretation is predictable
+- **Audit is trivial.** Every word in every interpretation came from a file you reviewed
+- **Iteration is fast.** Catalog edit → next narration reflects it immediately, no LLM re-run needed
+
 ## References
 
 - Pattern catalog: [`parser/src/main/resources/pattern-catalog.md`](../parser/src/main/resources/pattern-catalog.md)
 - Decisions log: [`docs/decisions.md`](decisions.md) (2026-05-21 entries for catalog approach when finalized)
-- Sprint plan: [`docs/launch-sprint.md`](launch-sprint.md) Day 4-5
+- Sprint plan: [`docs/launch-sprint.md`](launch-sprint.md) Day 4-5 (Layer 0 re-ordered ahead of Layer 3 — 2026-05-21 decision)

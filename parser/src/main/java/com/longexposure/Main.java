@@ -97,6 +97,11 @@ public final class Main {
             com.longexposure.narration.VerifierBackfill.run(reverify);
             return;
         }
+        String interpretSmoke = System.getenv("IEX_INTERPRET_SMOKE");
+        if (interpretSmoke != null && !interpretSmoke.isBlank()) {
+            com.longexposure.narration.InterpretSmokeTest.run(interpretSmoke);
+            return;
+        }
 
         String filePath = firstNonNull(
                 args.length > 0 ? args[0] : null,
