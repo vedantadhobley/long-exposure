@@ -133,18 +133,24 @@ public final class GroundingVerifier {
         }
 
         // Layer 4: if the prose introduces the subject in "<Words> (TICKER)"
-        // form (the journalist "Company (TICKER)" pattern), the <Words> must
-        // agree with the breakdown's company_name. Token-subset comparison —
-        // accepts standard abbreviation ("Intel Corp." for "Intel Corporation")
-        // but rejects substitution from training memory.
+        // form (the journalist "Company (TICKER)" pattern), the company-shaped
+        // word-run immediately preceding "(TICKER)" must agree with the
+        // breakdown's company_name. Window-based exact token match — accepts
+        // "Intel Corp." for "Intel Corporation" (entity-type tokens dropped),
+        // rejects "Comstock Mining Inc." for "Comstock Inc." (extra word) and
+        // "Oculus Dynamics" for "Odyssey Therapeutics" (substitution).
+        //
+        // Works for both subject-led ("Apple Inc. (AAPL) reported…") and
+        // verb-led prose ("Liquidity withdrawal occurred on iShares Russell
+        // 2000 Index Fund (IWM) marked by…") by examining only the trailing
+        // N-word window where N = word count of breakdown.company_name.
         if (!eventSymbol.isEmpty()) {
             String bdCompany = breakdown.path("company_name").asText("");
             if (!bdCompany.isEmpty()) {
-                String proseCompany = extractParentheticalCompany(prose, eventSymbol);
-                if (proseCompany != null && !companyNamesAgree(proseCompany, bdCompany)) {
-                    mismatches.add("prose company \"" + proseCompany
-                            + "\" does not match breakdown company_name \"" + bdCompany
-                            + "\" for ticker " + eventSymbol);
+                String proseLeading = extractLeadingBeforeTicker(prose, eventSymbol);
+                if (proseLeading != null && !companyNamesAgree(proseLeading, bdCompany)) {
+                    mismatches.add("prose company near \"(" + eventSymbol + ")\" "
+                            + "does not match breakdown company_name \"" + bdCompany + "\"");
                 }
             }
         }
@@ -153,30 +159,70 @@ public final class GroundingVerifier {
         return new Result(passed, mismatches, proseNumbers.size());
     }
 
-    /** Matches "<Words> (TICKER)" — pulls out the <Words> capture. */
-    static String extractParentheticalCompany(final String prose, final String symbol) {
-        Pattern p = Pattern.compile(
-                "([A-Z][A-Za-z0-9. ,&'-]{1,80}?)\\s+\\(" + Pattern.quote(symbol) + "\\)");
-        Matcher m = p.matcher(prose);
-        return m.find() ? m.group(1).trim() : null;
+    /**
+     * Return the text immediately preceding a {@code "(TICKER)"} occurrence,
+     * or {@code null} if no parenthetical-ticker pattern is present in the
+     * prose at all. When present, the entire leading text is returned —
+     * narrowing to the company-name region is the caller's responsibility
+     * (see {@link #companyNamesAgree}).
+     */
+    static String extractLeadingBeforeTicker(final String prose, final String symbol) {
+        String needle = "(" + symbol + ")";
+        int idx = prose.indexOf(needle);
+        if (idx <= 0) return null;            // no parenthetical, or ticker at very start
+        return prose.substring(0, idx).trim();
     }
 
     /**
-     * Token-subset agreement: lowercase + strip punctuation + drop
-     * entity-type tokens (Inc, Corp, Ltd, etc.) + drop filing-decoration
-     * tokens (Common, Stock, Class, etc.), then check every significant
-     * prose token appears in the breakdown's token set.
+     * Whether the company name in the prose agrees with the one in the
+     * breakdown. Compares significant-token sets on the trailing N-word
+     * window of the prose, where N = word count of the breakdown's
+     * company_name (with a +1 buffer for entity-type tokens like "Inc.").
+     *
+     * <p>The window approach handles verb-led prose ("Liquidity withdrawal
+     * occurred on iShares Russell 2000 Index Fund (IWM)") without
+     * over-capturing — only the words that could plausibly be the company
+     * name are examined.
      *
      * <p>Accepts: "Intel Corp." ↔ "Intel Corporation"; "Toast, Inc." ↔
      * "Toast, Inc. Class A Common Stock"; "Accenture Plc" ↔ "Accenture plc".
-     * Rejects: "Anterix Inc." ↔ "Antelope Enterprise Holdings"; any
-     * substitution of unrelated words.
+     * Rejects: "Anterix Inc." ↔ "Antelope Enterprise Holdings";
+     * "Comstock Mining Inc." ↔ "Comstock Inc." (extra word);
+     * "Oculus Dynamics" ↔ "Odyssey Therapeutics" (substitution).
      */
-    static boolean companyNamesAgree(final String proseCompany, final String bdCompany) {
-        Set<String> proseTokens = significantTokens(proseCompany);
-        if (proseTokens.isEmpty()) return true;   // only structural tokens — nothing to verify
+    static boolean companyNamesAgree(final String proseLeading, final String bdCompany) {
         Set<String> bdTokens = significantTokens(bdCompany);
-        return bdTokens.containsAll(proseTokens);
+        if (bdTokens.isEmpty()) return true;    // only structural tokens — nothing to verify
+
+        // Try a range of trailing-window sizes from bdWordCount+2 down to
+        // bdWordCount-1. The +2 upper bound allows the prose to add entity-
+        // type tokens like "Inc."; the -1 lower bound handles cases where
+        // the prose abbreviates ("Intel Corp." for "Intel Corporation").
+        // Accept if ANY window size produces an exact token-set match.
+        //
+        // This handles both subject-led prose ("Apple Inc. (AAPL)…") and
+        // verb-led prose ("Liquidity withdrawal occurred on iShares Russell
+        // 2000 Index Fund (IWM)…") — for the latter, the smallest window
+        // that excludes the verb-glue ("occurred on") is the company-name
+        // window.
+        String[] proseWords = proseLeading.trim().split("\\s+");
+        int bdWordCount = bdCompany.trim().split("\\s+").length;
+        int maxN = Math.min(proseWords.length, bdWordCount + 2);
+        int minN = Math.max(1, bdWordCount - 1);
+        for (int n = maxN; n >= minN; n--) {
+            int startIdx = Math.max(0, proseWords.length - n);
+            StringBuilder tail = new StringBuilder();
+            for (int i = startIdx; i < proseWords.length; i++) {
+                if (tail.length() > 0) tail.append(' ');
+                tail.append(proseWords[i]);
+            }
+            Set<String> proseTokens = significantTokens(tail.toString());
+            // Exact set equality — both containment directions:
+            //   bd.containsAll(prose) rejects ADDED words ("Mining" in "Comstock Mining Inc.")
+            //   prose.containsAll(bd) rejects SUBSTITUTIONS ("Oculus" instead of "Odyssey")
+            if (bdTokens.equals(proseTokens)) return true;
+        }
+        return false;
     }
 
     /** Tokens that are entity-type / filing-decoration noise (vs identity). */

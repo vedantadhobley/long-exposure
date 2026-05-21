@@ -148,12 +148,40 @@ final class GroundingVerifierTest {
     }
 
     @Test
-    void extractParentheticalCompany_findsThePattern() {
+    void extractLeadingBeforeTicker_returnsLeadingText() {
+        // Subject-led: returns everything before "(TICKER)"
         assertEquals("Intel Corp.",
-                GroundingVerifier.extractParentheticalCompany(
+                GroundingVerifier.extractLeadingBeforeTicker(
                         "Intel Corp. (INTC) experienced a layering event.", "INTC"));
-        assertNull(GroundingVerifier.extractParentheticalCompany(
+        // Verb-led: still returns everything before "(TICKER)"
+        assertEquals("Liquidity withdrawal occurred on iShares Russell 2000 Index Fund",
+                GroundingVerifier.extractLeadingBeforeTicker(
+                        "Liquidity withdrawal occurred on iShares Russell 2000 Index Fund (IWM) marked by 4895 deletes.",
+                        "IWM"));
+        // Ticker not in prose
+        assertNull(GroundingVerifier.extractLeadingBeforeTicker(
                 "INTC experienced a layering event.", "INTC"));
+        // Ticker only at very start (no leading text)
+        assertNull(GroundingVerifier.extractLeadingBeforeTicker(
+                "(INTC) experienced a layering event.", "INTC"));
+    }
+
+    @Test
+    void companyName_acceptsVerbLedProse() {
+        // The IWM v7 failure case — verb-led prose, company name is in the
+        // middle of the sentence but still the contiguous trailing window
+        // of the leading text agrees with the breakdown's company_name.
+        assertTrue(GroundingVerifier.companyNamesAgree(
+                "Liquidity withdrawal occurred on iShares Russell 2000 Index Fund",
+                "iShares Russell 2000 Index Fund"));
+        // Verb-led with abbreviated entity suffix
+        assertTrue(GroundingVerifier.companyNamesAgree(
+                "Shares of Apple Inc.",
+                "Apple Inc."));
+        // Verb-led where prose used Corp. for Corporation
+        assertTrue(GroundingVerifier.companyNamesAgree(
+                "Trading of Intel Corp.",
+                "Intel Corporation"));
     }
 
     @Test
@@ -164,7 +192,10 @@ final class GroundingVerifierTest {
         String prose = "Oculus Dynamics Inc. (ODTX) was halted.";
         GroundingVerifier.Result r = new GroundingVerifier().verify(prose, blueprint, breakdown);
         assertFalse(r.passed());
-        assertTrue(r.mismatches().stream().anyMatch(m -> m.contains("Oculus Dynamics")));
+        // New mismatch format references the ticker context + breakdown company_name
+        assertTrue(r.mismatches().stream().anyMatch(
+                m -> m.contains("(ODTX)") && m.contains("Odyssey Therapeutics")),
+                "expected mismatch to cite the ticker and the canonical company_name: " + r.mismatches());
     }
 
     @Test
