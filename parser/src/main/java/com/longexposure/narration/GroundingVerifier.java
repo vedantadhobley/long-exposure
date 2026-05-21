@@ -126,8 +126,85 @@ public final class GroundingVerifier {
                     + "\" not found in prose — possible fabrication or wrong-subject hallucination");
         }
 
+        // Layer 4: if the prose introduces a "<Words> (SYMBOL)" parenthetical
+        // pattern (the journalist-style "Apple Inc. (AAPL)" shape), the
+        // <Words> must be consistent with the breakdown's company_name.
+        // Catches the v6 failure mode where the LLM invented a company
+        // name ("Mayweather Inc." for an AllianzIM ETF) instead of using
+        // the one in the breakdown.
+        if (!eventSymbol.isEmpty()) {
+            String bdCompany = breakdown.path("company_name").asText("");
+            String proseCompany = extractParentheticalCompany(prose, eventSymbol);
+            if (proseCompany != null) {
+                if (bdCompany.isEmpty()) {
+                    mismatches.add("prose introduces \"" + proseCompany + " (" + eventSymbol
+                            + ")\" but breakdown has no company_name — invented");
+                } else if (!companyNamesAgree(proseCompany, bdCompany)) {
+                    mismatches.add("prose company \"" + proseCompany + "\" does not match"
+                            + " breakdown company_name \"" + bdCompany + "\" for ticker " + eventSymbol);
+                }
+            }
+        }
+
         boolean passed = mismatches.isEmpty();
         return new Result(passed, mismatches, proseNumbers.size());
+    }
+
+    /** Matches "<Words> (TICKER)" — pulls out the <Words> capture. */
+    private static final Pattern PAREN_TICKER = Pattern.compile(
+            "([A-Z][A-Za-z0-9.,& '-]{1,80}?)\\s+\\(%s\\)");
+
+    /**
+     * Look for a "<Words> (eventSymbol)" pattern. The <Words> capture
+     * is the company-name claim the verifier needs to validate.
+     */
+    static String extractParentheticalCompany(final String prose, final String symbol) {
+        Pattern p = Pattern.compile(PAREN_TICKER.pattern().replace("%s", Pattern.quote(symbol)));
+        Matcher m = p.matcher(prose);
+        if (!m.find()) return null;
+        return m.group(1).trim();
+    }
+
+    /**
+     * Token-subset comparison. Lowercase + strip punctuation + drop
+     * structural words (Inc, Corp, Corporation, Company, Ltd, Limited,
+     * PLC, LLC, &, etc.), then check every significant prose token
+     * appears in the breakdown's token set.
+     *
+     * <p>Allows: "Intel Corp." ↔ "Intel Corporation"; "Toast, Inc." ↔
+     * "Toast, Inc. Class A Common Stock"; "Accenture Plc" ↔
+     * "Accenture plc Class A Ordinary Shares". Rejects:
+     * "Anterix Inc." ↔ "Antelope Enterprise Holdings Limited";
+     * "Mayweather Inc." ↔ "AllianzIM U.S. Large Cap Buffer20 May ETF".
+     */
+    static boolean companyNamesAgree(final String proseCompany, final String bdCompany) {
+        Set<String> proseTokens = significantTokens(proseCompany);
+        if (proseTokens.isEmpty()) return true;   // nothing real to check
+        Set<String> bdTokens = significantTokens(bdCompany);
+        return bdTokens.containsAll(proseTokens);
+    }
+
+    /** Structural / SEC-filing tokens that don't carry company identity. */
+    private static final Set<String> STRUCTURAL_TOKENS = Set.of(
+            "inc", "incorporated", "corp", "corporation", "corporated",
+            "co", "company", "companies",
+            "ltd", "limited",
+            "plc", "llc", "lp", "lllp", "nv", "ag", "sa",
+            "the", "and", "of",
+            "common", "stock", "class", "series", "ordinary", "shares",
+            "trust", "fund", "etf", "etn", "adr"
+    );
+
+    private static Set<String> significantTokens(final String name) {
+        Set<String> out = new HashSet<>();
+        if (name == null || name.isBlank()) return out;
+        for (String raw : name.toLowerCase().split("[\\s.,&()/'\\-]+")) {
+            String t = raw.replaceAll("[^a-z0-9]", "");
+            if (t.length() < 2) continue;             // initials, single letters
+            if (STRUCTURAL_TOKENS.contains(t)) continue;
+            out.add(t);
+        }
+        return out;
     }
 
     /**
