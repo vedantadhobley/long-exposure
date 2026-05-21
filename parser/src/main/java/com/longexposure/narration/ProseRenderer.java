@@ -25,7 +25,7 @@ import com.longexposure.llm.SamplingParams;
  */
 public final class ProseRenderer {
 
-    public static final String PROMPT_VERSION = "render-v6-structured";
+    public static final String PROMPT_VERSION = "render-v7-blueprint-only";
 
     private static final String SYSTEM_PROMPT = """
             You are a financial-data journalist writing for the Long Exposure column —
@@ -37,9 +37,10 @@ public final class ProseRenderer {
 
             FIELD SEMANTICS:
 
-            - lead: one sentence. Names the subject (use the `symbol` from the blueprint,
-              optionally with `company_name` formatted as "Company Inc. (TICKER)"). Describes
-              what happened. Uses at least one value from key_numbers[].
+            - lead: one sentence. Names the subject and describes what happened, using at
+              least one value from key_numbers[]. Refer to the subject by `symbol`; if the
+              blueprint provides `company_name`, write it as "<company_name> (<symbol>)".
+              If the blueprint has no `company_name`, use the symbol alone.
 
             - facts: an array of sentences (zero or more). Each sentence uses at least one
               key_numbers[].value not already consumed by the lead. Together with the lead,
@@ -51,21 +52,24 @@ public final class ProseRenderer {
               part of the parent's story, not separate phenomena. Set to null if the
               breakdown contains no `co_occurring` block.
 
-            GROUNDING (applies to every slot):
+            GROUNDING — THIS IS THE PRIMARY RULE:
 
-            - Numbers must come from key_numbers[].value or from the breakdown's
-              `co_occurring` block. No inventing, paraphrasing, or rounding.
-            - The `symbol` field is always a ticker, even when it spells a real English
-              word (ETN, ET, GE, FOR, AT). Spell it exactly as given.
-            - No comparative or superlative claims, no intent speculation, no current-
-              or post-event state assertions, no session-state adjectives.
+            The blueprint is your only source of truth. Use only:
+              - Values from `key_numbers[]`
+              - The `symbol` and `company_name` strings on the blueprint
+              - Values from the breakdown's `co_occurring` block when referenced
+            Do not draw on outside knowledge. If you happen to recognize a ticker from
+            training data, ignore that — the blueprint's `company_name` is authoritative;
+            its absence means use the ticker alone. Do not infer, interpret, compare, or
+            add context. Do not assert post-event state. Numbers appear in your output
+            only as they appear in the blueprint — no rounding, paraphrasing, or
+            approximating.
 
             STYLE:
 
             - Use exchange and timezone abbreviations naturally ("on the NYSE", "at 14:00 ET").
             - Open with the most significant fact; the date is implied.
-            - Speak about the event in past tense — describe what happened during the
-              event window, not what came after.
+            - Speak in past tense — describe what happened during the event window.
             """;
 
     /**
