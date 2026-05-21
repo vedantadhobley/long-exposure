@@ -288,6 +288,44 @@ The current shape: `BlueprintExtractor.extract()` does the LLM call, then *deter
 
 `CompanyNameNormalizer` runs at score time on whichever value made it through. Its FILING_DECORATION token set + multi-word pre-strip handle the NASDAQ-fallback cases (MLP / ETN-due-date suffixes that EDGAR doesn't carry).
 
+## 8a. Why narration needs a verifier at all (the cognitive task)
+
+A reader looking at our verifier (4 grounding layers, ~250 lines of Java) might reasonably ask: "isn't this just turning structured data into a sentence? Why does that need so much machinery?" The answer is in what we ask the model to use vs not use from its training.
+
+The model brings **two kinds of internalized knowledge** to every call:
+
+**(1) Vocabulary and grammar — wanted, load-bearing.** The model knows:
+- "Halt" goes with "trading" / "suspension"; "iceberg" goes with "order" / "execution"; "sweep" goes with "across price levels"
+- $ goes before the number; ET / EST is a time-zone abbreviation; "h" / "m" / "s" are duration units that can be expanded to "hours" / "minutes" / "seconds"
+- Journalist-register phrasing — "X experienced a halt" reads more naturally than "X went into halt status"
+- The grammar of complex noun phrases — "an iceberg execution of 4,949 total shares at a price of $1.62"
+
+We need every bit of this. Without it the model couldn't translate `{halt_duration: "4h 43m"}` into "halted on NASDAQ for 4 hours and 43 minutes" — it would just render the JSON verbatim. The reason an LLM is the right tool here (as opposed to a hand-written template) is precisely because templates can't handle the variety of event shapes our 7 scorers produce.
+
+**(2) Factual knowledge about tickers and companies — wanted only when it agrees with the breakdown.** The model knows AAPL = Apple Inc., NVDA = NVIDIA Corporation, ODTX = Odyssey Therapeutics. When this matches the breakdown's `company_name` field (which it usually does, since the breakdown is sourced from canonical SEC data), great — the model's instinct produces the right output. When it doesn't match — usually for less-prominent tickers where the model has fragmentary memory — we get fabrications: "Oculus Dynamics Inc." for ODTX, "Mayweather Inc." for an AllianzIM ETF.
+
+The Layer-4 verifier check exists specifically to catch this disagreement. It's not catching the model "being wrong" in some abstract sense — it's catching the model's *helpful instinct to use what it knows* in cases where what we know (from EDGAR) and what it knows (from training) disagree.
+
+**What we explicitly forbid.** The model is trained to be helpful, contextual, and informative. In Layer 2 we ask it to be the opposite — terse, mechanical, and ungrounded-outside-the-breakdown:
+
+- No interpretation ("this pattern looks like spoofing" — even when accurate)
+- No comparatives ("one of the longest halts of the day" — even if true)
+- No context the breakdown doesn't carry ("during a volatile session" — no source for "volatile")
+- No current or post-event state ("the security is now trading normally" — breakdown only covers what happened during the event window)
+
+**Why this is genuinely harder than it sounds.** We're asking a model whose entire training optimizes for *helpful elaboration* to produce *deliberately bare* output. The model's default behavior — and the reason LLMs are useful at all for prose — is to add explanatory texture. "Apple Inc. (AAPL) experienced..." reads naturally because that's how financial writing reads. Telling the model "use the breakdown's company_name verbatim or use ticker only" works most of the time, but the model's fluency instinct fights it.
+
+The architecture trick is to **give the model good enough data that its helpful instinct produces correct output most of the time**:
+
+- EDGAR's clean company names mean the model doesn't have to reach for memory
+- The breakdown's pre-formatted human-readable values (`duration: "4h 43m"`) mean the model doesn't have to do unit conversion
+- The pre-fetched `co_occurring` block means the model doesn't have to invent context
+- The deterministic blueprint pass-through means the model doesn't have to decide what to include
+
+The verifier is the safety net for the cases where the data isn't enough. With it, 99.4% of narrations pass on the first attempt. Without it, we'd be publishing wrong company names (the v6 baseline before the EDGAR + blueprint-pass-through changes had 8+ visible fabrications per 164-event day).
+
+**The 99.4% number contextualizes**. Modern industrial NLP systems on similar tasks (extraction, summarization with grounding) consider 5–10% acceptable error. We're at 0.6% verifier-detected error against a deliberately strict 4-layer rubric. The reason it *feels* like the model is struggling is because we catch every issue rather than tolerate noise — that's the design.
+
 ## 9. Intra-day vs inter-day
 
 | | Intra-day | Inter-day |
