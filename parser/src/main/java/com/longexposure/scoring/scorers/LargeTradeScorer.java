@@ -107,7 +107,7 @@ public final class LargeTradeScorer implements EventScorer {
 
         ObjectMapper json = ctx.json();
         ObjectNode breakdown = json.createObjectNode();
-        breakdown.put("size_shares",          size);
+        breakdown.put("size_shares",          Humanize.formatCount(size));
         breakdown.put("price_dollars",        priceDollars);
         breakdown.put("notional_dollars",     Humanize.round2(notionalDollars));
         // trade_id and sale_condition_flags are intentionally NOT in the

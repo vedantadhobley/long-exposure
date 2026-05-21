@@ -182,10 +182,10 @@ public final class IcebergScorer implements EventScorer {
 
         ObjectMapper json = ctx.json();
         ObjectNode breakdown = json.createObjectNode();
-        breakdown.put("fills",            run.size());
-        breakdown.put("total_shares",     totalShares);
+        breakdown.put("fills",            Humanize.formatCount(run.size()));
+        breakdown.put("total_shares",     Humanize.formatCount(totalShares));
         breakdown.put("price_dollars",    first.priceRaw / 10_000.0);
-        breakdown.put("median_fill_size", medianSize);
+        breakdown.put("median_fill_size", Humanize.formatCount(medianSize));
         breakdown.put("size_cv",          cv);
         breakdown.put("duration",         Humanize.durationNanos(last.tsNanos - first.tsNanos));
         breakdown.put("start_et",         Humanize.toEtTime(first.ts));

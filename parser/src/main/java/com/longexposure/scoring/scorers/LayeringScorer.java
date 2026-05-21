@@ -180,9 +180,9 @@ public final class LayeringScorer implements EventScorer {
 
         ObjectMapper json = ctx.json();
         ObjectNode breakdown = json.createObjectNode();
-        breakdown.put("orders",                cluster.size());
-        breakdown.put("distinct_levels",       distinctLevels);
-        breakdown.put("total_shares",          totalShares);
+        breakdown.put("orders",                Humanize.formatCount(cluster.size()));
+        breakdown.put("distinct_levels",       Humanize.formatCount(distinctLevels));
+        breakdown.put("total_shares",          Humanize.formatCount(totalShares));
         breakdown.put("median_order_lifetime", Humanize.durationMs(medianLifetimeMs));
         breakdown.put("side",                  Side.label(first.side));
         breakdown.put("min_price_dollars",     minPriceRaw / 10_000.0);

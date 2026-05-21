@@ -103,4 +103,25 @@ public final class Humanize {
     public static double round2(final double v) {
         return round(v, 2);
     }
+
+    /**
+     * Format an integer with thousand separators when ≥ 1000. Used by
+     * scorers to pre-format counts (orders, shares, fills) before they
+     * enter the breakdown JSON, so the LLM's narration reads "4,895
+     * orders" instead of "4895 orders".
+     *
+     * <p>Returns a string because the breakdown JSON treats this as a
+     * display-formatted value; downstream consumers needing the raw
+     * integer should read the unformatted column from scored_events.
+     *
+     * <p>Examples:
+     * <ul>
+     *   <li>{@code formatCount(105)} → {@code "105"}
+     *   <li>{@code formatCount(4895)} → {@code "4,895"}
+     *   <li>{@code formatCount(2_377_027)} → {@code "2,377,027"}
+     * </ul>
+     */
+    public static String formatCount(final long n) {
+        return String.format("%,d", n);
+    }
 }

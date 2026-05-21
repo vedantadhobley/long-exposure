@@ -199,8 +199,8 @@ public final class PostCancelClusterScorer implements EventScorer {
 
         ObjectMapper json = ctx.json();
         ObjectNode breakdown = json.createObjectNode();
-        breakdown.put("orders",             cluster.size());
-        breakdown.put("total_shares",       totalShares);
+        breakdown.put("orders",             Humanize.formatCount(cluster.size()));
+        breakdown.put("total_shares",       Humanize.formatCount(totalShares));
         breakdown.put("median_order_lifetime", Humanize.durationMs(medianLifetimeMs));
         breakdown.put("side",               Side.label(first.side));
         breakdown.put("duration",           Humanize.durationNanos(last.addNanos - first.addNanos));

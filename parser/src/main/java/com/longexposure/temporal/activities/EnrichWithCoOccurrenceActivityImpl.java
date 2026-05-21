@@ -219,16 +219,25 @@ public final class EnrichWithCoOccurrenceActivityImpl implements EnrichWithCoOcc
             String scorerId = e.getKey();
             ScorerAggregate agg = e.getValue();
             ObjectNode per = duringEvent.putObject(scorerId);
-            per.put("count", agg.count);
-            // Per-field sums where they were observed
+            per.put("count", com.longexposure.scoring.Humanize.formatCount(agg.count));
+            // Per-field sums where they were observed. Sums that are integer-valued
+            // counts (shares, orders, levels) get thousand-separator formatting so
+            // narrations render "565,131 shares" not "565131 shares". Currency
+            // sums (notional_dollars) keep the rounded numeric form.
             for (Map.Entry<String, Double> fs : agg.fieldSums.entrySet()) {
                 String field = fs.getKey();
                 int n = agg.fieldCounts.getOrDefault(field, 0);
-                if (n > 0) per.put("sum_" + field, com.longexposure.scoring.Humanize.round2(fs.getValue()));
+                if (n == 0) continue;
+                double sum = fs.getValue();
+                if (isIntegerCountField(field)) {
+                    per.put("sum_" + field, com.longexposure.scoring.Humanize.formatCount((long) sum));
+                } else {
+                    per.put("sum_" + field, com.longexposure.scoring.Humanize.round2(sum));
+                }
             }
             totalChildren += agg.count;
         }
-        coOccurring.put("total_children", totalChildren);
+        coOccurring.put("total_children", com.longexposure.scoring.Humanize.formatCount(totalChildren));
 
         // Update parent: merge the co_occurring block into the breakdown.
         try (PreparedStatement st = conn.prepareStatement(
@@ -264,9 +273,46 @@ public final class EnrichWithCoOccurrenceActivityImpl implements EnrichWithCoOcc
             final JsonNode breakdown,
             final String field) {
         JsonNode v = breakdown.get(field);
-        if (v == null || !v.isNumber()) return;
-        sums.merge(field, v.asDouble(), Double::sum);
+        if (v == null) return;
+        Double parsed = parseNumeric(v);
+        if (parsed == null) return;
+        sums.merge(field, parsed, Double::sum);
         counts.merge(field, 1, Integer::sum);
+    }
+
+    /**
+     * Parse a JSON value as a double. Handles both native numeric form
+     * and the comma-formatted string form that scorers now emit for
+     * integer counts (e.g. {@code "4,895"} from {@code Humanize.formatCount}).
+     * Returns null if the value isn't parseable as a number.
+     */
+    private static Double parseNumeric(final JsonNode v) {
+        if (v == null || v.isNull()) return null;
+        if (v.isNumber()) return v.asDouble();
+        if (v.isTextual()) {
+            String s = v.asText().replace(",", "").trim();
+            if (s.isEmpty()) return null;
+            try {
+                return Double.parseDouble(s);
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Which co_occurring sum_* fields are integer counts (shares, orders,
+     * levels) and should be formatted with thousand separators when
+     * written into the co_occurring block. Currency fields (notional_dollars)
+     * keep the rounded float form for consistency with the parent
+     * scorer's breakdown.
+     */
+    private static boolean isIntegerCountField(final String field) {
+        return switch (field) {
+            case "total_shares", "orders", "distinct_levels" -> true;
+            default -> false;
+        };
     }
 
     private static Connection openConnection() throws Exception {

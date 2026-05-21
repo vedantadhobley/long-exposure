@@ -184,9 +184,9 @@ public final class SweepScorer implements EventScorer {
 
         ObjectMapper json = ctx.json();
         ObjectNode breakdown = json.createObjectNode();
-        breakdown.put("executions",        cluster.size());
-        breakdown.put("distinct_levels",   distinctLevels);
-        breakdown.put("total_shares",      totalShares);
+        breakdown.put("executions",        Humanize.formatCount(cluster.size()));
+        breakdown.put("distinct_levels",   Humanize.formatCount(distinctLevels));
+        breakdown.put("total_shares",      Humanize.formatCount(totalShares));
         breakdown.put("notional_dollars",  Humanize.round2(notional));
         breakdown.put("min_price_dollars", minPriceRaw / 10_000.0);
         breakdown.put("max_price_dollars", maxPriceRaw / 10_000.0);
