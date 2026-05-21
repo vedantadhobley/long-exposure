@@ -324,49 +324,84 @@ Without bootstrap, the first 30 narrated days will have no meaningful baselines 
 
 ## LLM narration pipeline
 
-Significant events are serialized to structured JSON and sent to `llama-large.joi` (Qwen3.5 122B via llama.cpp's HTTP server) on the homelab's `joi` node:
+The narration step takes selected scored events and produces a 1-3 sentence prose paragraph per event. The model is `Qwen3.5-122B-A10B` (10B active MoE) served via llama.cpp on the homelab's `joi` node. Per-event pipeline is three passes; only the first two are LLM calls.
+
+### Pass 1 — `BlueprintExtractor`
+
+Takes the scored event's full `breakdown` JSON and asks the model to emit a JSON blueprint listing the facts that will be narrated. Each fact has a `source_field` pointing back to a key in the breakdown — the contract that the verifier later enforces. Sampling preset `EXTRACT` (temperature 0.1, top_p 0.8, top_k 20) — deterministic JSON is wanted here, not prose variety.
+
+After the LLM call returns, code deterministically copies `breakdown.company_name` into the blueprint as a pass-through field. The model never decides whether to include it — the data flows through cleanly.
+
+### Pass 2 — `ProseRenderer`
+
+Takes the blueprint and emits a JSON object with three semantic slots:
 
 ```json
 {
-  "event_type": "trading_halt",
-  "ticker": "AAPL",
-  "timestamp": "10:23:14.847291000",
-  "halt_reason": "regulatory",
-  "duration_seconds": 243,
-  "pre_halt_volume_ratio": 2.3,
-  "pre_halt_price_change_pct": 0.8
+  "lead":         "<one sentence — subject + action + ≥1 key_number>",
+  "facts":        ["<sentence>", "<sentence>", ...],
+  "co_occurring": "<one sentence>" | null
 }
 ```
 
-The model generates a 2-3 sentence narrative in plain English, suitable for a general audience. Tone: clear, factual, accessible. The prompt is engineered to:
+Schema is enforced at the sampler via `response_format: json_schema, strict: true` — llama.cpp guarantees structurally valid output, no parse-retry path. Sampling preset `RENDER` (Qwen's published "Instruct mode for general tasks" — temperature 0.7, top_p 0.8, top_k 20, presence_penalty 1.5).
 
-- Avoid speculation
-- Ground every observation in the provided data
-- Use plain language over financial jargon
-- Refuse to narrate if the structured event data is incomplete
+The slot structure exists because earlier free-form prose iterations leaked qualitative filler ("the security is now trading normally", "marking the end of one of the longer halts") when the breakdown was thin. The model had unconstrained "freestyle space" to fill. Structured slots eliminate that space by construction — every output token lives in a named slot. The `co_occurring` slot is required (nullable in type) and references nested events of *other* scorer types that fell inside the parent event's window.
 
-Each narration is cached by event hash, so re-running a day's pipeline doesn't re-narrate identical events.
+Code stitches the slots: `lead + " " + facts.join(" ") + (co_occurring ? " " + co_occurring : "")`. The structured JSON is persisted alongside the prose in `narratives.render_structured`.
+
+### Pass 3 — `GroundingVerifier` (pure code)
+
+Four-layer check, no LLM:
+
+1. **Blueprint key_numbers ⊆ breakdown** — every `source_field` reference must resolve to a real path in the breakdown (supports dotted paths for nested `co_occurring` data).
+2. **Prose numbers ⊆ blueprint ∪ breakdown** — every numeric token in prose must appear in either, using `BigDecimal.stripTrailingZeros` for case "$431.00" ↔ "431".
+3. **Event symbol present in prose** — catches symbol fabrication (the ODDTX-from-ODTX class).
+4. **Prose company name agrees with `breakdown.company_name`** — token-subset comparison after dropping entity-type / filing-decoration tokens. Accepts "Intel Corp." ↔ "Intel Corporation"; rejects "Oculus Dynamics Inc." ↔ "Odyssey Therapeutics, Inc." Catches the model substituting a different company from training memory.
+
+Verifier failures don't abort the pipeline — the prose is still produced and stored with `verifier_passed = false`, available for downstream filtering ("don't publish failed narrations").
+
+### Caching
+
+Each narration is keyed by `event_hash` = SHA256 of `scorer_id + breakdown + extract_prompt_version + render_prompt_version`. Re-running on identical input is a cache hit; bumping either prompt version invalidates the cache and forces re-narration.
+
+### Concurrency
+
+`llama-large.joi` is a single-GPU local model — throughput collapses above 2 concurrent decode streams. Three layers of guard:
+
+- **JVM-wide `Semaphore(2, fair)`** inside `LlamaClient` — the hard physical guard.
+- **Worker-side cap** (`setMaxConcurrentActivityExecutionSize(2)`) on the dedicated narration task queue.
+- **Workflow-side sliding window** (`Promise.anyOf` over an in-flight list) so the Temporal UI shows only ~2 activities scheduled at any moment instead of all 164.
+
+Throughput is ~5 narrations/minute end-to-end (each event ≈ 2 LLM calls × ~10–20 sec at 2 concurrent).
 
 ---
 
 ## Temporal pipeline
 
-Runs nightly at 6:00 AM ET, after T+1 HIST data becomes available:
+`DailyPipelineWorkflow` runs nightly at 00:00 America/New_York (Tue–Sat, paused by default). T+1 HIST data is reliably available between 22:32 ET and 00:11 ET; midnight gives a 3-hour retry budget on URL resolution without spilling into morning.
+
+The orchestrator is *pure orchestration* — calls child workflows for each phase plus `PipelineRunRecorderActivity` for cross-cutting metadata:
 
 ```
-DownloadHistActivity         (HTTPS download from iextrading.com/api/1.0/hist)
-  └─ DecompressActivity      (gunzip; heartbeats during decompress)
-      └─ ParseTopsActivity   (Java parser → events hypertable in Postgres via JDBC COPY; heartbeats)
-          └─ ValidateDailyTotalsActivity   (parser sanity-check vs IEX daily summaries)
-              └─ RefreshBaselinesActivity  (refresh TimescaleDB continuous aggregates for T-30 windows)
-                  └─ ScoreEventsActivity
-                      └─ SelectTopEventsActivity
-                          └─ NarrateEventsActivity   (calls llama-large.joi)
-                              └─ StoreNarrativesActivity   (Postgres narratives table)
-                                  └─ InvalidateCacheActivity   (frontend bust)
+DailyPipelineWorkflow
+  ├── DownloadWorkflow      (3 IEX HIST URLs resolved + 3 .pcap.gz downloaded, all parallel)
+  ├── ParseWorkflow         (DPLS → 13 hypertables via JDBC COPY)
+  ├── ValidateWorkflow      (runs in parallel with Parse; 3 cross-check legs:
+  │                          DPLS↔DEEP price-level, DPLS→TOPS BBO, DEEP→TOPS BBO)
+  ├── ScoreWorkflow         (MaterializeOrderLifecycle → 7 scorers → EnrichWithCoOccurrence → SelectTopEvents)
+  ├── NarrateWorkflow       (per-event fan-out, sliding-window 2-concurrent, 3 passes per event)
+  └── CleanupWorkflow       (delete .pcap.gz + drop_chunks older than 30 days)
 ```
 
-Each activity has retry policies, appropriate timeouts, and heartbeating for long-running operations. Failed workflows are visible in the Temporal UI and replayable from any activity.
+Each phase is its own child workflow, independently invokable for replay or backfill. Per-activity retries, heartbeats, and start-to-close timeouts. Full layout including all 14 activities + their retry policies in [`docs/temporal-design.md`](docs/temporal-design.md).
+
+Ancillary workflows on the same task queue:
+
+- `RefreshSymbolsWorkflow` — weekly cron (Sun 02:00 ET, paused). Pulls ticker metadata from NASDAQ (`nasdaqlisted.txt` + `otherlisted.txt`), SEC EDGAR (`company_tickers.json`), and the local IEX SecurityDirectory. The 3-source overlay produces the `symbols` reference table used by `Enrich.symbol()` at score time.
+- `MaterializeWorkflow` / `SelectWorkflow` / `NarrateWorkflow` — ad-hoc replay entry points.
+
+The original design considered a longer linear chain (DownloadHist → Decompress → ParseTops → ValidateDailyTotals → RefreshBaselines → ScoreEvents → SelectTopEvents → NarrateEvents → StoreNarratives → InvalidateCache). Real evolution compressed that into 6 phase workflows + the orchestrator, with Validate running in parallel with Parse (validators read the raw `.pcap.gz` files directly, not the DB). Decompress disappeared entirely — `PcapReader` streams `.pcap.gz` via `GZIPInputStream`.
 
 ---
 
