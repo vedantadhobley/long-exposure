@@ -547,10 +547,19 @@ CREATE INDEX IF NOT EXISTS selected_events_date_score_idx
 --     thought were relevant
 --   - Tag rows that failed verification but were stored anyway
 
-ALTER TABLE narratives ADD COLUMN IF NOT EXISTS selected_id     BIGINT;
-ALTER TABLE narratives ADD COLUMN IF NOT EXISTS blueprint       JSONB;
-ALTER TABLE narratives ADD COLUMN IF NOT EXISTS verifier_passed BOOLEAN;
-ALTER TABLE narratives ADD COLUMN IF NOT EXISTS verifier_notes  JSONB;
+ALTER TABLE narratives ADD COLUMN IF NOT EXISTS selected_id       BIGINT;
+ALTER TABLE narratives ADD COLUMN IF NOT EXISTS blueprint         JSONB;
+ALTER TABLE narratives ADD COLUMN IF NOT EXISTS verifier_passed   BOOLEAN;
+ALTER TABLE narratives ADD COLUMN IF NOT EXISTS verifier_notes    JSONB;
+
+-- Pass-2 structured render output. Schema:
+--   { "lead": "<sentence>", "facts": ["<sentence>", ...],
+--     "co_occurring": "<sentence>" | null }
+-- Stored alongside the stitched `narrative` text so downstream consumers
+-- (vedanta-systems API for display, Layer-3 synthesis for theme analysis)
+-- can either read prose directly or query the structure semantically.
+-- Schema enforced at LLM-call time via response_format=json_schema.
+ALTER TABLE narratives ADD COLUMN IF NOT EXISTS render_structured JSONB;
 
 CREATE INDEX IF NOT EXISTS narratives_selected_id_idx ON narratives (selected_id);
 

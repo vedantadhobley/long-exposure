@@ -56,15 +56,16 @@ public final class NarrationPipeline {
             throw new RuntimeException("extract failed for selected_id=" + input.selectedId(), e);
         }
 
-        // Pass 2: render prose
-        String prose;
+        // Pass 2: render structured prose (lead + facts + co_occurring slots)
+        RenderResult rendered;
         try {
-            prose = renderer.render(blueprint);
+            rendered = renderer.render(blueprint);
         } catch (Exception e) {
             throw new RuntimeException("render failed for selected_id=" + input.selectedId(), e);
         }
+        String prose = rendered.stitched();
 
-        // Pass 3 (pure code): verify
+        // Pass 3 (pure code): verify the stitched prose against the blueprint
         GroundingVerifier.Result verify = verifier.verify(prose, blueprint, input.breakdown());
         if (!verify.passed()) {
             LOG.warn("verifier failed  selected_id={} scorer={} symbol={} mismatches={}",
@@ -75,6 +76,7 @@ public final class NarrationPipeline {
         return new Result(
                 eventHash(input),
                 blueprint,
+                rendered,
                 prose,
                 verify,
                 modelId,
@@ -118,7 +120,8 @@ public final class NarrationPipeline {
     public record Result(
             byte[]                   eventHash,
             JsonNode                 blueprint,
-            String                   prose,
+            RenderResult             rendered,       // structured slots
+            String                   prose,          // stitched (rendered.stitched())
             GroundingVerifier.Result verify,
             String                   modelId,
             long                     elapsedMs

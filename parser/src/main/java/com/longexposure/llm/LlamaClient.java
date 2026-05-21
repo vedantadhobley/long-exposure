@@ -74,7 +74,34 @@ public final class LlamaClient {
      * @param params        decoder sampling knobs
      */
     public String chat(final String systemPrompt, final String userPrompt, final SamplingParams params) {
+        return chat(systemPrompt, userPrompt, params, null);
+    }
+
+    /**
+     * Single-turn chat with a JSON Schema constraint on the response. When
+     * {@code jsonSchema} is non-null, llama.cpp's sampler is restricted at
+     * each token to extensions that stay within the schema, so the returned
+     * string is guaranteed to parse as a JSON object matching the schema.
+     *
+     * <p>Useful for structured-output prompts where the parse cost +
+     * retry risk of free-form JSON output is unacceptable. The
+     * narration render pass uses this to emit
+     * {@code {lead, facts[], co_occurring}} reliably.
+     *
+     * @param jsonSchema  JSON Schema object (top-level type:object); pass
+     *                    {@code null} to disable schema enforcement
+     */
+    public String chat(final String systemPrompt, final String userPrompt,
+                       final SamplingParams params, final JsonNode jsonSchema) {
         ObjectNode body = buildBody(systemPrompt, userPrompt, params);
+        if (jsonSchema != null) {
+            ObjectNode rf = body.putObject("response_format");
+            rf.put("type", "json_schema");
+            ObjectNode js = rf.putObject("json_schema");
+            js.put("name", "render");
+            js.put("strict", true);
+            js.set("schema", jsonSchema);
+        }
         Request req = new Request.Builder()
                 .url(endpoint + "/chat/completions")
                 .post(RequestBody.create(body.toString(), JSON_TYPE))

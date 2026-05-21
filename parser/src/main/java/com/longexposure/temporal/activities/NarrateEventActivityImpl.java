@@ -127,16 +127,18 @@ public final class NarrateEventActivityImpl implements NarrateEventActivity {
                 INSERT INTO narratives (
                     event_hash, trading_date, event_type, event_ts, symbol,
                     score, score_breakdown, narrative, model_id,
-                    selected_id, blueprint, verifier_passed, verifier_notes
+                    selected_id, blueprint, verifier_passed, verifier_notes,
+                    render_structured
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?::jsonb, ?, ?::jsonb)
+                VALUES (?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?::jsonb, ?, ?::jsonb, ?::jsonb)
                 ON CONFLICT (event_hash) DO UPDATE SET
-                    narrative       = EXCLUDED.narrative,
-                    blueprint       = EXCLUDED.blueprint,
-                    verifier_passed = EXCLUDED.verifier_passed,
-                    verifier_notes  = EXCLUDED.verifier_notes,
-                    model_id        = EXCLUDED.model_id,
-                    created_at      = NOW()
+                    narrative         = EXCLUDED.narrative,
+                    blueprint         = EXCLUDED.blueprint,
+                    verifier_passed   = EXCLUDED.verifier_passed,
+                    verifier_notes    = EXCLUDED.verifier_notes,
+                    render_structured = EXCLUDED.render_structured,
+                    model_id          = EXCLUDED.model_id,
+                    created_at        = NOW()
                 """;
 
         try (PreparedStatement st = conn.prepareStatement(sql)) {
@@ -153,6 +155,7 @@ public final class NarrateEventActivityImpl implements NarrateEventActivity {
             st.setString(11, result.blueprint().toString());
             st.setBoolean(12, result.verify().passed());
             st.setString(13, verifierNotes);
+            st.setString(14, result.rendered().toJson(json).toString());
             st.executeUpdate();
         }
     }
