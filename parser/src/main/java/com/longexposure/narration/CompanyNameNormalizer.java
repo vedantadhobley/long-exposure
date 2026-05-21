@@ -50,6 +50,25 @@ public final class CompanyNameNormalizer {
             "depositary", "receipts"
     );
 
+    /**
+     * Multi-word SEC filing suffixes. Stripped before the token walk
+     * because the words individually overlap with entity-type tokens
+     * we need to preserve ("Limited" as entity suffix is legitimate
+     * for foreign issuers, but "Common Units representing Limited
+     * Partner Interests" is filing decoration on an MLP).
+     */
+    private static final Pattern[] MULTIWORD_SUFFIXES = new Pattern[] {
+            // Master Limited Partnership common-units filing
+            Pattern.compile(
+                    "\\s*-?\\s*Common\\s+Units\\s+representing\\s+Limited\\s+Partner\\s+Interests\\s*$",
+                    Pattern.CASE_INSENSITIVE),
+            // ETN-style "due <Date>" maturity suffixes — informative for
+            // structured-product accuracy but not part of issuer name
+            Pattern.compile(
+                    "\\s+due\\s+[A-Za-z]+(?:\\s+\\d{4})?\\s*$",
+                    Pattern.CASE_INSENSITIVE),
+    };
+
     /** Punctuation-only tokens (dashes, lone commas) act as separators. */
     private static final Pattern PUNCTUATION_ONLY = Pattern.compile("\\p{Punct}+");
 
@@ -59,6 +78,12 @@ public final class CompanyNameNormalizer {
     public static String normalize(final String raw) {
         if (raw == null) return null;
         String s = raw.trim().replaceAll("\\s+", " ");
+        if (s.isEmpty()) return s;
+
+        // Pre-strip multi-word filing suffixes that token-walking can't handle.
+        for (Pattern p : MULTIWORD_SUFFIXES) {
+            s = p.matcher(s).replaceFirst("").trim();
+        }
         if (s.isEmpty()) return s;
 
         String[] tokens = s.split(" ");

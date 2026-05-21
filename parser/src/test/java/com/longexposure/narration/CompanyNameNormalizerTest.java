@@ -77,4 +77,29 @@ final class CompanyNameNormalizerTest {
         assertEquals("British American Tobacco Industries, p.l.c.",
                 CompanyNameNormalizer.normalize("British American Tobacco  Industries, p.l.c."));
     }
+
+    @Test
+    void stripsMlpCommonUnitsSuffix() {
+        // The MLP filing suffix needs multi-word matching because
+        // "Limited" individually is a valid entity-type token.
+        assertEquals("Plains All American Pipeline, L.P.",
+                CompanyNameNormalizer.normalize(
+                        "Plains All American Pipeline, L.P. - Common Units representing Limited Partner Interests"));
+    }
+
+    @Test
+    void doesNotStripStandaloneLimitedEntity() {
+        // "Limited" as a standalone entity suffix must be preserved —
+        // the MLP pre-strip is multi-word so it doesn't fire here.
+        assertEquals("Antelope Enterprise Holdings Limited",
+                CompanyNameNormalizer.normalize("Antelope Enterprise Holdings Limited"));
+    }
+
+    @Test
+    void stripsEtnDueSuffix() {
+        assertEquals("MAX S&P 500 4X Leveraged ETNs",
+                CompanyNameNormalizer.normalize("MAX S&P 500 4X Leveraged ETNs due October"));
+        assertEquals("MAX S&P 500 4X Leveraged ETNs",
+                CompanyNameNormalizer.normalize("MAX S&P 500 4X Leveraged ETNs due October 2030"));
+    }
 }
