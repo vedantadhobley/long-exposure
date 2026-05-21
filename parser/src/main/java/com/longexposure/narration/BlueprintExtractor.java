@@ -137,17 +137,21 @@ public final class BlueprintExtractor {
         // total_children directly under co_occurring
         JsonNode tc = coOccurring.get("total_children");
         if (tc != null && !tc.isNull()) {
-            addKeyNumber(keyNumbers, tc.asText(), "co-occurring total children",
+            addKeyNumber(keyNumbers, tc.asText(), "co-occurring total children events",
                     "co_occurring.total_children");
         }
 
-        // during_event.<scorer>.<field> — flatten every leaf under each child scorer
+        // during_event.<scorer>.<field> — flatten every leaf under each child scorer.
+        // Labels are humanized so the LLM doesn't copy raw field names into prose:
+        //   "sum_orders" → "orders", "sum_total_shares" → "total shares", etc.
+        //   "post_cancel_cluster" → "post-cancel cluster"
         JsonNode during = coOccurring.path("during_event");
         if (during.isObject()) {
             Iterator<Map.Entry<String, JsonNode>> scorers = during.fields();
             while (scorers.hasNext()) {
                 Map.Entry<String, JsonNode> s = scorers.next();
                 String scorerId = s.getKey();
+                String scorerLabel = humanizeScorerId(scorerId);
                 if (!s.getValue().isObject()) continue;
                 Iterator<Map.Entry<String, JsonNode>> fields = s.getValue().fields();
                 while (fields.hasNext()) {
@@ -157,11 +161,43 @@ public final class BlueprintExtractor {
                     if (val == null || val.isNull() || val.isObject() || val.isArray()) continue;
                     addKeyNumber(keyNumbers,
                             val.asText(),
-                            "co-occurring " + scorerId + " " + field,
+                            "co-occurring " + scorerLabel + " " + humanizeFieldName(field),
                             "co_occurring.during_event." + scorerId + "." + field);
                 }
             }
         }
+    }
+
+    /** Replace scorer id underscores with spaces + a hyphen for "post-cancel". */
+    private static String humanizeScorerId(final String scorerId) {
+        return switch (scorerId) {
+            case "post_cancel_cluster" -> "post-cancel cluster";
+            case "liquidity_withdrawal" -> "liquidity withdrawal";
+            case "large_trade"          -> "large trade";
+            default -> scorerId; // halt, iceberg, layering, sweep — already readable
+        };
+    }
+
+    /**
+     * Map raw breakdown field names to human-readable label fragments so
+     * the LLM doesn't copy "sum_orders" into prose. The labels become
+     * fragments like "co-occurring layering orders" rather than
+     * "co-occurring layering sum_orders".
+     */
+    private static String humanizeFieldName(final String field) {
+        return switch (field) {
+            case "count"                -> "events";
+            case "sum_orders"           -> "orders";
+            case "sum_total_shares"     -> "total shares";
+            case "sum_distinct_levels"  -> "distinct price levels";
+            case "sum_notional_dollars" -> "notional dollars";
+            case "sum_deletes"          -> "deletes";
+            case "sum_fills"            -> "fills";
+            case "sum_executions"       -> "executions";
+            // Strip "sum_" prefix on anything else we forgot, leave bare field otherwise
+            default -> field.startsWith("sum_") ? field.substring(4).replace('_', ' ')
+                                                : field.replace('_', ' ');
+        };
     }
 
     private static void addKeyNumber(final ArrayNode keyNumbers, final String value,
