@@ -104,17 +104,30 @@ Qwen3.5-122B-A10B's model card publishes recommended sampling parameters per tas
 
 ## Known prompt-level limitations (open)
 
-Captured 2026-05-20 from a 164-event re-narration run under Qwen RENDER + v4 prompt. None are blockers; all are candidate work for the next prompt iteration.
+Captured 2026-05-20, updated 2026-05-21 after the EDGAR + structured-output run. None are blockers; all are candidate work for the next prompt iteration.
 
-1. **Residual current-state filler.** A small fraction (~0.6 %, 1/164 in the latest run) of narrations end with claims like "the security is now trading normally" or "regular market activity resumed." These are mild — they're inferred from the breakdown's halt-end timestamp but stated as current-state assertions. The v4 prompt's adaptive-length rule reduced this dramatically; making it fully zero needs another prompt iteration explicitly forbidding current-state claims, since the breakdown describes events that *occurred*, not the current state.
+### Resolved in v7 (EDGAR + structured-output)
 
-2. **Ticker/word collisions when symbol enrichment is incomplete.** When a ticker spells a real English noun ("ETN" = exchange-traded note, "ET" = Eastern Time, "GE" / "FOR" / "AT") and the `symbols` table doesn't have a `company_name` for that row, the model treats the ticker as the common noun. Observed example: "A large block trade of 20,786 shares in *an ETN* executed on the NYSE…" — should have been "Eaton Corporation plc (ETN)." Root cause is enrichment-side (the `symbols` table missing rows / company_name fields for some tickers), not prompt-side. Prompt could add a defensive "the breakdown's `symbol` field is ALWAYS a ticker, even if it spells a real word" rule as a band-aid.
+- ~~**Ticker/word collisions when symbol enrichment is incomplete.**~~ Resolved by EDGAR overlay supplying clean canonical company names for the SEC-registered universe, and the multi-word `CompanyNameNormalizer` stripping MLP / ETN-due-date suffixes from NASDAQ Security Name when EDGAR doesn't have the ticker.
+- ~~**Company-name fabrication when blueprint lacks `company_name`.**~~ Resolved by `BlueprintExtractor` pass-through: the blueprint now deterministically carries `breakdown.company_name` forward to the renderer, removing the gap that previously had the model invent names from training memory.
 
-3. **Uneven enrichment narration.** The `breakdown.co_occurring` block (post_cancel/layering/sweep nested inside a parent liquidity_withdrawal) is integrated well by some narrations (IWM, INTC) and skipped entirely by others (some icebergs with 285+ children). When enrichment is present, narration *should* reference it — currently the LLM decides freely whether to surface it. Fix: prompt rule "if the blueprint contains co_occurring values, your narration must reference at least one of them."
+### Still open
 
-4. **Run-to-run variance higher than pre-Qwen.** RENDER preset's temp=0.7 means the same event re-narrated produces different sentence orderings. Verifier still passes both. Not a quality regression — but reproducibility is weaker than at temp=0.3. Acceptable tradeoff for the journalistic prose variety; revisit if it ever causes operational pain.
+1. **`co_occurring` slot under-used by icebergs.** The prompt says the slot is *required* when the breakdown contains a `co_occurring` block, but in practice the model uses it reliably for `liquidity_withdrawal` (where co_occurring carries genuinely *other-scorer* nested events — substantive new information) and skips it for icebergs (where co_occurring usually just describes the iceberg's own `total_children` count — feels like metadata of the same event, not a separate story). Single-prompt design across all scorers means the model is making this judgment call.
 
-5. **No interpretive layer yet.** Narrations describe the *shape* of events ("8,456 shares swept across 39 executions at 11 levels in 18.1 ms") but don't explain *what that means* ("classic aggressive market-buy hitting the offer ladder, consistent with an algo crossing the spread"). That's the Layer 0 expansion + Layer 3 synthesis work, queued separately.
+   *Fix options when we get to it*: (a) differentiate in the prompt between "co_occurring contains other-type nested events (always reference)" vs "co_occurring is self-describing metadata (optional)"; (b) strip self-referential fields from co_occurring at enrichment time so icebergs simply don't have a co_occurring block.
+
+2. **Residual current-state filler.** A small fraction of halt narrations append "Trading resumed following the suspension" as a 3rd sentence. Factually grounded (the halt has an end timestamp) but feels closer to filler than insight — the listener already inferred trading resumed from the end-time fact. v4 prompt's adaptive-length rule largely fixed this; v7 still produces a few. Prompt could add "do not append explanatory sentences that restate what the timestamps already convey."
+
+3. **Number formatting inconsistency.** Narrations sometimes show "5526" without thousand-separators where others show "5,526". The format depends on the extractor's choice for the `value` field in `key_numbers[]` — model copies it verbatim into prose. Fix is upstream in `BlueprintExtractor`'s prompt or in `Humanize` (pre-format integers with thousand separators before they reach the blueprint).
+
+4. **Model case-normalization on company names.** Observed: SPYU's breakdown has "MAX S&P 500 4X Leveraged ETNs" (all-caps MAX as stored in NASDAQ); model outputs "Max S&P 500 4X Leveraged ETNs" in 2/3 narrations. The verifier's Layer-4 token-subset check passes this because comparison is case-insensitive after normalization. The model is making a paraphrase the prompt says not to make. Hard fix would require case-sensitive verifier, but that breaks the "Microsoft Corp" ↔ "Microsoft Corporation" abbreviation acceptance.
+
+5. **Minor company-name truncations from EDGAR.** EDGAR's `title` field occasionally drops an article or word that NASDAQ retains. Observed: TTD → EDGAR "Trade Desk, Inc." vs NASDAQ "The Trade Desk, Inc."; preferEdgar picks EDGAR because it's mixed-case + clean, but loses "The". Not wrong, just slightly less brand-correct. Could be handled by a per-symbol override table (small, manual) for the few cases that matter.
+
+6. **Run-to-run variance higher than pre-Qwen.** RENDER preset's temp=0.7 means same event re-narrated produces different sentence orderings. Verifier passes both. Not a quality regression — reproducibility is weaker than at temp=0.3. Acceptable tradeoff for journalistic prose variety; revisit if it causes operational pain.
+
+7. **No interpretive layer yet.** Narrations describe the *shape* of events ("8,456 shares swept across 39 executions at 11 levels in 18.1 ms") but don't explain *what that means* ("classic aggressive market-buy hitting the offer ladder, consistent with an algo crossing the spread"). That's the Layer 0 expansion + Layer 3 synthesis work, queued separately.
 
 ## Layer 3 daily synthesis (design, pre-implementation)
 
