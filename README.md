@@ -443,40 +443,42 @@ The repository is MIT-licensed from day one. The README frames the project as **
 
 Repo layout:
 
-- `parser/` — the Java module (also hosts the Temporal worker registration)
-- `api/` — FastAPI service
-- `deploy/` — host-level integration notes (Caddy, vedanta-systems wiring)
-- `docs/` — agent + contributor docs (architecture, plan, todo, decisions, protocol-notes, operations)
-- `docker-compose.yml` / `docker-compose.dev.yml` — full stack reproducible by anyone
+- `parser/` — the Java module: parser + Temporal worker + scorer registry + narration pipeline + verifier. The whole pipeline-side codebase.
+- `deploy/` — host-level integration notes (Caddy entries on the workspace proxy, vedanta-systems API wiring).
+- `docs/` — design + operational docs: [concepts](docs/concepts.md), [architecture](docs/architecture.md), [scoring-and-narration](docs/scoring-and-narration.md), [decisions](docs/decisions.md), [protocol-notes](docs/protocol-notes.md), [temporal-design](docs/temporal-design.md), [operations](docs/operations.md), [validation-results](docs/validation-results.md), [plan](docs/plan.md), [todo](docs/todo.md).
+- `docker-compose.yml` / `docker-compose.dev.yml` — full stack reproducible by anyone.
+
+There is no `api/` directory in this repo. The HTTP API surface lives in [`vedanta-systems`](https://github.com/vedantadhobley/vedanta-systems)' unified Express service, which queries this project's Postgres directly over the shared docker network. See [Frontend integration](#frontend-integration).
 
 Frontend is not part of this repo; see [Frontend integration](#frontend-integration).
 
 ---
 
-## Build plan
+## Build status
 
-The original 22-day estimate compressed substantially in practice. Real cadence is captured in `docs/plan.md` and updated as sprints land. Headline structure:
+The original 22-day plan compressed substantially. Current state (2026-05-21):
 
-**Foundation + TOPS parser + storage (done 2026-05-11, one session)**
-Gradle project, multi-stage Dockerfile, pcap-ng reader (no pcap4j dep), IEX-TP transport decoder, 7 shared admin message decoders, 5 TOPS-specific trading decoders, sealed-interface message hierarchies, `TopsMessageRouter`, 48 unit tests, Postgres + TimescaleDB schema with 8 hypertables + continuous aggregate, COPY-based `TimescaleWriter`. End-to-end: 9.5 GB 2026-05-08 HIST → 294,790,405 messages → Postgres in 22:27. Counts match the parser's in-memory histogram exactly.
+✅ **Foundation + parser** (2026-05-11). Pure-Java pcap-ng reader, IEX-TP transport decoder, 7 shared admin message decoders, 5 TOPS trading decoders + `TopsMessageRouter`, 7 DPLS trading decoders + `DplsMessageRouter`, DEEP price-level update decoder + `DeepMessageRouter`. Order-book + price-level-book state machines. Full unit test suite (~80 tests).
 
-**DEEP+ parser (next sprints, target ~1 session)**
-Implement the 7 DEEP+ trading-message decoders (Add/Modify/Delete/Execute Order, Trade, Trade Break, Clear Book), the order book state machine (`Map<OrderID, OrderState>` per symbol), extend the schema + writer. Cross-validate against the existing TOPS data (derive top-of-book from DEEP+ book state, compare to the real TOPS Quote Update stream).
+✅ **Cross-validation triangle** (2026-05-11/12). Three independent validators — DPLS↔DEEP price-level (the TOPS-independent leg, 100.0000% on two trading days), DPLS→TOPS derived BBO (99.4184%), DEEP→TOPS derived BBO (identical to DPLS leg). Full residual analysis in [`docs/validation-results.md`](docs/validation-results.md).
 
-**Bootstrap baselines**
-Download 30 trading days of DPLS HIST, parse each through the pipeline. Continuous aggregate populates with rolling 30-day per-symbol metrics. This is the visible launch archive — re-scored and re-narrated once the scorer + narrator land.
+✅ **Storage** (2026-05-12). 13 wire-format hypertables, `order_lifecycle` derived hypertable for sub-second PostCancel/Layering scans, 5 standard tables. End-to-end: 364 M rows ingested in 35:07 (~174 K rows/sec) via JDBC `COPY`.
 
-**Event scoring**
-`EventScorer` interface taking a decoded event + per-symbol baseline, returning a score + JSON breakdown. Per-event-type scorers including the DEEP+-unique order-flow ones (rapid post-cancel patterns, time-in-book distribution shifts). Tune weights until top-N events on a sample day pass the "would I read this?" check.
+✅ **Temporal scaffolding** (2026-05-13). 10 workflows on the daily-pipeline task queue, 14 activities. Per-activity retry policies, heartbeats, start-to-close timeouts. Idempotent on pipeline_run with pre-clean by trading_date.
 
-**LLM narration**
-Prompt engineering against `llama-large.joi`. **Expected to be the hardest design work** in the project. Cache by event hash. Refuse on incomplete data. Tone: clear, factual, accessible.
+✅ **Scoring + selection** (2026-05-16). 7 intraday scorers (halt, large_trade, sweep, post_cancel_cluster, layering, iceberg, liquidity_withdrawal) implementing push-model `EventScorer`. Selection via within-scorer percentile rank → 90–164 narratable events per trading day.
 
-**Temporal + API**
-Wire the pipeline stages into a proper Temporal workflow with retry policies, heartbeating, replayability. Implement the FastAPI endpoints consumed by vedanta-systems.
+✅ **Symbol enrichment** (2026-05-18, expanded 2026-05-21). `RefreshSymbolsWorkflow` pulls from three sources: NASDAQ public listings, SEC EDGAR (canonical company names), and the local IEX SecurityDirectory. `CompanyNameNormalizer` handles the long tail.
 
-**vedanta-systems integration + deploy**
-In `~/workspace/dev/vedanta-systems/`: add the `/api/long-exposure/*` nginx proxy, build `src/components/long-exposure-browser.tsx` consuming the API, register the project in `src/App.tsx`. Public launch at `vedanta.systems` with 30 backfilled days already narrated.
+✅ **Co-occurrence enrichment** (2026-05-20). Long sec-scale parent events (liquidity_withdrawal) absorb nested ms-scale children (post_cancel_cluster, layering) into a `co_occurring` block on the parent's breakdown. Children marked `subsumed_by_event_id` and skipped at selection.
+
+✅ **Two-pass narration with structured output + 4-layer verifier** (2026-05-21). `BlueprintExtractor` → `ProseRenderer` (JSON-schema-enforced three-slot output) → `GroundingVerifier`. Running against `Qwen3.5-122B-A10B` on `joi`. 164/164 verifier-passed on the 2026-05-08 dataset.
+
+🛠 **Public launch prep** (in progress). Frontend integration into `vedanta-systems` portal + 30-day backfill archive + whitepaper.
+
+📋 **Queued post-launch.** Layer-3 daily synthesis (one LLM call per day producing themes across all narrations), per-event Layer-0 expansion (interpretive second pass), inter-day scorers (`VolumeDeviationScorer`, `TimeInBookDriftScorer`) which need a 30-day baseline.
+
+See [`docs/plan.md`](docs/plan.md) for sprint-by-sprint history and [`docs/todo.md`](docs/todo.md) for the active work list.
 
 ---
 
