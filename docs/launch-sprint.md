@@ -76,35 +76,40 @@ Then a full re-narration to validate. Total: ~5 hours active work + 40-min re-ru
 - Verifier for Layer 3 — looser than Layer 2 (no per-number grounding) but every symbol mentioned must appear in at least one of that day's Layer-2 narrations. Every event_type referenced must be one of the 7 scorer IDs.
 - End-to-end test: kick `SynthesizeDayWorkflow` on 2026-05-08, read output, iterate on prompt until prose is publishable-quality. Repeat on 2-3 other days as they're available.
 
-### Day 4 — Layer 0 design (Sunday 5/24)
+### Day 4 — Layer 0 architecture test (Sunday 5/24)
 
-- **Pattern catalog file**: `parser/src/main/resources/pattern-catalog.json`. Per-scorer "what this pattern likely means in market microstructure terms":
+**Catalog already drafted** at `parser/src/main/resources/pattern-catalog.md` (committed 2026-05-21). Full design discussion in [`docs/layer-0-design.md`](layer-0-design.md). The architecture decision (LLM-driven vs code-driven templated) is pending an empirical test.
 
-  ```json
-  {
-    "iceberg": {
-      "interpretation": "Hidden order being worked. Common when a large institution wants minimal market impact; the repeated equal-size fills suggest the displayed tip is refilling from a hidden reserve.",
-      "common_contexts": ["block accumulation", "block distribution", "patient algorithmic execution"]
-    },
-    "layering": { ... },
-    ...
-  }
-  ```
+Day-4 work:
 
-  Discipline: each entry has a domain-knowledge justification. No claims that can't trace back to canonical microstructure literature.
+1. **Build LLM-driven Layer 0 prototype** (Option A from layer-0-design.md):
+   - `InterpretEventActivity` — per-selected-event Temporal activity called after Narrate completes.
+   - Reads the Layer-2 narration + breakdown + the catalog entry for the event's scorer.
+   - Custom sampling preset `SamplingParams.INTERPRET` (similar to RENDER, possibly lower temperature for tighter catalog adherence).
+   - Output: one interpretation sentence.
+2. **Verifier Layer-5**:
+   - Numbers in interpretation must trace to breakdown.
+   - Significant tokens in interpretation must be subset of catalog entry's significant tokens (enforces vocabulary discipline).
+3. **Schema migration**: add `narratives.interpretation TEXT` column.
+4. **Run on 2026-05-08** for empirical assessment.
 
-- **`InterpretEventActivity`** — per-selected-event activity called after Narrate completes. Reads narrative + breakdown + pattern catalog entry for the event_type + surrounding context (events on same symbol within ±5 min of the event). LLM call produces an interpretation sentence.
-- **Verifier Layer-5** — every claim in the interpretation must reference either (a) a number/value in the breakdown OR (b) be a sentence directly traceable to the pattern catalog entry for that event_type. No free interpretation.
-- **Schema** — new column `narratives.interpretation TEXT`, populated only for events that get Layer-0 expansion (probably all 164 if we keep it simple).
+### Day 5 — Decision A vs B + production wiring (Monday 5/25)
 
-### Day 5 — Layer 0 implementation + decision (Monday 5/25)
+Read the prototype output cold against the same 164 events' Layer-2 narrations. Decision criteria (per layer-0-design.md):
 
-- Implement the activity + interpretation prompt.
-- Tune pattern catalog by inspecting outputs across all 7 scorer types.
-- Re-narrate 2026-05-08 end-to-end including Layer 0.
-- **Decision point at end of Day 5**: read 20+ interpretations side by side with their Layer-2 narrations. If interpretations clearly add insight (more "why" than "what"), ship. If they're verbose noise or hallucinate beyond the pattern catalog, defer to v2 and document the rationale in `decisions.md`.
+- Are the interpretations adding insight that the Layer-2 narration doesn't? If yes, A wins.
+- Does the model stay within catalog vocabulary, or does it drift?
+- Do the per-event contextualizations read better than what code-substituted templates would produce?
 
-The discipline: better to ship tight Layer 2 + Layer 3 than half-baked Layer 0.
+**If A wins**: ship the LLM-driven layer as-is. Decision recorded in `decisions.md`. Frontend (Day 8) surfaces interpretation as a separate visual block.
+
+**If B wins**: extend the catalog with `Templated interpretation` fields per scorer (templates with `{placeholder}` substitution), refactor `InterpretEventActivity` to do code-side substitution rather than LLM call. The verifier framework already in place still validates the templated output. Decision recorded in `decisions.md`.
+
+**If toss-up**: default to B (code-driven). The catalog content is the value; the LLM is incremental. Lower risk + simpler beats marginal naturalness.
+
+The discipline: better to ship tight Layer 2 + Layer 3 + a defensible Layer 0 than a half-baked LLM-driven Layer 0 with edge-case drift.
+
+**How Layer 0 enhances Layer 1**: Layer 0 doesn't change scoring at runtime, but the catalog is a *design spec* for future scoring work — its "drivers" lists are the differentiation targets new scorers would aim at (e.g., one-sidedness asymmetry could help distinguish layering drivers; spread-anomaly detection would correlate with liquidity withdrawal's "pre-news de-risking" driver). Full reasoning in [`docs/layer-0-design.md`](layer-0-design.md) under "How Layer 0 relates to Layer 1".
 
 ### Day 6 — Code audit (Tuesday 5/26)
 

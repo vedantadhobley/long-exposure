@@ -135,6 +135,20 @@ Captured 2026-05-20, updated 2026-05-21 after the EDGAR + structured-output run.
 
 8. **No interpretive layer yet.** Narrations describe the *shape* of events ("8,456 shares swept across 39 executions at 11 levels in 18.1 ms") but don't explain *what that means* ("classic aggressive market-buy hitting the offer ladder, consistent with an algo crossing the spread"). That's the Layer 0 expansion + Layer 3 synthesis work, queued separately.
 
+## Layer 0 interpretive narration (design, pre-implementation)
+
+Per-event interpretive narration that explains what a Layer-2 description *means* in market microstructure terms. Where Layer 2 narrates the shape ("AMD experienced a layering event involving 187 orders across 116 levels in 166 ms"), Layer 0 would explain what that shape *is* in vocabulary anchored to a curated pattern catalog ("Layering describes orders posted across multiple price levels and cancelled rapidly. The same wire signature is produced by market-making, smart-order-router probes, risk-management responses to correlated moves, and — when documented as such by regulators — spoofing").
+
+Full design in [`docs/layer-0-design.md`](layer-0-design.md). Catalog content in [`parser/src/main/resources/pattern-catalog.md`](../parser/src/main/resources/pattern-catalog.md). Architecture decision (LLM-driven vs code-driven templated) pending Day-4 prototype test in the launch sprint.
+
+Three design principles for the catalog (rigorously enforced):
+
+1. **No intent claims from wire data alone.** Market microstructure patterns can have many causes; documented intent requires evidence beyond the order book.
+2. **Mechanism over interpretation.** Describe what is happening on the wire; don't editorialize about why.
+3. **Multiple drivers, not "the" driver.** Every pattern has 2+ legitimate explanations enumerated.
+
+The catalog also indirectly informs Layer 1 (scoring) — its "drivers" lists are the differentiation targets new scorers would aim at. Adding a one-sidedness asymmetry score helps distinguish layering drivers; a spread-anomaly scorer correlates with liquidity withdrawal's "pre-news de-risking" driver. Layer 1 detects patterns; the catalog defines what's worth differentiating *within* a pattern.
+
 ## Layer 3 daily synthesis (design, pre-implementation)
 
 Single LLM call per day, runs after all per-event narrations are complete. Input: the day's narratives (prose + blueprint + breakdown) plus day-level metadata (date, session phases, total event count). Output: one paragraph identifying recurring themes across the day's events.

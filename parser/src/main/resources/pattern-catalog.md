@@ -29,7 +29,7 @@ The Layer-0 verifier (`GroundingVerifier` Layer-5) enforces that interpretation 
 A halt is a trading suspension imposed by an exchange. Three regulatory causes drive halts:
 
 1. **News pending (T1).** The listing exchange suspends trading while material non-public information is being disseminated. Resumes after a regulatory notification period.
-2. **LULD pause (Limit Up-Limit Down).** The single-stock circuit breaker triggers when a stock's reference price moves outside a percentage band (5% / 10% / 20% depending on the security's tier). The pause is 5 minutes followed by a reopening auction.
+2. **Single-stock circuit breaker pause (LULD — Limit Up-Limit Down).** Triggers when a stock's reference price moves outside a percentage band (5% / 10% / 20% depending on the security's tier). The pause is 5 minutes followed by a reopening auction.
 3. **Market-wide circuit breaker (MCB).** Level 1, 2, or 3 trip when the S&P 500 falls 7%, 13%, or 20% intraday respectively. Halts all US equity trading for 15 minutes (L1/L2) or for the remainder of the session (L3).
 
 ### Drivers
@@ -45,7 +45,13 @@ The halt event itself does not carry information about what news triggered the s
 
 ### Canonical interpretation
 
-> "Trading halts can result from material news pending, LULD volatility pauses, or market-wide circuit breakers. The wire data records the duration and reason code but not the underlying news or market condition that triggered the suspension."
+> "Trading halts can result from material news pending, single-stock circuit breaker volatility pauses (LULD), or market-wide circuit breakers (MCB). The wire data records the duration and reason code but not the underlying news or market condition that triggered the suspension."
+
+### Templated interpretation (Option B)
+
+> "This {duration} halt on {symbol} ({company_name}) was a {reason_category} suspension. Halts can result from material news pending, single-stock circuit breaker pauses (LULD), or market-wide circuit breakers (MCB); the wire data records the duration and reason code but not the underlying news or condition."
+
+Substitution variables: `{duration}`, `{symbol}`, `{company_name}`, `{reason_category}` (mapped from breakdown.halt_reason via a small lookup: T1 → "news-pending"; LULD-* → "LULD volatility"; MCB-* → "market-wide circuit breaker"; else → "regulatory").
 
 ### Sources
 
@@ -58,7 +64,7 @@ The halt event itself does not carry information about what news triggered the s
 
 ### Mechanism
 
-A single execution exceeding $1M in notional value (size × price). On IEX, this can be either a routed order filling against displayed liquidity, a non-displayed match in the dark pool, or a mid-point execution at the M-Peg or D-Peg level.
+A single execution exceeding $1M in notional value (size × price). On IEX, this can be either a routed order filling against displayed liquidity, a non-displayed match in the dark pool, or a mid-point execution against pegged order types (Midpoint Peg or Discretionary Peg — IEX's hidden-liquidity order types that price relative to the national best bid/offer, NBBO).
 
 ### Drivers
 
@@ -187,7 +193,7 @@ The driver set is even broader than layering's:
 
 - **Market-maker quote churn:** continuous quote updates as the NBBO moves. Each update is technically a cancel-and-replace.
 - **Quote-stuffing experimentation:** algorithms probing the book to characterize match-engine response patterns.
-- **HFT response to a crumbling-quote signal:** firms withdrawing quotes when their predictive signals fire.
+- **High-frequency-trading (HFT) response to a crumbling-quote signal:** firms withdrawing quotes when their predictive signals fire. IEX itself runs the Crumbling Quote Indicator (CQI) for this purpose — when the CQI fires, certain order types automatically become less aggressive.
 - **Smart-order-router IOC probes:** Immediate-or-Cancel orders that fail to fill convert to short-lifetime cancellations.
 - **Hedging against a fast-moving correlated instrument:** rapid quote adjustment as the related instrument's price changes.
 - **Manipulative activity** (when documented): one-sided rapid post-cancel can be part of spoofing or layering schemes. Same intent caveats as layering.
@@ -216,7 +222,7 @@ A flood of cancellations on a single symbol within a narrow window — detected 
 ### Drivers
 
 - **Pre-news de-risking:** market makers withdrawing quotes when their order-flow models signal incoming material information
-- **LULD-band approach:** automatic quote pullback as price approaches a circuit-breaker band
+- **LULD-band approach:** automatic quote pullback as price approaches a single-stock circuit-breaker (LULD) band
 - **Correlated-instrument volatility:** withdrawal in response to fast-moving futures, ETFs, or basket components
 - **Earnings-window protocols:** scheduled withdrawal around known information-release windows
 - **Cross-market routing changes:** liquidity providers shifting depth to other venues
@@ -242,3 +248,11 @@ Liquidity withdrawal is overwhelmingly defensive market-maker behavior. It frequ
 - **Version**: v1 draft (2026-05-21)
 - **Status**: pending IEX-internal review before public launch
 - **Update process**: catalog entries are versioned with the codebase. Updates go through PR review like any other source file. The catalog content is the source of truth for the Layer-0 verifier (token-subset agreement against this content), so adding new claim phrases requires explicit catalog update — preventing the LLM from drifting in interpretation language over time.
+
+### Glossing convention
+
+Technical terms (LULD, MCB, NBBO, CQI, ATS, VWAP, HFT) are introduced with their full English expansion on first appearance in any narration, with the acronym in parentheses. Subsequent uses within the same narration may use the acronym alone. The catalog itself uses this discipline throughout — anything the model produces from catalog material will inherit it.
+
+### Layer-0 architecture and templated interpretations
+
+Architecture decision pending the Day-4 prototype (see [`docs/layer-0-design.md`](../../../../docs/layer-0-design.md)). If we land on Option B (code-driven Layer 0), each scorer entry gets a `Templated interpretation` field beneath the canonical interpretation, with `{placeholder}` variables that code substitutes from the breakdown. The `halt` entry above shows the format. The other 6 will be added once the architecture decision is made.

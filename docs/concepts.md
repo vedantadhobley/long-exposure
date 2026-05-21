@@ -353,9 +353,17 @@ Backfill order matters: we proved the pipeline works on 1 day first (2026-05-08)
 
 #### A. Layer 0 — per-event interpretation pass
 
-Another LLM call per Layer-2 narration that reads the prose + a slice of surrounding context (price 5 min before/after, surrounding events on the same symbol, day's volume context) and produces an interpretation: "the layering came right before an 8,000-share market buy at the same price." Costs +1 LLM call per event (~50–164 calls per day; cheap on local).
+Per-event narration that explains what a pattern *means* in market microstructure terms — adding the "what it is" layer on top of Layer 2's "what happened."
 
-The interpretation should be grounded in a pattern catalog (file in repo) so the LLM has a fixed vocabulary for "this shape looks like X" rather than freelance interpretation.
+**Catalog drafted** (2026-05-21) at [`parser/src/main/resources/pattern-catalog.md`](../parser/src/main/resources/pattern-catalog.md). Per-scorer entries enumerate: mechanism (factual), legitimate drivers (multiple, not "the" driver), inference limit (what wire data alone cannot establish), canonical interpretation (the safe one-sentence prose), sources (published references).
+
+Three principles govern catalog content:
+
+1. No intent claims from wire data alone (no "this looks like spoofing" — patterns have many causes)
+2. Mechanism over interpretation (describe what's happening on the wire; don't editorialize)
+3. Multiple drivers, not "the" driver (every pattern has 2+ legitimate explanations)
+
+**Architecture pending Day-4 prototype** — choice between LLM-driven (Option A: each event gets an LLM call that contextualizes the catalog entry) and code-driven templated (Option B: code substitutes from breakdown into curated templates, zero LLM risk). Full discussion in [`docs/layer-0-design.md`](layer-0-design.md). Default if quality is a toss-up: Option B.
 
 #### B. Layer 3 — daily synthesis
 
