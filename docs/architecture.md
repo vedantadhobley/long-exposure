@@ -77,26 +77,44 @@ The orchestrator is **pure orchestration** — it calls child workflows for each
 | 2 | Parse | `ParseWorkflow` | DPLS .pcap.gz → 13 hypertables via JDBC COPY | sequential within child |
 | 2′ | Validate | `ValidateWorkflow` | Triangle cross-validation: DPLS book ↔ DEEP price levels (100 %); DPLS/DEEP derived BBO vs TOPS Quote Updates (99.4 %). Upserts `validation_runs`. | 3 validator legs in parallel inside the child; **runs in parallel with Parse from the orchestrator's POV** (validators read raw files, not DB) |
 | 3 | Score | `ScoreWorkflow` | Materialize `order_lifecycle` (one JOIN once per day) → run 7 scorers → select top-N | sequential |
-| 4 | Narrate | `NarrateWorkflow` | Two-pass LLM (extract → render) + pure-code grounding verify against `llama-large.joi`; cache by `event_hash`; write `narratives` | sequential today; per-event activity parallelism queued |
+| 4 | Narrate | `NarrateWorkflow` | Two-pass LLM (`BlueprintExtractor` extract → `ProseRenderer` render with JSON-schema-enforced structured output) + pure-code `GroundingVerifier` (numbers + symbol + parenthetical-company agreement) against `llama-large.joi`; cache by `event_hash`; write `narratives` (prose + `render_structured` JSONB) | per-event fan-out with sliding-window 2-concurrent guard + dedicated narration task queue |
 | 5 | Cleanup | `CleanupWorkflow` | Delete the 3 `.pcap.gz` files (only on success) + `drop_chunks` older than 30 days | sequential |
 
 The orchestrator itself only retains direct activity calls for **cross-cutting metadata** — `PipelineRunRecorderActivity` for the idempotency short-circuit, run-start, and run-completion bookkeeping. These aren't a coherent phase; they thread through the orchestration and stay as direct activity calls.
 
 Ancillary workflows on the same task queue:
 
-- `RefreshSymbolsWorkflow` — weekly cron (Sun 02:00 ET, paused). Refreshes the `symbols` reference table from NASDAQ public listings + local IEX SecurityDirectory data. Read by `ScoreEventsActivity` to enrich event breakdown JSONs (company name, ETF flag, round lot, prev close) so the LLM narrator has structured per-ticker context.
+- `RefreshSymbolsWorkflow` — weekly cron (Sun 02:00 ET, paused). Refreshes the `symbols` reference table from three sources:
+  1. **NASDAQ** `nasdaqlisted.txt` + `otherlisted.txt` — exhaustive ticker universe with exchange, ETF flag, round-lot size, and SEC-filing-style `Security Name`.
+  2. **SEC EDGAR** `company_tickers.json` — canonical issuer name without filing decoration; preferred over NASDAQ's `Security Name` when EDGAR has a mixed-case entry. Overlay rule preserves NASDAQ's brand-correct casing when EDGAR returns all-caps (e.g. "NVIDIA Corporation" beats "NVIDIA CORP").
+  3. **IEX SecurityDirectory** — LULD tier, prev-close.
+
+  Used by `ScoreEventsActivity` to enrich every event's breakdown JSON (company_name, listing_exchange, is_etf, round_lot, prev_close_dollars, luld_tier). `CompanyNameNormalizer` runs on the NASDAQ-sourced names at score time as a fallback that's effectively a no-op on EDGAR's clean output.
 - `MaterializeWorkflow` / `SelectWorkflow` — ad-hoc replay entry points; DailyPipeline invokes the underlying activities via `ScoreWorkflow` rather than these.
 
 A failed validation flags the day's events as `unverified` rather than publishing them. Failed parse short-circuits scoring + narration but doesn't fail the workflow (operators can re-run via `ScoreWorkflow` / `NarrateWorkflow` after fixing the underlying issue).
 
 ## Data layout
 
-- `events` hypertable, partitioned on the trade-time column. Append-only.
-- `narratives` table keyed by event hash. Cache layer for LLM output.
-- Continuous aggregates over `events` providing the rolling T-30 baselines per (symbol, metric).
-- No mutations after write.
+The schema (committed in `parser/src/main/resources/schema.sql`, applied idempotently by `SchemaManager` at activity start) has three layers:
 
-Schema lives in `parser/src/main/resources/schema.sql` (target — not yet committed; tracked in @todo.md).
+**Wire-format hypertables (13)** — one per IEX message type, partitioned on the message timestamp column. Append-only. `feed_source` column on every row identifies whether the row came from DPLS, DEEP, or TOPS (so a single date can carry data from multiple feeds during the validation triangle):
+
+| DPLS-side | TOPS/DEEP-shared |
+|---|---|
+| `orders_add`, `orders_modify`, `orders_delete`, `orders_executed`, `clear_books` | `trades`, `trade_breaks`, `quotes`, `status_events`, `auction_info`, `official_prices`, `securities`, `retail_liquidity` |
+
+**Derived hypertable** — `order_lifecycle` (one row per order: paired `Add` + terminal `Delete`/`Execute` event with lifetime), built once per day by `MaterializeOrderLifecycleActivity` between Parse and Score. Partial index on `lifetime_ns < 100 ms` so `PostCancelClusterScorer` and `LayeringScorer` hit a sub-second sequential range scan instead of a 13 GB hash JOIN.
+
+**Standard tables (5)**:
+- `scored_events` — per-scorer raw output (~660 K rows/day under current thresholds). Has `subsumed_by_event_id` for children absorbed via co-occurrence enrichment.
+- `selected_events` — top-N per scorer, the narration input set (90–164 rows/day).
+- `narratives` — keyed by `event_hash` (which incorporates breakdown + prompt versions, so prompt changes invalidate the cache). Stores both stitched `narrative TEXT` and `render_structured JSONB` (the three-slot `{lead, facts, co_occurring}` form).
+- `symbols` — per-ticker reference (company name, listing exchange, ETF flag, round lot, prev close, LULD tier).
+- `pipeline_runs` — Temporal workflow lifecycle bookkeeping with status (`ok`, `unverified`, `parse_failed`, `skipped_already_ingested`, `skipped_no_data`).
+- `validation_runs` — triangle cross-validation results per trading day (DPLS↔DEEP price-level match rate, DPLS→TOPS BBO match rate, DEEP→TOPS BBO match rate).
+
+**Continuous aggregate** — `daily_volume_by_symbol` for the rolling per-symbol baselines that future inter-day scorers will use. Populated incrementally as wire-format hypertables receive new data.
 
 ## Frontend integration
 
