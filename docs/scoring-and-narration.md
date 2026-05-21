@@ -127,7 +127,9 @@ Captured 2026-05-20, updated 2026-05-21 after the EDGAR + structured-output run.
 
 6. **Run-to-run variance higher than pre-Qwen.** RENDER preset's temp=0.7 means same event re-narrated produces different sentence orderings. Verifier passes both. Not a quality regression — reproducibility is weaker than at temp=0.3. Acceptable tradeoff for journalistic prose variety; revisit if it causes operational pain.
 
-7. **No interpretive layer yet.** Narrations describe the *shape* of events ("8,456 shares swept across 39 executions at 11 levels in 18.1 ms") but don't explain *what that means* ("classic aggressive market-buy hitting the offer ladder, consistent with an algo crossing the spread"). That's the Layer 0 expansion + Layer 3 synthesis work, queued separately.
+7. **Verb-led vs subject-led prose triggers a Layer-4 false-positive.** Observed once in the 2026-05-21 run on IWM: model wrote "Liquidity withdrawal occurred on iShares Russell 2000 Index Fund (IWM), marked by 2145 deletes…" — verb-led sentence structure rather than the canonical journalist subject-led shape ("iShares Russell 2000 Index Fund (IWM) experienced a liquidity withdrawal…"). The Layer-4 regex `[A-Z]…(TICKER)` then captured the entire leading phrase "Liquidity withdrawal occurred on iShares Russell 2000 Index Fund" as the "prose company" string, which couldn't token-subset-agree with "iShares Russell 2000 Index Fund" and flagged as a mismatch. Two ways to address: (a) constrain the prompt to subject-led opening, or (b) make the Layer-4 regex smarter about extracting only the company-name-shaped substring immediately preceding `(TICKER)`. (a) is simpler; (b) is more defensive against future prose-style drift.
+
+8. **No interpretive layer yet.** Narrations describe the *shape* of events ("8,456 shares swept across 39 executions at 11 levels in 18.1 ms") but don't explain *what that means* ("classic aggressive market-buy hitting the offer ladder, consistent with an algo crossing the spread"). That's the Layer 0 expansion + Layer 3 synthesis work, queued separately.
 
 ## Layer 3 daily synthesis (design, pre-implementation)
 

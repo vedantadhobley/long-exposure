@@ -216,36 +216,77 @@ Each scorer is a Java class implementing `EventScorer` (push-model: emit one `Sc
 - **Threshold-based selection instead of top-N**: currently we cap at 10-20 events per scorer per day. On dramatic days that's too few; on quiet days that's too many low-quality picks. Should be score > threshold instead.
 - **Inter-day scorers** (`VolumeDeviationScorer`, `TimeInBookDriftScorer`): need 30-day backfill first.
 
-## 8. Current LLM methodology — two-pass + verifier
+## 8. Current LLM methodology — two-pass + 4-layer verifier
 
-Each Layer-2 narration is produced by **two** LLM calls plus **one** pure-code check:
+Each Layer-2 narration is produced by **two LLM calls** plus a **four-layer pure-code verifier**:
 
 ```
-Layer 1 scored event  →  ExtractFacts (LLM #1)  →  blueprint JSON
-                                                        ▼
-                          RenderProse (LLM #2)  →  prose
-                                                        ▼
-                          GroundingVerifier (pure code) → pass/fail
-                                                        ▼
-                          row written to narratives table
+Layer 1 scored event (breakdown JSON)
+         │
+         ▼
+  ┌────────────────────────────────────────────────┐
+  │ BlueprintExtractor (LLM #1, EXTRACT preset)    │
+  │  - reads breakdown, emits JSON blueprint       │
+  │  - every key_numbers[].source_field cites a    │
+  │    real path in breakdown                      │
+  │  - code pass-through: company_name copied from │
+  │    breakdown to blueprint (no LLM judgment)    │
+  └────────────────────────────────────────────────┘
+         │  blueprint
+         ▼
+  ┌────────────────────────────────────────────────┐
+  │ ProseRenderer (LLM #2, RENDER preset)          │
+  │  - response_format=json_schema, strict=true    │
+  │  - emits {lead, facts[], co_occurring}         │
+  │  - llama.cpp guarantees parseable JSON         │
+  └────────────────────────────────────────────────┘
+         │  RenderResult (3 slots)
+         ▼
+  Code stitches: lead + " " + facts.join(" ") + co_occurring
+         │
+         ▼
+  ┌────────────────────────────────────────────────┐
+  │ GroundingVerifier (pure code, 4 layers)        │
+  │  1. blueprint key_numbers ⊆ breakdown          │
+  │  2. prose numbers ⊆ blueprint ∪ breakdown      │
+  │  3. event symbol literal in prose              │
+  │  4. prose company name agrees with             │
+  │     breakdown.company_name (token-subset)      │
+  └────────────────────────────────────────────────┘
+         │
+         ▼
+  Row written to narratives table:
+    - narrative TEXT          (stitched prose)
+    - render_structured JSONB (the 3-slot JSON)
+    - blueprint JSONB         (pass-1 output)
+    - verifier_passed BOOL    + verifier_notes
 ```
 
-**Extract** asks the model: "given this structured event, list the facts that should appear in narration, each mapped to its source field in the breakdown." Output is JSON.
+**Why this shape (and not just one LLM call):**
 
-**Render** asks the model: "given this blueprint, write 2-3 sentences using ONLY these facts. Don't add new numbers." Output is prose.
+- **Structured output beats free prose.** Earlier iterations let the model write free-form prose and tried to constrain bad behavior via prompt rules. Filler patterns ("the security is now trading normally", "marking the end of one of the longer halts") kept appearing — the model had unconstrained freestyle space to fill. Replacing free prose with three semantic slots eliminated that space by construction. Every output token now lives in a named slot whose semantics the schema enforces.
 
-**Verify** is **pure Java code**: extract every number from the prose, check each one appears in either the blueprint or the breakdown (with `BigDecimal.stripTrailingZeros()` normalization so "$431.00" matches "431.0"). Flag any number that doesn't trace back.
+- **Grounding is enforceable.** If the prose says "5h 34m" and the blueprint has it under `halt_duration`, the verifier passes. If the prose hallucinates "$13.60" and that number doesn't exist anywhere, the verifier flags it. The two-pass separation makes the verifier tractable — it doesn't do natural-language understanding, just substring/numeric matching against a known set.
 
-Why this shape (and not just one LLM call):
+- **The pure-code verifier is the moat.** Modern LLMs are confident liars. A deterministic check that says "every claim must trace to a known fact" is the only correctness mechanism that doesn't degrade as models get bigger. The 4 layers together catch number fabrication, symbol mangling, and company-name substitution.
 
-- **Grounding is enforceable**. If the prose says "5h 34m" and the blueprint says "5h 34m" and the breakdown says `halt_duration: "5h 34m"`, the verifier passes. If the prose hallucinates "$13.60" and that number doesn't exist in either layer, the verifier flags it. The two-pass separation makes the verifier's job tractable — it doesn't have to do natural-language understanding, just substring/numeric matching against a known set.
-- **The pure-code verifier is the moat**. Modern LLMs are amazing at prose. They're also confident liars. A deterministic verifier that says "every claim in the output must trace to a known fact" is the only correctness mechanism that doesn't get worse as models get bigger.
-- **No tool calls, no RAG at the per-event level**. The breakdown is the contract. If the LLM wants context, the scorer (Layer 1 code) puts it in the breakdown. The LLM never reaches outside.
+- **No tool calls, no per-event RAG.** The breakdown is the contract. If the LLM wants context, the scorer (Layer 1 code) puts it in the breakdown. The LLM never reaches outside its input.
 
-### Known gaps
+### Why the company name reaches the model deterministically
 
-- **Symbol fabrication**: one narration said "ODDTX" when the symbol was "ODTX" (extra D). The verifier checks numbers, not named entities. Easy fix: also pass-list the symbol string.
-- **Thin breakdowns produce thin prose**: MOBI's halt narration only knows the duration and timestamps. It can't say "MOBI is a Chinese EV battery company" because we don't pass that context. Symbol enrichment (next section) fixes this.
+The blueprint passes `company_name` through from the breakdown via code, not via LLM judgment. Earlier iterations had the extractor's LLM decide whether to include `company_name` in the blueprint — and it sometimes didn't. The renderer then either skipped company names entirely OR pulled the name from training memory, where it was sometimes wrong ("Oculus Dynamics Inc." for ODTX, "Mayweather Inc." for an AllianzIM ETF).
+
+The current shape: `BlueprintExtractor.extract()` does the LLM call, then *deterministically copies* `breakdown.company_name` into the blueprint object before returning. The renderer always sees the canonical company name from the data layer, not from model memory. The Layer-4 verifier check is the safety net that catches any residual training-memory leakage.
+
+### Where the company name comes from
+
+`breakdown.company_name` is populated at score time by `Enrich.symbol()`, reading the `symbols` reference table. The symbols table is refreshed weekly from three sources merged in order:
+
+1. **NASDAQ** `nasdaqlisted.txt` + `otherlisted.txt` — exhaustive ticker universe with exchange / ETF flag / round-lot. The `Security Name` field is the only source for company-shaped strings here, and it carries SEC filing decoration ("Odyssey Therapeutics, Inc. - Common Stock").
+2. **SEC EDGAR** `company_tickers.json` — canonical issuer name, no filing decoration. Overlays NASDAQ when EDGAR has the ticker AND has a mixed-case title (NASDAQ wins when EDGAR's title is all-caps and NASDAQ's is brand-correct mixed case — preserves "NVIDIA Corporation" over EDGAR's "NVIDIA CORP").
+3. **IEX SecurityDirectory** — LULD tier, prev-close from the wire feed itself.
+
+`CompanyNameNormalizer` runs at score time on whichever value made it through. Its FILING_DECORATION token set + multi-word pre-strip handle the NASDAQ-fallback cases (MLP / ETN-due-date suffixes that EDGAR doesn't carry).
 
 ## 9. Intra-day vs inter-day
 
@@ -260,32 +301,37 @@ Backfill order matters: we proved the pipeline works on 1 day first (2026-05-08)
 
 ## 10. Where the design is going
 
-Three improvements lined up, in rough priority order:
+### ✅ Done (shipped 2026-05-19 to 2026-05-21)
 
-### A. Cross-event linking + threshold-based selection (~half day)
+- **Cross-event enrichment** — long sec-scale parents (liquidity_withdrawal) absorb nested ms-scale children (post_cancel_cluster, layering) into a `co_occurring` block on the parent's breakdown. Children get `subsumed_by_event_id` and are skipped at selection. Replaces the earlier "combine events into a synthetic combined row" attempt which produced 28-constituent clusters; see [`decisions.md`](decisions.md) 2026-05-20.
 
-Replace the rigid "top 10 per scorer" cap with:
-1. Group events that fire on the same symbol within 1-2 minutes — they're likely the same underlying market event seen by different scorers.
-2. Use a score threshold per scorer instead of a count cap. Most days will produce 30-50 narrations; dramatic days produce more, quiet days produce fewer.
+- **Threshold-based (percentile-rank) selection** — replaced the rigid "top 10 per scorer" cap with a within-scorer percentile rank, producing ~164 narratable events per trading day on 2026-05-08 with a natural day-to-day variation.
 
-Net effect: each narration is richer (because related events combine), the daily output volume varies naturally with how dramatic the day was, and the narration prose can mention multiple aspects ("IWM saw simultaneous liquidity withdrawal AND a coordinated post-cancel cluster").
+- **Symbol enrichment** — `symbols` reference table populated weekly from NASDAQ + SEC EDGAR + IEX SecurityDirectory. `Enrich.symbol()` joins per-ticker `company_name`, `listing_exchange`, `is_etf`, `round_lot`, `prev_close_dollars`, `luld_tier` into every breakdown before scoring.
 
-### B. Symbol enrichment (~half day)
+- **Structured-output narration + 4-layer verifier** — schema-enforced `lead`/`facts`/`co_occurring` slots, prose-company-agreement check. Eliminated qualitative filler patterns + company-name fabrication.
 
-Add a `symbols` reference table with per-ticker metadata:
+### 📋 Queued (multi-day work, post-launch)
 
-```
-symbol  | company_name           | sector              | is_etf | last_close
-─────── ────────────────────── ─────────────────── ───────── ──────────────
-AAPL    | Apple Inc.             | Information Tech    | false  | 213.04
-MOBI    | Mobiv Acquisition      | Financial Services  | false  | 9.87
-IWM     | iShares Russell 2000   | (ETF — small caps)  | true   | 218.55
-VTWO    | Vanguard Russell 2000  | (ETF — small caps)  | true   | 99.12
-```
+#### A. Layer 0 — per-event interpretation pass
 
-Source: a one-time scrape of public listings + the IEX SecurityDirectory messages we already parse from the feed. Joined into the breakdown at scoring time. Narrations gain "the iShares Russell 2000 ETF IWM" / "small-cap acquisition vehicle MOBI" / "Apple Inc. (AAPL)" without the LLM having to guess.
+Another LLM call per Layer-2 narration that reads the prose + a slice of surrounding context (price 5 min before/after, surrounding events on the same symbol, day's volume context) and produces an interpretation: "the layering came right before an 8,000-share market buy at the same price." Costs +1 LLM call per event (~50–164 calls per day; cheap on local).
 
-### C. The hierarchical context cascade (~multi-day)
+The interpretation should be grounded in a pattern catalog (file in repo) so the LLM has a fixed vocabulary for "this shape looks like X" rather than freelance interpretation.
+
+#### B. Layer 3 — daily synthesis
+
+One LLM call per day reading all the day's Layer-2 narrations + their Layer-0 interpretations, producing a top-of-page paragraph ("today saw heavy halt activity at the open; coordinated IWM/TQQQ liquidity events at 14:00 ET; large blocks concentrated in semiconductors").
+
+This is where RAG starts to make sense — Layer 3 has looser per-claim grounding requirements than Layer 2, and benefits from sector / news context that the breakdown can't carry. SamplingParams.SYNTHESIZE preset (Qwen "Instruct mode for reasoning tasks": temp=1.0, top_p=1.0, top_k=40, presence_penalty=2.0) reserved for this pass.
+
+#### C. Layer 4 — inter-day rollups
+
+Periodic LLM calls producing weekly/monthly summaries by reading multiple Layer-3 outputs. Needs ≥ 30 days of Layer-3 history before useful — and Layer-3 needs to exist first.
+
+#### D. Inter-day scorers (`VolumeDeviationScorer`, `TimeInBookDriftScorer`)
+
+Per-symbol baselines computed from a 30-day rolling backfill. Output: "AAPL's volume was 4.7× its 30-day median" / "median order lifetime on SPY collapsed from 800ms to 90ms vs trailing baseline." Blocked on the 30-day backfill, which we've deferred until the single-day pipeline is rock-solid.
 
 Build Layer 3 (daily synthesis) and the per-event Layer-0 expansion ("events within events"):
 
@@ -297,7 +343,7 @@ Each layer reads the *structured outputs* of the layer below, never the raw fire
 
 ## 11. What we can and can't show on the website right now
 
-Given just the data already in `narratives` (90 narrations on 2026-05-08):
+Given just the data already in `narratives` (164 narrations on 2026-05-08):
 
 | | Can show today | Needs more work |
 |---|---|---|
