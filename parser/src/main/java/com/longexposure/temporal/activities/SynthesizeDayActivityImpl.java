@@ -51,7 +51,7 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
             .getOrDefault("LLAMA_MODEL", "Qwen3.5-122B-A10B");
 
     /** Bumped when prompt changes. */
-    private static final String PROMPT_VERSION = "synthesize-v3-holistic";
+    private static final String PROMPT_VERSION = "synthesize-v4-holistic-approx-example";
 
     private static final String SYSTEM_PROMPT = """
             You are a financial-data journalist writing one paragraph identifying
@@ -85,7 +85,13 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
             Every ticker you mention must appear in today's narrations. Every
             numeric claim must trace to either the day metadata or a specific
             per-event interpretation — no introducing numbers from outside the
-            inputs, no approximation or rounding.
+            inputs, no approximation or rounding. Do not sum or aggregate
+            across events to produce new numbers — if three sweeps each
+            traded 4,500, 4,800, and 5,200 shares, do not write "over 13,600
+            shares total"; describe the sweeps individually or by event count.
+            If a day-metadata aggregate carries the total you want, use it
+            verbatim; otherwise let the count of events stand for the
+            magnitude.
 
             REGISTER:
 
@@ -145,20 +151,42 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
         }
     }
 
-    /** All scored+selected events for the date with narration + interpretation. */
+    /**
+     * All scored+selected events for the date paired with the LATEST narration
+     * and interpretation per event. The DISTINCT-ON sub-queries keep one row
+     * per selected_id even when multiple narrations/interpretations exist
+     * (from prompt-version iterations that produced new rows with different
+     * hashes). Without this filter the LEFT JOIN cross-products N narrations
+     * × M interpretations per event, blowing the prompt past joi's 32K
+     * context budget.
+     */
     private List<EventRow> loadEventsForDay(final Connection conn, final LocalDate tradingDate) throws Exception {
         String sql = """
                 SELECT se.selected_id, se.scorer_id, se.symbol, se.ts,
                        n.narrative, i.interpretation
                 FROM selected_events se
-                LEFT JOIN narratives      n ON n.selected_id = se.selected_id
-                LEFT JOIN interpretations i ON i.selected_id = se.selected_id
+                LEFT JOIN (
+                    SELECT DISTINCT ON (selected_id) selected_id, narrative
+                    FROM narratives
+                    WHERE trading_date = ?
+                    ORDER BY selected_id, created_at DESC
+                ) n ON n.selected_id = se.selected_id
+                LEFT JOIN (
+                    SELECT DISTINCT ON (selected_id) selected_id, interpretation
+                    FROM interpretations
+                    WHERE trading_date = ?
+                    ORDER BY selected_id, created_at DESC
+                ) i ON i.selected_id = se.selected_id
                 WHERE se.trading_date = ?
                 ORDER BY se.ts
                 """;
         List<EventRow> out = new ArrayList<>();
         try (PreparedStatement st = conn.prepareStatement(sql)) {
+            // Three bind sites: narratives subquery, interpretations subquery,
+            // outer selected_events filter — all the same trading_date.
             st.setObject(1, tradingDate);
+            st.setObject(2, tradingDate);
+            st.setObject(3, tradingDate);
             try (ResultSet rs = st.executeQuery()) {
                 while (rs.next()) {
                     EventRow r = new EventRow();
