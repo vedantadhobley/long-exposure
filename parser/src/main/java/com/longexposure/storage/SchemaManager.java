@@ -52,26 +52,72 @@ public final class SchemaManager {
     }
 
     /**
-     * Split a SQL script on {@code ;} statement terminators, stripping
-     * {@code --}-prefixed line comments first. Naive but enough for our
-     * own schema script — no string literals contain semicolons and no
-     * dollar-quoted function bodies are used.
+     * Split a SQL script into individual statements on {@code ;}
+     * terminators, with two pieces of awareness the naive
+     * "strip-comments-then-split-on-semicolon" approach lacked:
+     *
+     * <ol>
+     *   <li><b>Dollar-quoted blocks.</b> {@code ;} inside a {@code $$ ... $$}
+     *       block is part of the block body (e.g. a {@code DO $$ ... $$}
+     *       PL/pgSQL sanity check, or a function body), NOT a statement
+     *       terminator. Splitting there hands JDBC a fragment ending mid-block
+     *       and it throws "Unterminated dollar quote." We toggle an
+     *       in-dollar-quote flag on each {@code $$} and only split on
+     *       {@code ;} when outside one.
+     *   <li><b>Line comments.</b> {@code --} comments are skipped to
+     *       end-of-line — but only when OUTSIDE a dollar-quoted block, since
+     *       a {@code --} inside a PL/pgSQL body is part of that body and
+     *       stripping it would corrupt the block.
+     * </ol>
+     *
+     * <p>Only the bare {@code $$} delimiter is recognized (not named tags like
+     * {@code $func$}); our schema uses only {@code $$}. String-literal
+     * semicolons are still not handled, but our schema has none.
+     *
+     * <p>Single-pass scanner — kept deliberately small + covered by
+     * {@code SchemaManagerTest} so future schema constructs (functions,
+     * triggers, DO blocks) don't silently break the split.
      */
     static List<String> splitStatements(final String script) {
-        StringBuilder sansComments = new StringBuilder(script.length());
-        for (String line : script.split("\\R")) {
-            int commentStart = line.indexOf("--");
-            String code = (commentStart >= 0) ? line.substring(0, commentStart) : line;
-            sansComments.append(code).append('\n');
+        List<String> out = new ArrayList<>();
+        StringBuilder cur = new StringBuilder();
+        boolean inDollarQuote = false;
+        int i = 0;
+        int n = script.length();
+
+        while (i < n) {
+            // $$ delimiter — toggle in/out of a dollar-quoted block.
+            if (script.charAt(i) == '$' && i + 1 < n && script.charAt(i + 1) == '$') {
+                inDollarQuote = !inDollarQuote;
+                cur.append("$$");
+                i += 2;
+                continue;
+            }
+
+            // -- line comment, only outside dollar-quotes: skip to EOL.
+            if (!inDollarQuote
+                    && script.charAt(i) == '-' && i + 1 < n && script.charAt(i + 1) == '-') {
+                int eol = script.indexOf('\n', i);
+                if (eol < 0) break;          // comment runs to EOF — nothing more to scan
+                i = eol;                     // leave the '\n' for the next iteration to append
+                continue;
+            }
+
+            // ; terminator, only outside dollar-quotes.
+            if (!inDollarQuote && script.charAt(i) == ';') {
+                String stmt = cur.toString().trim();
+                if (!stmt.isEmpty()) out.add(stmt);
+                cur.setLength(0);
+                i++;
+                continue;
+            }
+
+            cur.append(script.charAt(i));
+            i++;
         }
 
-        List<String> out = new ArrayList<>();
-        for (String chunk : sansComments.toString().split(";")) {
-            String trimmed = chunk.trim();
-            if (!trimmed.isEmpty()) {
-                out.add(trimmed);
-            }
-        }
+        String tail = cur.toString().trim();
+        if (!tail.isEmpty()) out.add(tail);
         return out;
     }
 }
