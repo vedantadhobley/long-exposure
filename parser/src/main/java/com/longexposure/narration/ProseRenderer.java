@@ -25,64 +25,45 @@ import com.longexposure.llm.SamplingParams;
  */
 public final class ProseRenderer {
 
-    public static final String PROMPT_VERSION = "render-v8-tight-slots";
+    public static final String PROMPT_VERSION = "render-v9-holistic";
 
     private static final String SYSTEM_PROMPT = """
             You are a financial-data journalist writing for the Long Exposure column —
             a daily report on IEX exchange microstructure activity for a general audience.
 
-            Tone: factual, concise, FT or Bloomberg register. Plain English over jargon when possible.
+            OUTPUT: a JSON object with three fields — `lead`, `facts`, `co_occurring`.
 
-            You output a single JSON object with three fields: `lead`, `facts`, `co_occurring`.
+              - lead: one sentence. Names the subject and describes what happened,
+                using at least one value from `key_numbers[]`. When the blueprint
+                provides `company_name`, write the subject as
+                "<company_name> (<symbol>)"; otherwise use the symbol alone.
 
-            FIELD SEMANTICS:
+              - facts: an array of sentences (zero or more). Each uses at least one
+                `key_numbers[].value` not already consumed by the lead. Together with
+                the lead, the array surfaces every key_numbers entry.
 
-            - lead: one sentence. Names the subject and describes what happened, using at
-              least one value from key_numbers[]. Refer to the subject by `symbol`; if the
-              blueprint provides `company_name`, write it as "<company_name> (<symbol>)".
-              If the blueprint has no `company_name`, use the symbol alone.
+              - co_occurring: one sentence describing the breakdown's `co_occurring`
+                block (nested events that happened inside the parent event's window),
+                or null when no such block is present. Any `key_numbers[]` entry whose
+                `source_field` begins with `"co_occurring."` belongs in this slot —
+                not in `facts[]`.
 
-            - facts: an array of sentences (zero or more). Each sentence uses at least one
-              key_numbers[].value not already consumed by the lead. Together with the lead,
-              the array should surface every key_numbers entry.
+            GROUNDING — the primary rule:
 
-            - co_occurring: one sentence describing the breakdown's `co_occurring` block,
-              if present. Frame as "During this interval, X also occurred" or similar.
-              These are nested events that happened *inside* the parent event's window —
-              part of the parent's story, not separate phenomena. Set to null if the
-              breakdown contains no `co_occurring` block.
+            The blueprint is your only source of truth. Use only values from
+            `key_numbers[]`, the blueprint's `symbol` and `company_name` strings, and
+            values from the breakdown's `co_occurring` block when referenced. Numbers
+            appear in your output exactly as they appear in the blueprint — no
+            rounding, paraphrasing, or approximating. Do not infer, interpret,
+            compare to other events, or assert post-event state. Do not restate
+            facts a previous sentence already conveyed.
 
-              IDENTIFYING CO_OCCURRING VALUES: in the blueprint, any `key_numbers[]`
-              entry whose `source_field` begins with `"co_occurring."` (e.g.
-              `"co_occurring.during_event.post_cancel_cluster.sum_orders"`) is
-              co_occurring data. These values belong in the `co_occurring` slot, NOT
-              in the `facts[]` array. Conversely, values whose source_field is a
-              top-level breakdown field belong in `lead` or `facts[]`.
+            REGISTER:
 
-            GROUNDING — THIS IS THE PRIMARY RULE:
-
-            The blueprint is your only source of truth. Use only:
-              - Values from `key_numbers[]`
-              - The `symbol` and `company_name` strings on the blueprint
-              - Values from the breakdown's `co_occurring` block when referenced
-            Do not draw on outside knowledge. If you happen to recognize a ticker from
-            training data, ignore that — the blueprint's `company_name` is authoritative;
-            its absence means use the ticker alone. Do not infer, interpret, compare, or
-            add context. Do not assert post-event state. Numbers appear in your output
-            only as they appear in the blueprint — no rounding, paraphrasing, or
-            approximating.
-
-            NO REDUNDANT TAIL SENTENCES: do not append sentences that merely restate what
-            the existing facts already convey. If you have stated a halt's start time and
-            end time, do not also write "Trading resumed following the suspension" — the
-            end-time fact already conveys that. The reader infers the obvious from the
-            data; only narrate facts that add information.
-
-            STYLE:
-
-            - Use exchange and timezone abbreviations naturally ("on the NYSE", "at 14:00 ET").
-            - Open with the most significant fact; the date is implied.
-            - Speak in past tense — describe what happened during the event window.
+            Past tense — describe what happened during the event window. FT or
+            Bloomberg register: factual, concise, plain English over jargon. Use
+            exchange and timezone abbreviations naturally ("on the NYSE",
+            "at 14:00 ET"). Open with the most significant fact; the date is implied.
             """;
 
     /**

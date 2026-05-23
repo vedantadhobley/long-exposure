@@ -2,6 +2,8 @@
 
 A grounded explanation of what Long Exposure actually does, written for someone who hasn't worked in finance before. The implementation specifics are in `docs/scoring-and-narration.md` and `docs/temporal-design.md`; this doc is the conceptual primer that underlies all of those.
 
+> **Naming note (2026-05-22).** This document uses a "Layer 0 / 1 / 2 / 3 / 4" mental model to teach what each pipeline stage produces. That numbering has been deprecated in code and forward-looking design docs in favor of function-name vocabulary: **WIRE / DETECT / DESCRIBE / INTERPRET / SYNTHESIZE / AGGREGATE**. The mapping: Layer 0 = WIRE (raw events), Layer 1 = DETECT (scorers), Layer 2 = DESCRIBE (per-event prose), Layer 3 = SYNTHESIZE (daily themes), Layer 4 = AGGREGATE (weekly/monthly), and the previously-numberless "interpretation pass" = INTERPRET. See [`pipeline-architecture.md`](pipeline-architecture.md) for the canonical reference. The layer numbers are kept in this document only because they're load-bearing for the pedagogical structure of the primer; a full rewrite using function names is queued post-launch.
+
 ## 1. The order book
 
 Every stock exchange maintains an **order book** — a list of all the orders waiting to trade, sorted by price. It looks like this:

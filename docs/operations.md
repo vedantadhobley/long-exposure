@@ -176,23 +176,25 @@ If a docker container ever lands in `Exited` with `restartCount=0`, treat it as 
 
 **`llama-large.joi` is a single-GPU local model. Max throughput is 2 concurrent decode streams; above that, throughput collapses rather than scales.** The `LlamaClient.Semaphore(2, fair)` enforces this *within* a single workflow's activity fan-out, but it does NOT prevent two separate workflows from each spawning activities that compete for the same 2 slots.
 
-If two LLM-bearing workflows (e.g. `NarrateWorkflow` + a future `SynthesizeDayWorkflow`, or two `NarrateWorkflow` instances for different dates) are running concurrently, the semaphore serializes them at the activity level — but each workflow's sliding-window cap (`MAX_IN_FLIGHT=2`) keeps trying to push activities into a permit set already at capacity. The result is:
+**Three LLM-bearing workflows exist today**: `NarrateWorkflow` (DESCRIBE stage), `InterpretWorkflow` (INTERPRET stage), and `SynthesizeDayWorkflow` (SYNTHESIZE stage). All three dispatch on the same `NARRATION_TASK_QUEUE` whose worker is capped at 2 concurrent activities, and all three pass through the JVM-wide `Semaphore(2, fair)` in `LlamaClient`.
+
+If two LLM-bearing workflows are running concurrently (e.g. two `NarrateWorkflow` instances for different dates, or `NarrateWorkflow` + `InterpretWorkflow`), the semaphore serializes them at the activity level — but each workflow's sliding-window cap (`MAX_IN_FLIGHT=2`) keeps trying to push activities into a permit set already at capacity. The result is:
 
 - Both workflows technically "running" but only one making progress at a time
 - Confusing Temporal UI showing 4 pending activities, only 2 active
 - Wasted wall-clock — the second workflow waits without doing useful work
 - Eventually some activities will time out (start-to-close timer runs during the wait)
 
-**The rule**: only one LLM-bearing workflow runs at a time. Before kicking any LLM workflow (`NarrateWorkflow`, future `SynthesizeDayWorkflow`, future `InterpretEventActivity` invocations), confirm no other LLM workflow is in flight via:
+**The rule**: only one LLM-bearing workflow runs at a time. Before kicking any LLM workflow (`NarrateWorkflow`, `InterpretWorkflow`, `SynthesizeDayWorkflow`), confirm no other LLM workflow is in flight via:
 
 ```bash
 docker exec long-exposure-dev-temporal temporal workflow list \
-  --query "(WorkflowType='NarrateWorkflow' OR WorkflowType='SynthesizeDayWorkflow') AND ExecutionStatus='Running'"
+  --query "(WorkflowType='NarrateWorkflow' OR WorkflowType='InterpretWorkflow' OR WorkflowType='SynthesizeDayWorkflow') AND ExecutionStatus='Running'"
 ```
 
 Should return no rows. If it does, terminate or wait for that workflow before starting another.
 
-Non-LLM workflows (`DownloadWorkflow`, `ParseWorkflow`, `ValidateWorkflow`, `ScoreWorkflow`, `MaterializeWorkflow`, `SelectWorkflow`, `CleanupWorkflow`, `RefreshSymbolsWorkflow`) can run concurrently with LLM workflows since they don't touch joi.
+Non-LLM workflows (`DownloadWorkflow`, `ParseWorkflow`, `ValidateWorkflow`, `ScoreWorkflow`, `MaterializeWorkflow`, `SelectWorkflow`, `CleanupWorkflow`, `RefreshSymbolsWorkflow`) can run concurrently with LLM workflows since they don't touch joi. During multi-day backfills, this means the LLM-free phases (download / parse / validate / score / select) can be pipelined for multiple dates in parallel even though the LLM-bound stages (DESCRIBE / INTERPRET / SYNTHESIZE) must serialize.
 
 ## LLM endpoint (joi)
 

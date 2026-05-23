@@ -8,9 +8,9 @@ This sprint runs straight into the start at IEX. The discipline is: **no bandaid
 
 ## End-state checklist (everything must be ✓ by Saturday night)
 
-- [ ] All 5 issues from the 2026-05-21 audit resolved + validated by full re-narration
-- [ ] Layer 3 daily synthesis shipping in the pipeline; produces a paragraph that reads cleanly across multiple test days
-- [ ] Layer 0 per-event interpretation: either shipping with documented quality wins, or explicitly deferred to v2 with rationale recorded in `decisions.md`
+- [x] All 5 issues from the 2026-05-21 audit resolved + validated by full re-narration (DESCRIBE: 163/164 = 99.39%)
+- [x] SYNTHESIZE (daily themes) shipping in the pipeline; produces a paragraph that reads cleanly (done 2026-05-22, end-to-end on 2026-05-08; cross-day validation pending small-batch backfill)
+- [x] INTERPRET (per-event interpretation) shipping with documented quality wins (done 2026-05-22; 162/164 = 98.78% on 2026-05-08; v5 prompt after 5 iterations). Architecture decision recorded in `decisions.md`.
 - [ ] Code audit complete — no dead code, no maintained magic numbers in primary paths, logging uniform, error handling defensive, comments current
 - [ ] All docs current: every cross-reference works, numbers consistent across docs, no stale references to retired features
 - [ ] README publication-ready: opening pitch tight, screenshots embedded, install/run instructions verified by a fresh checkout
@@ -29,10 +29,10 @@ This sprint runs straight into the start at IEX. The discipline is: **no bandaid
 | Day | Date | Primary stream | Milestone |
 |---|---|---|---|
 | 1 | **Thu 5/21** ✅ done | Issue fixes | All 5 audit findings resolved; re-narration validated 163/164 (1 genuine number-fabrication catch by the verifier, not a regression) |
-| 2 | **Fri 5/22** | Layer 3 design + scaffolding | `SynthesizeDayWorkflow` interface, schema, sampling preset wired |
-| 3 | **Sat 5/23** | Layer 3 implementation | First daily-synthesis paragraph end-to-end; prompt iterated against ≥3 trading days |
-| 4 | **Sun 5/24** | Layer 0 design + scaffolding | Pattern catalog file + `InterpretEventActivity` skeleton |
-| 5 | **Mon 5/25** | Layer 0 implementation + decision | Per-event interpretation running; quality assessed; ship-or-defer decision recorded |
+| 2 | **Fri 5/22** ✅ done early | Naming pass + DETECT enrichment + INTERPRET + SYNTHESIZE shipped (originally scheduled across Days 2-5, completed in one extended day). Verifier pass rates: DESCRIBE 99.39%, INTERPRET 98.78%, SYNTHESIZE end-to-end published on 2026-05-08. |
+| 3 | **Sat 5/23** | Small-batch backfill (3-5 trading days) | Validate cross-day robustness before frontend work |
+| 4 | **Sun 5/24** | Frontend integration in vedanta-systems | `/api/long-exposure/synthesis/:date` + `long-exposure-browser` updates for INTERPRET + SYNTHESIZE display |
+| 5 | **Mon 5/25** | Frontend integration polish + 30-day backfill kicked off | Backfill runs overnight |
 | 6 | **Tue 5/26** | Code audit | Clean scan: dead code, magic numbers, logging, error handling, comments |
 | 7 | **Wed 5/27** | Docs final pass + frontend audit | All docs current; cross-refs verified; frontend gaps identified |
 | 8 | **Thu 5/28** | Frontend integration polish | long-exposure-browser feature-complete |

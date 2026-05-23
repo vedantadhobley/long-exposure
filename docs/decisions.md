@@ -2,6 +2,108 @@
 
 Append-only record of architectural and operational decisions, ordered by date. When a non-obvious choice gets made, append a dated entry here with: what we decided, what we considered, why we picked the chosen path, and what still leaves open.
 
+> **Naming note (2026-05-22).** Older entries in this log use "Layer 0 / 1 / 2 / 3 / 4" pipeline-stage vocabulary that has been deprecated in favor of function names: Layer 1 = **DETECT**, Layer 2 = **DESCRIBE**, Layer 3 = **SYNTHESIZE**, Layer 4 = **AGGREGATE**, and the new per-event interpretation pass = **INTERPRET**. Historical entries are preserved verbatim — see [`pipeline-architecture.md`](pipeline-architecture.md) for the canonical current vocabulary.
+
+---
+
+## 2026-05-22 — Pipeline-stage naming pass: function names replace "Layer N"
+
+**Context.** The original architecture used "Layer 0 / Layer 1 / Layer 2 / Layer 3 / Layer 4" pipeline-stage vocabulary inherited from `concepts.md`'s data-funnel pedagogy. Multiple problems compounded:
+
+- "Layer 0" came to mean two different things in different docs — *raw wire events on disk* in `concepts.md`, but *the new per-event interpretation pass* in design docs written later. Conflating the two produced multiple conversations of pure confusion.
+- The numbers carried no semantic content. A reader couldn't tell from "Layer 2" what the stage *did*.
+- The numbering broke under insertion. When the interpretation stage was discovered to belong between description (Layer 2) and daily synthesis (Layer 3), naming it required fractional names ("Layer 2.5") or shoehorning it into the existing numbering ("Layer 0 expansion") — both obscured what the stage actually does.
+
+**Decided.** Adopt function-name vocabulary for pipeline stages:
+
+| Function name | Was | Means |
+|---|---|---|
+| WIRE | Layer 0 | Raw atomic events on disk |
+| SUMMARIZE | (no name) | Background baselines + day-aggregates (planned) |
+| DETECT | Layer 1 | The 7 scorers |
+| DESCRIBE | Layer 2 | Per-event description prose |
+| INTERPRET | "Layer 0 expansion" / "Layer 2.5" | Per-event surrounding-context interpretation |
+| SYNTHESIZE | Layer 3 | Daily themes paragraph |
+| AGGREGATE | Layer 4 | Weekly / monthly rollups |
+
+Canonical reference: `docs/pipeline-architecture.md`. Older docs (`scoring-and-narration.md`, `concepts.md`, `decisions.md`, `todo.md`, `launch-sprint.md`, `pattern-catalog.md`) keep their "Layer N" wording in place — each has a top-of-file naming note pointing at the canonical reference. A bulk rename was attempted and reverted because false matches were too common ("Layer-4 verifier" in `concepts.md` referred to the 4-layer GroundingVerifier check tier, not pipeline stage 4). Per-file careful edits will land post-launch.
+
+**Code renames in the same pass.**
+
+- `Humanize` → `BreakdownFmt` (class now classifies session phases + duration buckets, not just humanizes durations; old name undersells the role).
+- `Enrich` → `SymbolFields` (`Enrich.symbol()` → `SymbolFields.apply()` — old name was vague; new name names what gets added).
+- `round2(v)` deleted — meaningless 4-character alias for `round(v, 2)`. Every caller now uses the explicit form.
+
+## 2026-05-22 — INTERPRET architecture: Variant 2 (surrounding wire data) over Variant 1 (breakdown only)
+
+**Context.** Two prototypes of the per-event INTERPRET stage were built. Variant 1 read only the event's own breakdown + the IEX catalog entry. Variant 2 additionally read a pre-aggregated ±60-sec window of trades on the same symbol around the event.
+
+**Empirical comparison (21-sample smoke tests on 2026-05-08):**
+
+| | Variant 1 (breakdown-only) | Variant 2 (surrounding-context) |
+|---|---|---|
+| Best example | "1.6 orders per level" | "block trade followed by another similar block 47 sec later" |
+| Failure modes | ~15-20% arithmetic errors (LLM doing division at inference) | 0 arithmetic errors; ~20% mild causal speculation (prompt-tractable) |
+| New code required | None beyond catalog | SQL window query + Java aggregation |
+| Adds narrative the description doesn't already imply? | Marginally — most output is implicit in breakdown | **Yes — surrounding-context narrative cannot be derived from the breakdown alone.** |
+
+**Decided.** Variant 2 ships. Reasons:
+
+1. **Variant 1 is redundant with DETECT enrichment.** Every "wow" derived ratio Variant 1 produced (`orders_per_level`, `notional_per_level`, percentages, densities) is something DETECT can pre-compute and add to the breakdown — and now does, post the 2026-05-22 enrichment. With those fields available, DESCRIBE picks them up naturally and INTERPRET doesn't need to compute anything.
+2. **Variant 2 adds information that's structurally not in the breakdown.** "The block was followed by another similar block 47 sec later" requires reading `trades` outside the event window. No amount of breakdown enrichment captures this.
+3. **The arithmetic-error rate dropped to zero** because the task shifted from compute-arithmetic to read-and-compare-numbers, which LLMs are good at.
+
+Variant 2 + Option A (LLM-driven) is the shipped architecture. Option B (templated substitution) was reconsidered for Variant 2 and rejected: a templated engine would have to substitute surrounding-window data, conditionally branch on whether pre/post windows have activity, and choose between "isolation" / "preceded by" / "followed by" / "flanked by" framings — that's halfway to a small DSL. Variant 2 + Option A handles all those conditionals naturally as prose.
+
+Final verifier-pass rate on the full 164-event 2026-05-08 dataset: **98.78%** (162/164), after 5 prompt iterations chasing rounding, unit-conversion, ticker-presence, and approximation failure modes. Full prompt-version history preserved in `interpretation-design.md`.
+
+## 2026-05-22 — SYNTHESIZE prompt uses INTERPRET-only per-event entries, not DESCRIBE+INTERPRET
+
+**Context.** The SYNTHESIZE stage reads every per-event narration for the day and produces one cross-event themes paragraph. The first prototype concatenated both DESCRIBE prose ("AMD experienced a layering event involving 187 orders across 116 distinct levels…") and INTERPRET prose ("The AMD layering event spanned 166.0 ms across 116 distinct sell levels, immediately followed by a post-event window where 118 trades totaling 12,533 shares…") for each event. The resulting prompt was 38,208 tokens.
+
+The llama.cpp server on `joi` is configured with `n_ctx=32768` (32K tokens, not the model's native 262K). First SYNTHESIZE run failed with `LLM 400: exceed_context_size_error`.
+
+**Decided.** Drop DESCRIBE from the SYNTHESIZE prompt. Use INTERPRET only per event, falling back to DESCRIBE only when an event has no INTERPRET (~1-2% of events).
+
+**Why this is architecturally right, not just a token-budget hack.**
+
+INTERPRET prose already restates the descriptive content of an event ("The 5h 34m trading halt on MOBI (Mobia Medical, Inc.) began in pre-market trading…") and adds the cross-event-flavored sequential context that SYNTHESIZE actually needs ("with no preceding trades and minimal post-event flow"). DESCRIBE prose is strictly less informative for cross-event synthesis because it deliberately doesn't carry surrounding context.
+
+In other words: SYNTHESIZE reading both DESCRIBE+INTERPRET would have been *redundant*, not *richer*. The token-budget pressure surfaced this redundancy. INTERPRET-only entries reduce the prompt to ~16K tokens — comfortable in the 32K context window — with no loss of relevant information.
+
+**Why not raise `n_ctx` on the joi side instead.** Possible but operationally fragile (depends on user re-configuring joi; doesn't compose well with other models on the same host). The INTERP-only choice is correct on its own merits; the context-window hit was the forcing function that made us notice the redundancy.
+
+## 2026-05-22 — `SamplingParams.SYNTHESIZE` preset (Qwen instruct-reasoning mode)
+
+**Context.** DESCRIBE uses RENDER preset (temp=0.7, top_p=0.8, top_k=20, presence_penalty=1.5) — Qwen's "Instruct mode for general tasks" preset, verbatim. INTERPRET reuses RENDER. SYNTHESIZE is a different shape of task: it's reasoning across a corpus of ~164 narration paragraphs to find cross-event themes, not rendering a single known answer.
+
+**Decided.** Add `SamplingParams.SYNTHESIZE` preset using Qwen's published "Instruct mode for reasoning tasks" parameters verbatim:
+
+```
+temperature=1.0, top_p=1.0, top_k=40, min_p=0.0, presence_penalty=2.0, repetition_penalty=1.0
+```
+
+Differences from RENDER:
+
+- temperature 1.0 (vs 0.7) — broader exploration of phrasings
+- top_p 1.0 (vs 0.8) — no nucleus cutoff
+- top_k 40 (vs 20) — wider per-step candidate pool
+- presence_penalty 2.0 (vs 1.5) — stronger anti-narrow-repetition (synthesis can collapse into "today saw heavy X, heavy X, heavy X" otherwise)
+
+We do NOT use thinking mode (no `<think>` tags). The scorer does the reasoning; the LLM synthesizes. Thinking mode would ~10× cost for no measurable quality benefit on a "find themes across this corpus" task.
+
+## 2026-05-22 — INTERPRET verifier accepts precision-rounded haystack values
+
+**Context.** The first INTERPRET prototype's verifier used DESCRIBE's verifier verbatim: prose numbers must canonicalize to a value present in the breakdown. This failed on Variant 2 because the surrounding-window summaries carry unrounded VWAP / price values (`19.6883`) while the LLM naturally rounds to journalist precision (`$19.69`). Verifier flagged "19.69" as not found in haystack.
+
+**Decided.** Extend `InterpretationVerifier` to accept precision-rounded equivalents:
+
+- For each haystack number H ≥ 10, add d=0 rounded forms in HALF_UP / FLOOR / CEILING modes (covers both rounding-up and truncating LLM conventions for integer rendering).
+- For each haystack number H regardless of magnitude, add d=1..4 rounded forms in HALF_UP and FLOOR (covers `72.7957` → `72.79` LLM-truncation and `72.7957` → `72.80` HALF_UP rounding).
+- The bounded-magnitude guard for d=0 prevents the over-loose case where prose "5" would falsely match haystack `5.34`.
+
+`SynthesisVerifier` uses the same precision-matching family. The looseness is intentional: it accepts journalist-register rounding while still flagging any number that doesn't trace to data within tolerable rounding.
+
 ---
 
 ## 2026-05-21 — SEC EDGAR as the canonical source for company names

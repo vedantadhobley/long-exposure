@@ -2,13 +2,18 @@
 
 Distilled from the project-positioning + design discussion (captured 2026-05-11). The DEEP+ pivot recorded in `docs/decisions.md` (2026-05-11 entry) makes order-level pattern detection the actual product surface. This doc is the design reference the EventScorer and LLM prompt engineering work against.
 
-> **Status (2026-05-18):**
-> - **Scoring + selection** ✅ shipped. 7 intraday scorers + `SelectTopEventsActivity`. Producing ~90 narratable events per trading day on 2026-05-08. See "Scoring architecture" below.
-> - **Symbol enrichment (Phase C)** ✅ shipped. `symbols` reference table populated weekly from NASDAQ public listings + IEX SecurityDirectory. `Enrich.symbol()` joins company name, exchange, ETF flag, round lot, prev close into every breakdown.
-> - **Two-pass narration** ✅ shipped. `BlueprintExtractor` → `ProseRenderer` → pure-code `GroundingVerifier` chain running against `llama-large.joi` (Qwen3.5-122B-A10B). Narrations verified for all 7 scorer types. Verifier enforces three grounding layers: (1) every number in prose ⊆ blueprint ∪ breakdown, (2) every blueprint key_number's source_field exists in breakdown, (3) every ticker-shaped token in prose must equal the event's symbol OR be a real ticker in the `symbols` reference table — no maintained denylist for non-ticker abbreviations.
-> - **Cross-event linking, threshold-based selection** 🛠 next — see todo.md.
-> - **Layer 3 daily synthesis, Layer-0 expansion** 📋 designed, deferred.
-> - **30-day backfill + inter-day scorers** 🛑 explicitly deferred until single-day output is rock-solid.
+> **Naming note (2026-05-22).** This doc was written when the pipeline stages were named "Layer 1" (scoring), "Layer 2" (per-event narration), "Layer 3" (daily synthesis), etc. The canonical names are now **DETECT / DESCRIBE / SYNTHESIZE / AGGREGATE** and the new per-event interpretation pass is **INTERPRET**. See [`pipeline-architecture.md`](pipeline-architecture.md) for the canonical pipeline-stage vocabulary. The "Layer N" references below are preserved as the doc was originally written; treat them as Layer 1 = DETECT, Layer 2 = DESCRIBE, Layer 3 = SYNTHESIZE, Layer 4 = AGGREGATE.
+
+> **Status (2026-05-22):**
+> - **DETECT (scoring + selection)** ✅ shipped. 7 intraday scorers + `SelectTopEventsActivity`. Producing 164 narratable events per trading day on 2026-05-08. Derived-field enrichment landed 2026-05-22 — every analytical ratio the LLM might want is pre-computed in the breakdown, eliminating the arithmetic-error failure mode by construction.
+> - **Symbol enrichment** ✅ shipped. `symbols` reference table populated weekly from NASDAQ public listings + SEC EDGAR canonical names + IEX SecurityDirectory. `SymbolFields.apply()` (renamed from `Enrich.symbol()` on 2026-05-22) joins company name, exchange, ETF flag, round lot, prev close into every breakdown.
+> - **DESCRIBE (two-pass narration)** ✅ shipped. `BlueprintExtractor` → `ProseRenderer` → pure-code `GroundingVerifier` chain. **99.39%** verifier-passed (163/164 on 2026-05-08).
+> - **INTERPRET (per-event interpretation)** ✅ shipped 2026-05-22. `InterpretEventActivity` + `InterpretWorkflow` + `InterpretationVerifier` + `TradeWindow` helper + `interpretations` table. Per-event LLM call with ±60-sec pre/post wire-data window. **98.78%** verifier-passed (162/164 on 2026-05-08). Full design in [`interpretation-design.md`](interpretation-design.md).
+> - **SYNTHESIZE (daily themes)** ✅ shipped 2026-05-22. `SynthesizeDayActivity` + `SynthesizeDayWorkflow` + `SynthesisVerifier` + `daily_synthesis` table + `SamplingParams.SYNTHESIZE` (Qwen reasoning preset). Single LLM call per day across all per-event INTERPRET outputs. End-to-end published paragraph on 2026-05-08; ticker check clean.
+> - **Cross-event linking** ✅ shipped 2026-05-20 (`EnrichWithCoOccurrenceActivity` — sec-scale parents absorb ms-scale children into a `co_occurring` block).
+> - **Threshold-based selection** ✅ shipped 2026-05-19 (within-scorer percentile rank, replaces hardcoded top-N caps).
+> - **Small-batch backfill (3-5 trading days)** 🛠 next — validates cross-day robustness before frontend work.
+> - **30-day backfill + inter-day scorers + SUMMARIZE stage** 📋 post-launch.
 
 ---
 

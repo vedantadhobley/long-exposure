@@ -9,7 +9,7 @@ responsible for. Reflects what's actually running in `parser/src/main/java/com/l
 
 ## Workflows
 
-Ten workflows registered on task queue `long-exposure-daily-pipeline`. The orchestrator (`DailyPipelineWorkflow`) only calls child workflows + metadata bookkeeping activities — every phase is its own child workflow.
+Twelve workflows registered on task queue `long-exposure-daily-pipeline`. The orchestrator (`DailyPipelineWorkflow`) only calls child workflows + metadata bookkeeping activities — every phase is its own child workflow.
 
 | Workflow | Trigger | What it does |
 |---|---|---|
@@ -20,9 +20,13 @@ Ten workflows registered on task queue `long-exposure-daily-pipeline`. The orche
 | `MaterializeWorkflow` | ad-hoc only | Builds the `order_lifecycle` table for a date whose DPLS data is already in Postgres. (DailyPipeline invokes the materialize step via `ScoreWorkflow`, not this workflow, but this exists for ad-hoc backfilling.) |
 | `ScoreWorkflow` | child of DailyPipeline + ad-hoc | Materialize lifecycle → run scoring → select top-N. |
 | `SelectWorkflow` | ad-hoc only | Just SelectTopEvents — pulls top-N from existing `scored_events` to `selected_events`. For iterating on per-scorer caps without re-scoring. |
-| `NarrateWorkflow` | child of DailyPipeline + ad-hoc | Two-pass extract → render → verify against the LLM. Writes `narratives`. |
+| `NarrateWorkflow` | child of DailyPipeline + ad-hoc | DESCRIBE stage. Two-pass extract → render → verify against the LLM. Writes `narratives`. **LLM-bearing.** |
+| `InterpretWorkflow` | ad-hoc (planned to wire into DailyPipeline) | INTERPRET stage. Per-event LLM call with surrounding ±60-sec wire-data window. Writes `interpretations`. **LLM-bearing.** |
+| `SynthesizeDayWorkflow` | ad-hoc (planned to wire into DailyPipeline) | SYNTHESIZE stage. Single LLM call per day reading all per-event INTERPRET outputs. Writes `daily_synthesis`. **LLM-bearing.** |
 | `CleanupWorkflow` | child of DailyPipeline + ad-hoc | Deletes the day's `.pcap.gz` files (only on success) + drops Postgres chunks older than the retention window. |
-| `RefreshSymbolsWorkflow` | weekly cron (Sun 02:00 ET, paused) + ad-hoc | Refreshes the `symbols` reference table from NASDAQ public listings + local IEX SecurityDirectory data. |
+| `RefreshSymbolsWorkflow` | weekly cron (Sun 02:00 ET, paused) + ad-hoc | Refreshes the `symbols` reference table from NASDAQ public listings + SEC EDGAR canonical names + IEX SecurityDirectory. |
+
+**Operational rule (load-bearing):** only one LLM-bearing workflow (`NarrateWorkflow`, `InterpretWorkflow`, `SynthesizeDayWorkflow`) runs at a time. All three dispatch on the same `NARRATION_TASK_QUEUE` and share the JVM-wide `Semaphore(2, fair)` inside `LlamaClient`, so running two simultaneously would have them compete for the same 2 LLM slots — both technically "running" but only one making progress, plus wasted Temporal scheduling cycles. See `docs/operations.md`.
 
 **Composition model.**
 
@@ -220,8 +224,12 @@ docker exec long-exposure-dev-temporal temporal workflow start \
 
 ## Activities
 
-Ten activity classes total. All share the same `long-exposure-daily-pipeline`
-task queue and are registered together in `WorkerMain.start()`.
+Eighteen activity classes total, split across two task queues:
+
+- **Main queue** (`long-exposure-daily-pipeline`): every non-LLM activity. Default Temporal concurrency (200 slots) since none of these saturate a shared bottleneck.
+- **Narration queue** (`NARRATION_TASK_QUEUE`): the three LLM-bound activities (`NarrateEventActivity`, `InterpretEventActivity`, `SynthesizeDayActivity`). Worker configured with `setMaxConcurrentActivityExecutionSize(2)` to cap LLM-call concurrency at the GPU's safe parallelism on `llama-large.joi`. The JVM-wide `Semaphore(2, fair)` inside `LlamaClient` is the second-line defense.
+
+The three LLM-bound activities are documented at the bottom of this section; the rest are documented in the order they execute in `DailyPipelineWorkflow`.
 
 ### `ResolveUrlActivity`
 
@@ -437,6 +445,40 @@ Running twice on the same `cutoffDate` is a no-op.
 
 Fast (no parsing, no IO beyond JDBC), so default retry policy applies.
 
+### `ListSelectedEventsActivity`
+
+**What.** Tiny lookup activity that returns the `selected_id` list for a date. Used by `NarrateWorkflow` and `InterpretWorkflow` to fan out their per-event activities (workflow code can't do JDBC directly). One small `SELECT … ORDER BY selected_id`.
+
+**Timeouts.** start-to-close 30 sec. Default retry × 3.
+
+### `NarrateEventActivity` — DESCRIBE per event
+
+**What.** One activity invocation per selected event. Loads the row from `selected_events`, runs the two-pass extract → render → verify pipeline via `NarrationPipeline`, upserts a `narratives` row keyed by `event_hash`.
+
+**Concurrency.** Runs on the narration task queue. Worker capped at 2 concurrent. JVM-wide `Semaphore(2, fair)` in `LlamaClient` is the second-line defense.
+
+**Timeouts.** start-to-close 5 min (each event ≈ 16 sec across 2 LLM calls; 5 min covers tail latency). schedule-to-close 1 hr.
+
+**Retry.** transient × 2.
+
+### `InterpretEventActivity` — INTERPRET per event
+
+**What.** One activity invocation per selected event. Loads the row from `selected_events` (with `ts_end`), queries the ±60-sec pre/post trade windows via `TradeWindow.query()`, calls the LLM once with `SamplingParams.RENDER`, runs `InterpretationVerifier`, upserts an `interpretations` row keyed by SHA256 of inputs + prompt version + model id.
+
+**Concurrency.** Same narration task queue as `NarrateEventActivity`. Shares the 2-concurrent cap.
+
+**Prompt versioning.** The `PROMPT_VERSION` constant is baked into the hash, so a prompt change invalidates the cache. Today's value is `interpret-v5-2026-05-22-no-approximation` (after 5 iterations chasing precision, unit-conversion, ticker-presence, and approximation patterns).
+
+**Timeouts.** start-to-close 5 min. schedule-to-close 1 hr. transient × 2.
+
+### `SynthesizeDayActivity` — SYNTHESIZE day
+
+**What.** One activity invocation per trading date. Loads every narration + interpretation for the day, computes day-level aggregates (`by_scorer`, `by_session_phase`, `top_symbols_by_event_count`), builds a ~16K-token prompt (INTERP-only per event to fit joi's `n_ctx=32768`), calls the LLM once with `SamplingParams.SYNTHESIZE` (Qwen instruct-reasoning mode), runs `SynthesisVerifier` (ticker fabrication + magnitude-tolerant number grounding), upserts `daily_synthesis` (PK = trading_date).
+
+**Concurrency.** Same narration task queue. Only one call per day, so doesn't push against the 2-concurrent cap on its own — but per the operational rule, must not run concurrently with `NarrateWorkflow` / `InterpretWorkflow`.
+
+**Timeouts.** start-to-close 5 min. transient × 2.
+
 ---
 
 ## Schedule
@@ -537,6 +579,10 @@ pre-cleans normally before re-writing.
 | `MaterializeOrderLifecycle` | 60min | 15min | transient × 2 |
 | `ScoreEvents` | 90min | 15min | transient × 2 |
 | `SelectTopEvents` | 5min | — | transient × 2 |
+| `ListSelectedEvents` | 30s | — | default × 3 |
+| `NarrateEvent` (LLM) | 5min | 1min | transient × 2 |
+| `InterpretEvent` (LLM) | 5min | 1min | transient × 2 |
+| `SynthesizeDay` (LLM) | 5min | 1min | transient × 2 |
 | `CleanupFiles` | 5min | — | none (best-effort) |
 | `RetentionSweep` | 15min | — | transient × 3 |
 | `PipelineRunRecorder` | 30s | — | default × 3 |

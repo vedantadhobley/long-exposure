@@ -2,9 +2,11 @@
 
 Project scratchpad, agent + human editable. Cross-references @plan.md (sprint-by-sprint history), @decisions.md (architectural rationale), and @scoring-and-narration.md (the scoring + narration design spec).
 
-Last refresh: 2026-05-21.
+Last refresh: 2026-05-22.
 
 > **🚀 Active sprint: see [`launch-sprint.md`](launch-sprint.md)** — 10-day plan, 2026-05-21 through 2026-05-30, ending in Monday 2026-06-01 publication. Whitepaper writing happens Sunday in parallel; IEX day 1 is Tuesday 2026-06-02. This `todo.md` continues to track the rolling open items + post-launch backlog; `launch-sprint.md` is the explicit work plan with daily milestones and acceptance criteria.
+
+> **Naming note (2026-05-22).** Older entries below use "Layer 0/1/2/3/4" pipeline-stage vocabulary, now deprecated. Map: Layer 1 = **DETECT**, Layer 2 = **DESCRIBE**, Layer 3 = **SYNTHESIZE**, Layer 4 = **AGGREGATE**, new per-event interpretation pass = **INTERPRET**. See [`pipeline-architecture.md`](pipeline-architecture.md) for canonical vocabulary.
 
 ---
 
@@ -29,16 +31,21 @@ The seven scorers — halt, large_trade, sweep, post_cancel_cluster, layering, i
 
 ---
 
-## What's next, in order (revised 2026-05-20)
+## What's next, in order (revised 2026-05-22)
 
 ### Immediate (in order)
 
-1. ✅ **Co-occurrence enrichment** (2 hr — done 2026-05-20) — `EnrichWithCoOccurrenceActivity` slots between Score and Select. For each scored event in a parent's interval, queries co-occurring same-symbol other-scorer events and merges summary stats into the parent's `breakdown.co_occurring` block. Marks children with `subsumed_by_event_id`. Validated on 2026-05-08: 164 candidates identified, **80 enriched** parents (absorbed 2 443 nested children); IWM 14:00 withdrawal absorbed 52 children (26 post_cancel, 25 layering, 1 sweep). Selection unchanged at 164.
-2. ✅ **Delete the retired combining code** (done 2026-05-20) — `CombineRelatedEventsActivity[Impl]`, `CombineWorkflow[Impl]` files removed. WorkerMain registrations cleaned. `subsumed_by_event_id` column stays (reused by enrichment).
-3. ✅ **Sampling params: Qwen3.5 published recommendations** (done 2026-05-20) — `SamplingParams` record + `EXTRACT` / `RENDER` named presets. Aligns with Qwen's published instruct-mode guidance.
-4. ✅ **Verifier dotted-path fix + v4 prompt** (done 2026-05-20) — Verifier now walks dotted source-field paths into nested breakdown values. Prompt rewritten with adaptive length ("1-3 sentences, stop when facts run out") + explicit forbidden categories (comparative claims, current-state assertions, intent speculation). Empirical: v3 Qwen+old prompt was 10 % filler; v4 brings it to 0.6 % (parity with pre-Qwen baseline).
-5. **Prompt iteration v5** (queued — see "Prompt-level limitations" below) — address residual MOBI-style current-state filler + uneven co_occurring narration + ETN-style ticker/word collision.
-6. **Layer 3 daily synthesis** (~half day) — `SynthesizeDayWorkflow` reads the day's narrations + day metadata, produces a "today's themes" paragraph. Handles same-symbol same-scorer repetition (the TQQQ-bursts pattern) dynamically — the LLM judges what's worth threading into the day-level story, no hardcoded gap thresholds. Will use new `SamplingParams.SYNTHESIZE` preset (Qwen instruct-reasoning: temp=1.0, top_p=1.0, top_k=40, presence_penalty=2.0).
+1. ✅ **Co-occurrence enrichment** (2 hr — done 2026-05-20).
+2. ✅ **Delete the retired combining code** (done 2026-05-20).
+3. ✅ **Sampling params: Qwen3.5 published recommendations** (done 2026-05-20) — EXTRACT + RENDER presets. SYNTHESIZE preset added 2026-05-22.
+4. ✅ **Verifier dotted-path fix + v4 prompt** (done 2026-05-20).
+5. ✅ **DETECT derived-field enrichment** (done 2026-05-22) — all 7 scorers now pre-compute the analytical ratios (orders_per_level, duration_pct_of_regular_session, etc.) the LLM would otherwise compute at inference time. Eliminated the arithmetic-error failure mode by construction.
+6. ✅ **`Humanize` → `BreakdownFmt` + `Enrich` → `SymbolFields` rename pass** (done 2026-05-22) — class names now reflect actual responsibilities; `round2` deleted in favor of explicit `round(v, 2)`.
+7. ✅ **INTERPRET production wiring** (done 2026-05-22) — `InterpretEventActivity` + `InterpretWorkflow` + `InterpretationVerifier` + `TradeWindow` helper + `interpretations` table. v5 prompt at **98.78% verifier-passed** on 2026-05-08 (5 iterations chasing rounding, unit-conversion, ticker-presence, approximation patterns). Full design in [`interpretation-design.md`](interpretation-design.md).
+8. ✅ **SYNTHESIZE production wiring** (done 2026-05-22) — `SynthesizeDayActivity` + `SynthesizeDayWorkflow` + `SynthesisVerifier` + `daily_synthesis` table + `SamplingParams.SYNTHESIZE` (Qwen reasoning preset). End-to-end on 2026-05-08: paragraph published, ticker check clean, 1 magnitude-approximation warning.
+9. **Small-batch backfill** — pick 3-5 recent trading days, run the full pipeline on each. Validates cross-day robustness before frontend work. ~85 min wall-clock per day (~40 min LLM-bound, serialized).
+10. **Frontend integration** in `vedanta-systems` — wire `/api/long-exposure/synthesis/:date` + `/api/long-exposure/event/:id` (with interpretation field) into the React browser component.
+11. **Full 30-day backfill** — post-launch. ~20 hours of LLM-bound compute, run overnight across 2-3 nights. Unlocks SUMMARIZE + inter-day scorers.
 
 ### Prompt-level limitations (queued for v5)
 
@@ -454,3 +461,17 @@ End-to-end walkthrough of pipeline stages — what's parallel, what could be, wh
 - [x] ~~Caddy `caddy.d/` per-project split~~ (2026-05-10, on the proxy side)
 - [x] ~~Day 1–10 implementation~~ (2026-05-11)
 - [x] ~~End-to-end 9.5 GB → 295M Postgres rows~~ (2026-05-11, 22:27 min)
+
+---
+
+## Deferred renames (queued, intentional)
+
+Tracked here so they don't get forgotten. All flagged on 2026-05-22 as part of the naming-cleanup pass; deferred because the surface area is large enough to be its own focused work, not a launch-sprint distraction.
+
+- [ ] **`GroundingVerifier` decomposition.** The class is named singular but runs 4 distinct layered grounding checks (source_field resolution, prose-numbers-in-haystack, symbol presence, company-name agreement). Either rename to `LayeredGroundingVerifier` to be honest about its shape, or decompose into 4 separate check classes plus a coordinator. Touches: `GroundingVerifier.java`, `ProseRenderer.java`, `NarrateEventsActivityImpl.java`, the test file. ~5–10 files. Effort: ~3 hours. Defer to post-launch.
+
+- [ ] **`breakdown` JSONB column rename.** The column carries event measurements + symbol metadata + co_occurring nested events; the name "breakdown" is more about score transparency than what's actually inside. `measurements` or `event_facts` would be more honest, but renaming a JSONB column touches: schema migration, all 7 scorers, `ScoredEvent` / `ScoringContext` records, every activity that reads it (`Enrich…ActivityImpl`, `BlueprintExtractor`, `ProseRenderer`, `NarrateEventsActivityImpl`, `SelectTopEventsActivityImpl`), SQL queries across the API layer in **a different repo** (`vedanta-systems`/`src/server/routes/long-exposure.ts`), Express response types, and frontend `long-exposure-browser.tsx`. Cross-repo + schema migration + downstream consumers. Effort: ~half a day. Defer to post-launch.
+
+- [ ] **Concept-primer rewrite using function names.** `docs/concepts.md` uses "the 4 layers of data" as its pedagogical structure. A clean rewrite would use WIRE / DETECT / DESCRIBE / INTERPRET / SYNTHESIZE / AGGREGATE as the organizing principle. Effort: ~2 hours, including making sure the new framing reads as a primer (not just a substitution). Defer to post-launch.
+
+- [ ] **Bulk Layer-N → function-name rename across older docs.** `docs/scoring-and-narration.md`, `docs/todo.md` (this file), `docs/decisions.md`, `docs/launch-sprint.md`, `parser/src/main/resources/pattern-catalog.md` all still use Layer-N vocabulary in places. A 2026-05-22 bulk-rename attempt produced too many false matches (e.g., "Layer-4 verifier" referring to grounding-verifier check tier 4, not pipeline stage 4) — needs file-by-file careful editing rather than `sed`. Each doc currently has a "Naming note" header pointing at `pipeline-architecture.md` for the canonical vocabulary. Effort: ~3 hours across all docs. Defer to post-launch.
