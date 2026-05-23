@@ -666,3 +666,77 @@ CREATE TABLE IF NOT EXISTS daily_synthesis (
     verifier_notes             JSONB,
     created_at                 TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+
+-- ─── TimescaleDB compression ─────────────────────────────────────────────────
+-- Compression is REQUIRED for production — without it the host disk fills up
+-- in <2 weeks at the observed per-day ingest cost (~230 GB/day uncompressed).
+-- With compression, chunks > 1 day old shrink ~10-20× and 30 days of history
+-- fits in ~350 GB.
+--
+-- All wire-format hypertables segment by symbol (low cardinality, frequently
+-- filtered) and order by ts DESC (newest-first reads). order_lifecycle uses
+-- add_ts as the time column.
+--
+-- These ALTER TABLE statements are idempotent — re-running on an
+-- already-configured hypertable is a no-op. add_compression_policy uses
+-- if_not_exists => true so re-applying schema.sql against an existing DB
+-- doesn't error out.
+--
+-- IMPORTANT: any new hypertable added to schema.sql MUST also add a
+-- compression block here. If we forget, that hypertable will grow
+-- uncompressed and consume disk indefinitely. The CI / smoke-test sanity
+-- check at the bottom of this section warns on uncovered hypertables.
+
+ALTER TABLE orders_add       SET (timescaledb.compress, timescaledb.compress_segmentby = 'symbol', timescaledb.compress_orderby = 'ts DESC');
+ALTER TABLE orders_modify    SET (timescaledb.compress, timescaledb.compress_segmentby = 'symbol', timescaledb.compress_orderby = 'ts DESC');
+ALTER TABLE orders_delete    SET (timescaledb.compress, timescaledb.compress_segmentby = 'symbol', timescaledb.compress_orderby = 'ts DESC');
+ALTER TABLE orders_executed  SET (timescaledb.compress, timescaledb.compress_segmentby = 'symbol', timescaledb.compress_orderby = 'ts DESC');
+ALTER TABLE clear_books      SET (timescaledb.compress, timescaledb.compress_segmentby = 'symbol', timescaledb.compress_orderby = 'ts DESC');
+ALTER TABLE trades           SET (timescaledb.compress, timescaledb.compress_segmentby = 'symbol', timescaledb.compress_orderby = 'ts DESC');
+ALTER TABLE trade_breaks     SET (timescaledb.compress, timescaledb.compress_segmentby = 'symbol', timescaledb.compress_orderby = 'ts DESC');
+ALTER TABLE quotes           SET (timescaledb.compress, timescaledb.compress_segmentby = 'symbol', timescaledb.compress_orderby = 'ts DESC');
+ALTER TABLE status_events    SET (timescaledb.compress, timescaledb.compress_segmentby = 'symbol', timescaledb.compress_orderby = 'ts DESC');
+ALTER TABLE auction_info     SET (timescaledb.compress, timescaledb.compress_segmentby = 'symbol', timescaledb.compress_orderby = 'ts DESC');
+ALTER TABLE official_prices  SET (timescaledb.compress, timescaledb.compress_segmentby = 'symbol', timescaledb.compress_orderby = 'ts DESC');
+ALTER TABLE securities       SET (timescaledb.compress, timescaledb.compress_segmentby = 'symbol', timescaledb.compress_orderby = 'ts DESC');
+ALTER TABLE retail_liquidity SET (timescaledb.compress, timescaledb.compress_segmentby = 'symbol', timescaledb.compress_orderby = 'ts DESC');
+ALTER TABLE order_lifecycle  SET (timescaledb.compress, timescaledb.compress_segmentby = 'symbol', timescaledb.compress_orderby = 'add_ts DESC');
+
+-- Compression policies — auto-compress chunks > 1 day old.
+-- Default schedule: TimescaleDB's job scheduler runs the policy ~daily.
+-- For backfill use cases, manually invoke compress_chunk() to compress
+-- immediately after ingest rather than waiting for the next policy run.
+
+SELECT add_compression_policy('orders_add',       INTERVAL '1 day', if_not_exists => true);
+SELECT add_compression_policy('orders_modify',    INTERVAL '1 day', if_not_exists => true);
+SELECT add_compression_policy('orders_delete',    INTERVAL '1 day', if_not_exists => true);
+SELECT add_compression_policy('orders_executed',  INTERVAL '1 day', if_not_exists => true);
+SELECT add_compression_policy('clear_books',      INTERVAL '1 day', if_not_exists => true);
+SELECT add_compression_policy('trades',           INTERVAL '1 day', if_not_exists => true);
+SELECT add_compression_policy('trade_breaks',     INTERVAL '1 day', if_not_exists => true);
+SELECT add_compression_policy('quotes',           INTERVAL '1 day', if_not_exists => true);
+SELECT add_compression_policy('status_events',    INTERVAL '1 day', if_not_exists => true);
+SELECT add_compression_policy('auction_info',     INTERVAL '1 day', if_not_exists => true);
+SELECT add_compression_policy('official_prices',  INTERVAL '1 day', if_not_exists => true);
+SELECT add_compression_policy('securities',       INTERVAL '1 day', if_not_exists => true);
+SELECT add_compression_policy('retail_liquidity', INTERVAL '1 day', if_not_exists => true);
+SELECT add_compression_policy('order_lifecycle',  INTERVAL '1 day', if_not_exists => true);
+
+-- Sanity check: if any user-defined hypertable lacks compression_enabled,
+-- raise a warning so we notice when a new hypertable is added without a
+-- matching ALTER TABLE block above. Filters out TimescaleDB-internal
+-- materialized hypertables (continuous aggregates) which use their own
+-- columnstore mechanism.
+DO $$
+DECLARE
+  missing TEXT;
+BEGIN
+  SELECT string_agg(hypertable_name, ', ') INTO missing
+  FROM timescaledb_information.hypertables
+  WHERE compression_enabled = false
+    AND hypertable_name NOT LIKE '\_materialized\_%' ESCAPE '\';
+  IF missing IS NOT NULL THEN
+    RAISE WARNING 'hypertables missing compression configuration: %', missing;
+  END IF;
+END$$;
