@@ -26,17 +26,23 @@ import java.time.ZonedDateTime;
  * ad-hoc.
  *
  * <p>Composition principle: every <em>phase</em> of the pipeline is a
- * child workflow (Download, Parse, Validate, Score, Narrate, Cleanup).
- * The orchestrator itself only retains direct activity calls for
- * cross-cutting metadata that threads through the run —
+ * child workflow (Download, Parse, Validate, Score, Narrate, Interpret,
+ * SynthesizeDay, Cleanup). The orchestrator itself only retains direct
+ * activity calls for cross-cutting metadata that threads through the run —
  * {@link PipelineRunRecorderActivity}'s idempotency check + start/complete
  * bookkeeping. Everything else dispatches to child workflows so the
  * cron path and the ad-hoc developer-invoked path share the same code.
  *
  * <p>Concurrency: Parse and Validate run in parallel (validators read
  * raw files from disk, not the DB, so they don't depend on parse).
- * Score and Narrate are sequential (score writes scored_events that
- * narrate reads).
+ * Score, Narrate, Interpret, and SynthesizeDay are strictly sequential —
+ * each consumes the previous stage's output and the three LLM-bound
+ * stages compete for the same 2-concurrent {@code llama-large.joi}
+ * slots, so even within one DailyPipelineWorkflow they cannot overlap.
+ * Across days, this same constraint means running multiple
+ * DailyPipelineWorkflow instances in parallel would oversubscribe the
+ * LLM bottleneck — see {@code docs/operations.md} for the operational
+ * rule "never run two LLM-bearing workflows concurrently."
  *
  * <p>Status semantics: see {@link #computeFinalStatus} for the truth
  * table mapping parse/validate outcomes to the final status string.
@@ -83,6 +89,12 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
 
     private final NarrateWorkflow narrateChild = Workflow.newChildWorkflowStub(
             NarrateWorkflow.class, childOptions());
+
+    private final InterpretWorkflow interpretChild = Workflow.newChildWorkflowStub(
+            InterpretWorkflow.class, childOptions());
+
+    private final SynthesizeDayWorkflow synthesizeChild = Workflow.newChildWorkflowStub(
+            SynthesizeDayWorkflow.class, childOptions());
 
     private final CleanupWorkflow cleanupChild = Workflow.newChildWorkflowStub(
             CleanupWorkflow.class, childOptions());
@@ -156,10 +168,19 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
         String notes = buildNotes(parseError, validation, validateError);
         recorder.completeRun(runId, finalStatus, messageCount, validatorStatus, notes);
 
-        // Phase 3: Score + Narrate, only if parse succeeded. Validation
-        // failure doesn't gate scoring — unverified data is still
-        // queryable. Failures here log but don't fail the workflow;
-        // they can be re-run via ScoreWorkflow / NarrateWorkflow.
+        // Phase 3: Score → Narrate → Interpret → Synthesize, only if
+        // parse succeeded. Validation failure doesn't gate scoring —
+        // unverified data is still queryable. Failures here log but
+        // don't fail the workflow; downstream stages skip when their
+        // upstream's output is missing, and each can be re-run via
+        // its ad-hoc workflow.
+        //
+        // The four stages are strictly sequential by data dependency
+        // and LLM concurrency:
+        //   - Score writes scored_events that Narrate reads
+        //   - Narrate writes narratives that Interpret + Synthesize read
+        //   - Narrate, Interpret, and Synthesize all compete for the
+        //     same 2-concurrent llama-large.joi slots
         if (parseError == null) {
             try {
                 scoreChild.run(date);
@@ -173,8 +194,20 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
                 LOG.warn("narrate child failed (pipeline continues)  date={} err={}",
                         date, cwf.getMessage());
             }
+            try {
+                interpretChild.run(date);
+            } catch (ChildWorkflowFailure cwf) {
+                LOG.warn("interpret child failed (pipeline continues)  date={} err={}",
+                        date, cwf.getMessage());
+            }
+            try {
+                synthesizeChild.run(date);
+            } catch (ChildWorkflowFailure cwf) {
+                LOG.warn("synthesize child failed (pipeline continues)  date={} err={}",
+                        date, cwf.getMessage());
+            }
         } else {
-            LOG.info("skipping score + narrate — parse failed  date={}", date);
+            LOG.info("skipping score + narrate + interpret + synthesize — parse failed  date={}", date);
         }
 
         // Phase 4: Cleanup + retention. Files deleted only on success;

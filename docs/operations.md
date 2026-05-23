@@ -185,11 +185,11 @@ If two LLM-bearing workflows are running concurrently (e.g. two `NarrateWorkflow
 - Wasted wall-clock — the second workflow waits without doing useful work
 - Eventually some activities will time out (start-to-close timer runs during the wait)
 
-**The rule**: only one LLM-bearing workflow runs at a time. Before kicking any LLM workflow (`NarrateWorkflow`, `InterpretWorkflow`, `SynthesizeDayWorkflow`), confirm no other LLM workflow is in flight via:
+**The rule**: only one LLM-bearing workflow runs at a time. Before kicking any LLM workflow (`NarrateWorkflow`, `InterpretWorkflow`, `SynthesizeDayWorkflow`) — or `DailyPipelineWorkflow`, which contains all three as child workflows — confirm no other LLM-bearing execution is in flight via:
 
 ```bash
 docker exec long-exposure-dev-temporal temporal workflow list \
-  --query "(WorkflowType='NarrateWorkflow' OR WorkflowType='InterpretWorkflow' OR WorkflowType='SynthesizeDayWorkflow') AND ExecutionStatus='Running'"
+  --query "(WorkflowType='NarrateWorkflow' OR WorkflowType='InterpretWorkflow' OR WorkflowType='SynthesizeDayWorkflow' OR WorkflowType='DailyPipelineWorkflow') AND ExecutionStatus='Running'"
 ```
 
 Should return no rows. If it does, terminate or wait for that workflow before starting another.

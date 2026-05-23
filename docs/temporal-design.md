@@ -21,8 +21,8 @@ Twelve workflows registered on task queue `long-exposure-daily-pipeline`. The or
 | `ScoreWorkflow` | child of DailyPipeline + ad-hoc | Materialize lifecycle → run scoring → select top-N. |
 | `SelectWorkflow` | ad-hoc only | Just SelectTopEvents — pulls top-N from existing `scored_events` to `selected_events`. For iterating on per-scorer caps without re-scoring. |
 | `NarrateWorkflow` | child of DailyPipeline + ad-hoc | DESCRIBE stage. Two-pass extract → render → verify against the LLM. Writes `narratives`. **LLM-bearing.** |
-| `InterpretWorkflow` | ad-hoc (planned to wire into DailyPipeline) | INTERPRET stage. Per-event LLM call with surrounding ±60-sec wire-data window. Writes `interpretations`. **LLM-bearing.** |
-| `SynthesizeDayWorkflow` | ad-hoc (planned to wire into DailyPipeline) | SYNTHESIZE stage. Single LLM call per day reading all per-event INTERPRET outputs. Writes `daily_synthesis`. **LLM-bearing.** |
+| `InterpretWorkflow` | child of DailyPipeline + ad-hoc | INTERPRET stage. Per-event LLM call with surrounding ±60-sec wire-data window. Writes `interpretations`. **LLM-bearing.** |
+| `SynthesizeDayWorkflow` | child of DailyPipeline + ad-hoc | SYNTHESIZE stage. Single LLM call per day reading all per-event INTERPRET outputs. Writes `daily_synthesis`. **LLM-bearing.** |
 | `CleanupWorkflow` | child of DailyPipeline + ad-hoc | Deletes the day's `.pcap.gz` files (only on success) + drops Postgres chunks older than the retention window. |
 | `RefreshSymbolsWorkflow` | weekly cron (Sun 02:00 ET, paused) + ad-hoc | Refreshes the `symbols` reference table from NASDAQ public listings + SEC EDGAR canonical names + IEX SecurityDirectory. |
 
@@ -30,7 +30,7 @@ Twelve workflows registered on task queue `long-exposure-daily-pipeline`. The or
 
 **Composition model.**
 
-`DailyPipelineWorkflow` is *purely* orchestration — its `run()` body reads top-to-bottom as phase names (Download → Parse + Validate in parallel → Score → Narrate → Cleanup) with no embedded activity wiring. Each phase is owned by its child workflow, called via `Workflow.newChildWorkflowStub()`. This way:
+`DailyPipelineWorkflow` is *purely* orchestration — its `run()` body reads top-to-bottom as phase names (Download → Parse + Validate in parallel → Score → Narrate → Interpret → SynthesizeDay → Cleanup) with no embedded activity wiring. Each phase is owned by its child workflow, called via `Workflow.newChildWorkflowStub()`. This way:
 
 1. **No duplicated wiring** between the cron-driven path and ad-hoc developer-invoked paths. `ScoreWorkflow` is one workflow with one implementation; both paths run the identical code.
 2. **Each phase is independently invokable** for replay, backfill, or iterative development.
@@ -115,7 +115,9 @@ flowchart TD
     Materialize --> Score[ScoreEvents<br/>7 scorers → scored_events<br/>PostCancel + Layering read order_lifecycle]
     Score --> Select[SelectTopEvents<br/>per-scorer top-N → selected_events]
     Select --> Narrate[NarrateEvents<br/>two-pass extract+render+verify<br/>→ narratives]
-    Narrate --> CleanupGate
+    Narrate --> Interpret[InterpretEvents<br/>per-event surrounding-context LLM<br/>→ interpretations]
+    Interpret --> Synthesize[SynthesizeDay<br/>one LLM call across day's events<br/>→ daily_synthesis]
+    Synthesize --> CleanupGate
 
     CleanupGate{runRetentionSweep<br/>AND status=ok?}
     CleanupGate -->|yes| Cleanup[CleanupFiles<br/>delete 3 .pcap.gz]

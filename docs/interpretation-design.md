@@ -9,7 +9,7 @@ This doc was previously titled "Layer 0 — Interpretive Narration Design" — t
 ## What got built
 
 - `parser/src/main/java/com/longexposure/temporal/activities/InterpretEventActivity{,Impl}.java` — per-event activity (load event, query ±60-sec windows, build prompt, LLM call, verify, upsert).
-- `parser/src/main/java/com/longexposure/temporal/workflows/InterpretWorkflow{,Impl}.java` — ad-hoc workflow with 2-in-flight sliding-window dispatch.
+- `parser/src/main/java/com/longexposure/temporal/workflows/InterpretWorkflow{,Impl}.java` — workflow with 2-in-flight sliding-window dispatch. Called as a child of `DailyPipelineWorkflow` (after `NarrateWorkflow`, before `SynthesizeDayWorkflow`); also runnable standalone for ad-hoc replay.
 - `parser/src/main/java/com/longexposure/narration/InterpretationVerifier.java` — pure-code grounding check. Numbers ⊆ breakdown ∪ pre-window ∪ post-window summaries (with HALF_UP / FLOOR / CEILING precision-rounded matching). Symbol presence. Company-name agreement with stutter carve-out.
 - `parser/src/main/java/com/longexposure/narration/TradeWindow.java` — shared helper for pre/post trade-window aggregation. Pre-computes `price_range_dollars` + `total_notional_million_dollars` so the model doesn't compute units at inference time.
 - `interpretations` table — keyed by SHA256 hash of inputs + prompt version + model id (independent caching from DESCRIBE narratives).

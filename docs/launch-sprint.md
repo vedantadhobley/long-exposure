@@ -91,8 +91,8 @@ Residual:
 - **`SamplingParams.SYNTHESIZE`** — Qwen "Instruct mode for reasoning tasks" verbatim (`temp=1.0, top_p=1.0, top_k=40, presence_penalty=2.0`).
 - **`DaySynthesizer` class** — owns the prompt, takes `(date, list<narration + structured + event_type + symbol>)`, emits `{themes[], synthesis_prose}` via structured-output JSON schema.
 - **`SynthesizeDayActivity`** — Temporal activity reading from `narratives`, calling DaySynthesizer, writing `daily_synthesis`. Idempotent (UPSERT on trading_date).
-- **`SynthesizeDayWorkflow`** — ad-hoc replay entry point following the same pattern as `NarrateWorkflow` / `ScoreWorkflow`.
-- **Wiring** — add as Phase 6 in `DailyPipelineWorkflow` after Cleanup. Dependency: Narrate completion. No co-occurrence issues to worry about; one workflow, one LLM call per day.
+- **`SynthesizeDayWorkflow`** — child of `DailyPipelineWorkflow` (called after `InterpretWorkflow`), also runnable standalone for ad-hoc replay.
+- **Wiring** ✅ (2026-05-23) — `SynthesizeDayWorkflow` and `InterpretWorkflow` both wired into `DailyPipelineWorkflow` after `NarrateWorkflow`, before `CleanupWorkflow`. The three LLM-bound stages serialize within one DailyPipelineWorkflow run since they share the 2-slot `llama-large.joi` cap.
 
 ### Day 3 — Layer 3 implementation (Saturday 5/23)
 
