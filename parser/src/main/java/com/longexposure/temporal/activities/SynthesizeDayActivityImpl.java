@@ -51,7 +51,7 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
             .getOrDefault("LLAMA_MODEL", "Qwen3.5-122B-A10B");
 
     /** Bumped when prompt changes. */
-    private static final String PROMPT_VERSION = "synthesize-v4-holistic-approx-example";
+    private static final String PROMPT_VERSION = "synthesize-v5-holistic-revert-v4-example";
 
     private static final String SYSTEM_PROMPT = """
             You are a financial-data journalist writing one paragraph identifying
@@ -85,13 +85,9 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
             Every ticker you mention must appear in today's narrations. Every
             numeric claim must trace to either the day metadata or a specific
             per-event interpretation — no introducing numbers from outside the
-            inputs, no approximation or rounding. Do not sum or aggregate
-            across events to produce new numbers — if three sweeps each
-            traded 4,500, 4,800, and 5,200 shares, do not write "over 13,600
-            shares total"; describe the sweeps individually or by event count.
-            If a day-metadata aggregate carries the total you want, use it
-            verbatim; otherwise let the count of events stand for the
-            magnitude.
+            inputs, no approximation or rounding. The trading date is provided
+            in the day metadata; do not invent or restate it in a different
+            format.
 
             REGISTER:
 
