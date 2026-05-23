@@ -3,9 +3,9 @@ package com.longexposure.scoring;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 /**
- * Helpers that scorers call to mutate a breakdown {@link ObjectNode}
- * with per-symbol metadata (company name, listing exchange, ETF flag,
- * round lot, previous close) at the moment the breakdown is built.
+ * Adds per-symbol reference-data fields (company name, listing exchange,
+ * ETF flag, round lot, previous close, LULD tier) to a breakdown
+ * {@link ObjectNode} at the moment the breakdown is built.
  *
  * <p>The metadata comes from {@link ScoringContext#lookupSymbol(String)},
  * which reads from the in-memory map loaded once per scoring run. So
@@ -18,17 +18,23 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
  *
  * <p>Field names mirror the {@code symbols} table columns so the LLM
  * has consistent naming across all scorer types.
+ *
+ * <p>Renamed from {@code Enrich} on 2026-05-22 — the old name was too
+ * vague (enrich what, with what?). This class only adds
+ * symbol-reference fields; future enrichment for other concerns
+ * (surrounding wire context, etc.) should be separate classes named
+ * for their concern.
  */
-public final class Enrich {
+public final class SymbolFields {
 
-    private Enrich() {}
+    private SymbolFields() {}
 
     /**
      * Add per-symbol fields to a breakdown that's about to be persisted
      * to {@code scored_events.breakdown}. Mutates {@code breakdown} in
      * place. Null-safe on all branches.
      */
-    public static void symbol(final ObjectNode breakdown, final ScoringContext ctx, final String symbol) {
+    public static void apply(final ObjectNode breakdown, final ScoringContext ctx, final String symbol) {
         if (breakdown == null || symbol == null) return;
 
         // The ticker itself goes in unconditionally — independent of

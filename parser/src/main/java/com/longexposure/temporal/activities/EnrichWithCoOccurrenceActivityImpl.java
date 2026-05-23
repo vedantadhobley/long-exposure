@@ -219,7 +219,7 @@ public final class EnrichWithCoOccurrenceActivityImpl implements EnrichWithCoOcc
             String scorerId = e.getKey();
             ScorerAggregate agg = e.getValue();
             ObjectNode per = duringEvent.putObject(scorerId);
-            per.put("count", com.longexposure.scoring.Humanize.formatCount(agg.count));
+            per.put("count", com.longexposure.scoring.BreakdownFmt.formatCount(agg.count));
             // Per-field sums where they were observed. Sums that are integer-valued
             // counts (shares, orders, levels) get thousand-separator formatting so
             // narrations render "565,131 shares" not "565131 shares". Currency
@@ -230,14 +230,14 @@ public final class EnrichWithCoOccurrenceActivityImpl implements EnrichWithCoOcc
                 if (n == 0) continue;
                 double sum = fs.getValue();
                 if (isIntegerCountField(field)) {
-                    per.put("sum_" + field, com.longexposure.scoring.Humanize.formatCount((long) sum));
+                    per.put("sum_" + field, com.longexposure.scoring.BreakdownFmt.formatCount((long) sum));
                 } else {
-                    per.put("sum_" + field, com.longexposure.scoring.Humanize.round2(sum));
+                    per.put("sum_" + field, com.longexposure.scoring.BreakdownFmt.round(sum, 2));
                 }
             }
             totalChildren += agg.count;
         }
-        coOccurring.put("total_children", com.longexposure.scoring.Humanize.formatCount(totalChildren));
+        coOccurring.put("total_children", com.longexposure.scoring.BreakdownFmt.formatCount(totalChildren));
 
         // Update parent: merge the co_occurring block into the breakdown.
         try (PreparedStatement st = conn.prepareStatement(
@@ -283,7 +283,7 @@ public final class EnrichWithCoOccurrenceActivityImpl implements EnrichWithCoOcc
     /**
      * Parse a JSON value as a double. Handles both native numeric form
      * and the comma-formatted string form that scorers now emit for
-     * integer counts (e.g. {@code "4,895"} from {@code Humanize.formatCount}).
+     * integer counts (e.g. {@code "4,895"} from {@code BreakdownFmt.formatCount}).
      * Returns null if the value isn't parseable as a number.
      */
     private static Double parseNumeric(final JsonNode v) {

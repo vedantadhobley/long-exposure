@@ -191,7 +191,7 @@ public final class LlamaSmokeTest {
         Instant anchorUtc = java.time.OffsetDateTime
                 .parse(ts.replace(" ", "T").replace("+00", "+00:00"))
                 .toInstant();
-        String anchorEt = com.longexposure.scoring.Humanize.toEtTime(anchorUtc);
+        String anchorEt = com.longexposure.scoring.BreakdownFmt.toEtTime(anchorUtc);
 
         String user =
                 "Event type: " + scorerId + "\n" +

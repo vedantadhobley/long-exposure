@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.longexposure.scoring.EventScorer;
-import com.longexposure.scoring.Humanize;
+import com.longexposure.scoring.BreakdownFmt;
 import com.longexposure.scoring.ScoredEvent;
 import com.longexposure.scoring.ScoringContext;
 import org.slf4j.Logger;
@@ -182,17 +182,41 @@ public final class SweepScorer implements EventScorer {
             notional += e.size * (e.priceRaw / 10_000.0);
         }
 
+        long durationNanos = last.tsNanos - first.tsNanos;
+        double durationMs = durationNanos / 1_000_000.0;
+        double minPriceDollars = minPriceRaw / 10_000.0;
+        double maxPriceDollars = maxPriceRaw / 10_000.0;
+        double midPriceDollars = (minPriceDollars + maxPriceDollars) / 2.0;
+        double priceRangeDollars = maxPriceDollars - minPriceDollars;
+
         ObjectMapper json = ctx.json();
         ObjectNode breakdown = json.createObjectNode();
-        breakdown.put("executions",        Humanize.formatCount(cluster.size()));
-        breakdown.put("distinct_levels",   Humanize.formatCount(distinctLevels));
-        breakdown.put("total_shares",      Humanize.formatCount(totalShares));
-        breakdown.put("notional_dollars",  Humanize.round2(notional));
-        breakdown.put("min_price_dollars", minPriceRaw / 10_000.0);
-        breakdown.put("max_price_dollars", maxPriceRaw / 10_000.0);
-        breakdown.put("duration",          Humanize.durationNanos(last.tsNanos - first.tsNanos));
-        breakdown.put("start_et",          Humanize.toEtTime(first.ts));
-        breakdown.put("end_et",            Humanize.toEtTime(last.ts));
+        breakdown.put("executions",        BreakdownFmt.formatCount(cluster.size()));
+        breakdown.put("distinct_levels",   BreakdownFmt.formatCount(distinctLevels));
+        breakdown.put("total_shares",      BreakdownFmt.formatCount(totalShares));
+        breakdown.put("notional_dollars",  BreakdownFmt.round(notional, 2));
+        breakdown.put("min_price_dollars", minPriceDollars);
+        breakdown.put("max_price_dollars", maxPriceDollars);
+        breakdown.put("duration",          BreakdownFmt.durationNanos(durationNanos));
+        breakdown.put("start_et",          BreakdownFmt.toEtTime(first.ts));
+        breakdown.put("end_et",            BreakdownFmt.toEtTime(last.ts));
+
+        // ─── derived fields (DETECT enrichment, 2026-05-22) ──────────────
+        // Pre-compute every quantity the LLM might want to mention so it
+        // never has to do arithmetic at inference time.
+        breakdown.put("duration_ms",          BreakdownFmt.round(durationMs, 2));
+        breakdown.put("notional_per_level",   BreakdownFmt.round(notional / distinctLevels, 2));
+        breakdown.put("shares_per_level",     totalShares / distinctLevels);
+        breakdown.put("price_range_dollars",  BreakdownFmt.round(priceRangeDollars, 4));
+        if (midPriceDollars > 0) {
+            breakdown.put("price_range_basis_points",
+                          BreakdownFmt.round(priceRangeDollars / midPriceDollars * 10_000.0, 1));
+        }
+        if (durationMs > 0) {
+            breakdown.put("executions_per_ms", BreakdownFmt.round(cluster.size() / durationMs, 2));
+        }
+        breakdown.put("event_session_phase",  BreakdownFmt.sessionPhase(first.ts));
+        breakdown.put("event_phase_label",    BreakdownFmt.sessionPhaseLabel(first.ts));
 
         ArrayNode sourceRefs = json.createArrayNode();
         int refsToEmit = Math.min(cluster.size(), MAX_SOURCE_REFS);
@@ -212,7 +236,7 @@ public final class SweepScorer implements EventScorer {
             sourceRefs.add(trunc);
         }
 
-        com.longexposure.scoring.Enrich.symbol(breakdown, ctx, first.symbol);
+        com.longexposure.scoring.SymbolFields.apply(breakdown, ctx, first.symbol);
 
         double score = Math.log10(Math.max(notional, 1.0)) * distinctLevels;
 

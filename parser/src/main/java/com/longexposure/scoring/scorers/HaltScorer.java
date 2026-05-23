@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.longexposure.scoring.EventScorer;
-import com.longexposure.scoring.Humanize;
+import com.longexposure.scoring.BreakdownFmt;
 import com.longexposure.scoring.ScoredEvent;
 import com.longexposure.scoring.ScoringContext;
 import org.slf4j.Logger;
@@ -117,12 +117,29 @@ public final class HaltScorer implements EventScorer {
         ObjectMapper json = ctx.json();
         ObjectNode breakdown = json.createObjectNode();
         breakdown.put("halt_reason",       reason);
-        breakdown.put("halt_duration",     durationS != null ? Humanize.durationSec(durationS) : "unbounded");
-        breakdown.put("halt_start_et",     Humanize.toEtTime(haltStart));
-        if (haltEnd != null)   breakdown.put("halt_end_et", Humanize.toEtTime(haltEnd)); else breakdown.putNull("halt_end_et");
+        breakdown.put("halt_duration",     durationS != null ? BreakdownFmt.durationSec(durationS) : "unbounded");
+        breakdown.put("halt_start_et",     BreakdownFmt.toEtTime(haltStart));
+        if (haltEnd != null)   breakdown.put("halt_end_et", BreakdownFmt.toEtTime(haltEnd)); else breakdown.putNull("halt_end_et");
         breakdown.put("halt_resumed",      "T".equals(nextSub));     // boolean — "did it resume cleanly?"
 
-        com.longexposure.scoring.Enrich.symbol(breakdown, ctx, symbol);
+        // ─── derived fields (L1 enrichment, 2026-05-22) ──────────────────
+        // Pre-compute every quantity the LLM might want to mention so it
+        // never has to do arithmetic at inference time (the failure mode
+        // observed in the MOBI 20%-vs-86% smoke test, 2026-05-22).
+        if (durationS != null) {
+            breakdown.put("halt_duration_seconds", durationS);
+            breakdown.put("halt_duration_pct_of_regular_session",
+                          BreakdownFmt.round(durationS * 100.0 / BreakdownFmt.REGULAR_SESSION_SECONDS, 1));
+            breakdown.put("halt_duration_bucket", durationBucket(durationS));
+        }
+        breakdown.put("halt_start_session_phase",  BreakdownFmt.sessionPhase(haltStart));
+        breakdown.put("halt_start_phase_label",    BreakdownFmt.sessionPhaseLabel(haltStart));
+        if (haltEnd != null) {
+            breakdown.put("halt_end_session_phase",  BreakdownFmt.sessionPhase(haltEnd));
+            breakdown.put("halt_end_phase_label",    BreakdownFmt.sessionPhaseLabel(haltEnd));
+        }
+
+        com.longexposure.scoring.SymbolFields.apply(breakdown, ctx, symbol);
 
         ArrayNode sourceRefs = json.createArrayNode();
         ObjectNode ref = json.createObjectNode();
@@ -145,5 +162,21 @@ public final class HaltScorer implements EventScorer {
                 score,
                 breakdown,
                 sourceRefs);
+    }
+
+    /**
+     * Classify halt duration into a qualitative bucket the LLM can lean on
+     * without inventing comparative phrasing. Thresholds derived from
+     * NMS / IEX practice: LULD pauses are typically 5 min; news halts
+     * commonly run 30 min – 2 hr; IPO / regulatory halts can span a
+     * session or longer.
+     */
+    private static String durationBucket(final long seconds) {
+        if (seconds < 300)               return "under_5min";       // sub-LULD
+        if (seconds < 1_800)             return "5_to_30min";       // LULD-to-news-typical
+        if (seconds < 7_200)             return "30min_to_2h";      // news-pending-typical
+        if (seconds < BreakdownFmt.REGULAR_SESSION_SECONDS / 2) return "2h_to_half_session";
+        if (seconds < BreakdownFmt.REGULAR_SESSION_SECONDS)    return "half_to_full_session";
+        return "exceeds_full_session";
     }
 }

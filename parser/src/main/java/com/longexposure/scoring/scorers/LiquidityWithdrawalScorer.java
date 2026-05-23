@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.longexposure.scoring.EventScorer;
-import com.longexposure.scoring.Humanize;
+import com.longexposure.scoring.BreakdownFmt;
 import com.longexposure.scoring.ScoredEvent;
 import com.longexposure.scoring.ScoringContext;
 import org.slf4j.Logger;
@@ -143,13 +143,28 @@ public final class LiquidityWithdrawalScorer implements EventScorer {
         double durationMs  = durationNanos / 1_000_000.0;
         double ratePerSec  = durationNanos > 0 ? cluster.size() / (durationNanos / 1_000_000_000.0) : 0.0;
 
+        double durationSec = durationNanos / 1_000_000_000.0;
+
         ObjectMapper json = ctx.json();
         ObjectNode breakdown = json.createObjectNode();
-        breakdown.put("deletes",      Humanize.formatCount(cluster.size()));
-        breakdown.put("duration",     Humanize.durationMs(durationMs));
-        breakdown.put("rate_per_sec", Humanize.round2(ratePerSec));
-        breakdown.put("start_et",     Humanize.toEtTime(first.ts));
-        breakdown.put("end_et",       Humanize.toEtTime(last.ts));
+        breakdown.put("deletes",      BreakdownFmt.formatCount(cluster.size()));
+        breakdown.put("duration",     BreakdownFmt.durationMs(durationMs));
+        breakdown.put("rate_per_sec", BreakdownFmt.round(ratePerSec, 2));
+        breakdown.put("start_et",     BreakdownFmt.toEtTime(first.ts));
+        breakdown.put("end_et",       BreakdownFmt.toEtTime(last.ts));
+
+        // ─── derived fields (DETECT enrichment, 2026-05-22) ──────────────
+        // LiquidityWithdrawalScorer doesn't track per-cancel price level
+        // (orders_delete rows don't carry price — that's on the original
+        // add). distinct_levels-derived fields are deferred until the
+        // scorer is extended to join order_lifecycle for the level lookup.
+        breakdown.put("duration_seconds",      BreakdownFmt.round(durationSec, 2));
+        breakdown.put("burst_intensity_class",
+                durationSec < 1.0   ? "sub_second" :
+                durationSec < 10.0  ? "brief" :
+                durationSec < 60.0  ? "sustained" : "extended");
+        breakdown.put("event_session_phase",   BreakdownFmt.sessionPhase(first.ts));
+        breakdown.put("event_phase_label",     BreakdownFmt.sessionPhaseLabel(first.ts));
 
         ArrayNode sourceRefs = json.createArrayNode();
         int refsToEmit = Math.min(cluster.size(), MAX_SOURCE_REFS);
@@ -168,7 +183,7 @@ public final class LiquidityWithdrawalScorer implements EventScorer {
             sourceRefs.add(trunc);
         }
 
-        com.longexposure.scoring.Enrich.symbol(breakdown, ctx, first.symbol);
+        com.longexposure.scoring.SymbolFields.apply(breakdown, ctx, first.symbol);
 
         double score = Math.log10(cluster.size()) * cluster.size();
 

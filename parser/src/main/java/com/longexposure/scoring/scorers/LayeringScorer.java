@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.longexposure.scoring.EventScorer;
-import com.longexposure.scoring.Humanize;
+import com.longexposure.scoring.BreakdownFmt;
 import com.longexposure.scoring.ScoredEvent;
 import com.longexposure.scoring.ScoringContext;
 import com.longexposure.scoring.Side;
@@ -178,18 +178,53 @@ public final class LayeringScorer implements EventScorer {
         java.util.Arrays.sort(lifetimes);
         double medianLifetimeMs = lifetimes[lifetimes.length / 2] / 1_000_000.0;
 
+        long durationNanos = last.addNanos - first.addNanos;
+        double durationMs = durationNanos / 1_000_000.0;
+        double durationSec = durationNanos / 1_000_000_000.0;
+        double minPriceDollars = minPriceRaw / 10_000.0;
+        double maxPriceDollars = maxPriceRaw / 10_000.0;
+        double midPriceDollars = (minPriceDollars + maxPriceDollars) / 2.0;
+        double priceRangeDollars = maxPriceDollars - minPriceDollars;
+        double ordersPerLevel = cluster.size() / (double) distinctLevels;
+
         ObjectMapper json = ctx.json();
         ObjectNode breakdown = json.createObjectNode();
-        breakdown.put("orders",                Humanize.formatCount(cluster.size()));
-        breakdown.put("distinct_levels",       Humanize.formatCount(distinctLevels));
-        breakdown.put("total_shares",          Humanize.formatCount(totalShares));
-        breakdown.put("median_order_lifetime", Humanize.durationMs(medianLifetimeMs));
+        breakdown.put("orders",                BreakdownFmt.formatCount(cluster.size()));
+        breakdown.put("distinct_levels",       BreakdownFmt.formatCount(distinctLevels));
+        breakdown.put("total_shares",          BreakdownFmt.formatCount(totalShares));
+        breakdown.put("median_order_lifetime", BreakdownFmt.durationMs(medianLifetimeMs));
         breakdown.put("side",                  Side.label(first.side));
-        breakdown.put("min_price_dollars",     minPriceRaw / 10_000.0);
-        breakdown.put("max_price_dollars",     maxPriceRaw / 10_000.0);
-        breakdown.put("duration",              Humanize.durationNanos(last.addNanos - first.addNanos));
-        breakdown.put("start_et",              Humanize.toEtTime(first.addTs));
-        breakdown.put("end_et",                Humanize.toEtTime(last.addTs));
+        breakdown.put("min_price_dollars",     minPriceDollars);
+        breakdown.put("max_price_dollars",     maxPriceDollars);
+        breakdown.put("duration",              BreakdownFmt.durationNanos(durationNanos));
+        breakdown.put("start_et",              BreakdownFmt.toEtTime(first.addTs));
+        breakdown.put("end_et",                BreakdownFmt.toEtTime(last.addTs));
+
+        // ─── derived fields (DETECT enrichment, 2026-05-22) ──────────────
+        // Pre-compute every density/ratio the LLM would otherwise compute
+        // (badly) at inference time — orders/level was the most-observed
+        // analytical claim in the breakdown-only smoke test.
+        breakdown.put("orders_per_level",      BreakdownFmt.round(ordersPerLevel, 2));
+        breakdown.put("shares_per_level",      totalShares / distinctLevels);
+        breakdown.put("notional_per_level",
+                      BreakdownFmt.round((totalShares * midPriceDollars) / distinctLevels, 2));
+        breakdown.put("price_range_dollars",   BreakdownFmt.round(priceRangeDollars, 4));
+        if (midPriceDollars > 0) {
+            breakdown.put("price_range_basis_points",
+                          BreakdownFmt.round(priceRangeDollars / midPriceDollars * 10_000.0, 1));
+        }
+        if (durationNanos > 0) {
+            breakdown.put("median_lifetime_pct_of_duration",
+                          BreakdownFmt.round(medianLifetimeMs * 1_000_000.0 / durationNanos * 100.0, 1));
+        }
+        if (durationSec > 0) {
+            breakdown.put("orders_per_second", BreakdownFmt.round(cluster.size() / durationSec, 1));
+        }
+        breakdown.put("density_class",
+                ordersPerLevel < 2.0 ? "sparse" :
+                ordersPerLevel < 5.0 ? "moderate" : "stacked");
+        breakdown.put("event_session_phase",   BreakdownFmt.sessionPhase(first.addTs));
+        breakdown.put("event_phase_label",     BreakdownFmt.sessionPhaseLabel(first.addTs));
 
         ArrayNode sourceRefs = json.createArrayNode();
         int refsToEmit = Math.min(cluster.size(), MAX_SOURCE_REFS);
@@ -208,7 +243,7 @@ public final class LayeringScorer implements EventScorer {
             sourceRefs.add(trunc);
         }
 
-        com.longexposure.scoring.Enrich.symbol(breakdown, ctx, first.symbol);
+        com.longexposure.scoring.SymbolFields.apply(breakdown, ctx, first.symbol);
 
         double score = Math.log10(Math.max(totalShares, 1)) * distinctLevels;
 

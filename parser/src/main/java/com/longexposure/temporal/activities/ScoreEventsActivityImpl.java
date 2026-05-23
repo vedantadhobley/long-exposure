@@ -241,7 +241,7 @@ public final class ScoreEventsActivityImpl implements ScoreEventsActivity {
     /**
      * Load the {@code symbols} reference table into an in-memory map.
      * Returns an empty map if the table is missing/empty — scorers + the
-     * Enrich helper are null-safe, so missing symbols just means the LLM
+     * SymbolFields helper are null-safe, so missing symbols just means the LLM
      * gets the ticker without company-name etc. (same as today).
      */
     private static Map<String, SymbolMetadata> loadSymbols(final Connection conn) {

@@ -6,18 +6,21 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 
 /**
- * Formatters that turn wire-format numbers (nanos / millis / raw
- * seconds) and UTC instants into strings a narrator can drop into prose
- * directly. The contract is: breakdown JSONs surfaced to the LLM should
- * use these strings instead of raw integer durations or bare UTC ISO
- * timestamps.
+ * Formatters and classifiers that prepare values for inclusion in the
+ * {@code breakdown} JSON each scorer writes. Wire-format quantities
+ * (nanoseconds, raw integers, UTC instants) are not safe to expose to
+ * the LLM directly — the model will copy them verbatim into prose
+ * ("20,044 seconds", "18,128,957 nanoseconds", "143000000000Z"). Every
+ * value the LLM might mention should pass through one of these helpers
+ * first.
  *
- * <p>Phase B of the narration plan (see
- * {@code docs/scoring-and-narration.md}). First-pass narrations exposed
- * that the model faithfully recites "20,044 seconds" or "18,128,957
- * nanoseconds" because that's what's in the breakdown — fix is upstream.
+ * <p>Renamed from {@code Humanize} on 2026-05-22; the previous name
+ * undersold the class's role (it now also classifies session phases and
+ * duration buckets, not just formats). The unifying purpose is
+ * "prepare a value for the breakdown JSON so the LLM can drop it into
+ * prose directly without arithmetic at inference time."
  */
-public final class Humanize {
+public final class BreakdownFmt {
 
     private static final ZoneId ET = ZoneId.of("America/New_York");
 
@@ -25,7 +28,7 @@ public final class Humanize {
     private static final DateTimeFormatter ET_TIME_FMT =
             DateTimeFormatter.ofPattern("HH:mm:ss.SSS").withZone(ET);
 
-    private Humanize() {}
+    private BreakdownFmt() {}
 
     // ─── duration ────────────────────────────────────────────────────────────
 
@@ -99,11 +102,6 @@ public final class Humanize {
         return Math.round(v * scale) / scale;
     }
 
-    /** Two-decimal shorthand — the common case for rates and percentages. */
-    public static double round2(final double v) {
-        return round(v, 2);
-    }
-
     /**
      * Format an integer with thousand separators when ≥ 1000. Used by
      * scorers to pre-format counts (orders, shares, fills) before they
@@ -123,5 +121,65 @@ public final class Humanize {
      */
     public static String formatCount(final long n) {
         return String.format("%,d", n);
+    }
+
+    // ─── session phase ───────────────────────────────────────────────────────
+
+    /** Length of the US-equity regular session in seconds (09:30 – 16:00 ET = 6.5 h). */
+    public static final long REGULAR_SESSION_SECONDS = 23_400L;
+
+    /**
+     * Classify a UTC instant into a US-equity session phase using the
+     * standard NMS clock in Eastern Time. Used by scorers + INTERPRET so
+     * the LLM never has to compare HH:mm strings against trading-day
+     * boundaries.
+     *
+     * <ul>
+     *   <li>{@code "pre_market"}    — 04:00 – 09:30 ET
+     *   <li>{@code "opening_5min"}  — 09:30 – 09:35 ET (high-attention window)
+     *   <li>{@code "early_session"} — 09:35 – 11:30 ET
+     *   <li>{@code "midday"}        — 11:30 – 14:00 ET
+     *   <li>{@code "late_session"}  — 14:00 – 15:55 ET
+     *   <li>{@code "closing_5min"}  — 15:55 – 16:00 ET (high-attention window)
+     *   <li>{@code "post_market"}   — 16:00 – 20:00 ET
+     *   <li>{@code "overnight"}     — outside the 04:00 – 20:00 ET extended window
+     * </ul>
+     */
+    public static String sessionPhase(final Instant utc) {
+        if (utc == null) return null;
+        ZonedDateTime et = ZonedDateTime.ofInstant(utc, ET);
+        int hh = et.getHour();
+        int mm = et.getMinute();
+        int minutes = hh * 60 + mm;
+        if (minutes < 4 * 60)         return "overnight";
+        if (minutes < 9 * 60 + 30)    return "pre_market";
+        if (minutes < 9 * 60 + 35)    return "opening_5min";
+        if (minutes < 11 * 60 + 30)   return "early_session";
+        if (minutes < 14 * 60)        return "midday";
+        if (minutes < 15 * 60 + 55)   return "late_session";
+        if (minutes < 16 * 60)        return "closing_5min";
+        if (minutes < 20 * 60)        return "post_market";
+        return "overnight";
+    }
+
+    /**
+     * Natural-English label for the session phase. The {@link #sessionPhase}
+     * value is a stable enum-string for code / verifier; this is the prose
+     * form the LLM can drop directly into a sentence.
+     */
+    public static String sessionPhaseLabel(final Instant utc) {
+        String phase = sessionPhase(utc);
+        if (phase == null) return null;
+        return switch (phase) {
+            case "overnight"     -> "outside regular trading hours";
+            case "pre_market"    -> "in pre-market trading";
+            case "opening_5min"  -> "in the opening minutes of regular trading";
+            case "early_session" -> "in the early session";
+            case "midday"        -> "around midday";
+            case "late_session"  -> "in the late session";
+            case "closing_5min"  -> "in the final minutes before the close";
+            case "post_market"   -> "in post-market trading";
+            default              -> phase;
+        };
     }
 }

@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.longexposure.scoring.EventScorer;
-import com.longexposure.scoring.Humanize;
+import com.longexposure.scoring.BreakdownFmt;
 import com.longexposure.scoring.ScoredEvent;
 import com.longexposure.scoring.ScoringContext;
 import org.slf4j.Logger;
@@ -107,13 +107,22 @@ public final class LargeTradeScorer implements EventScorer {
 
         ObjectMapper json = ctx.json();
         ObjectNode breakdown = json.createObjectNode();
-        breakdown.put("size_shares",          Humanize.formatCount(size));
+        breakdown.put("size_shares",          BreakdownFmt.formatCount(size));
         breakdown.put("price_dollars",        priceDollars);
-        breakdown.put("notional_dollars",     Humanize.round2(notionalDollars));
+        breakdown.put("notional_dollars",     BreakdownFmt.round(notionalDollars, 2));
         // trade_id and sale_condition_flags are intentionally NOT in the
         // breakdown — they're wire-format metadata that leaked into prose
         // as "trade ID 173670060632532234" / "flags 0". Still preserved in
         // sourceRefs below for joins back to the trades table.
+
+        // ─── derived fields (DETECT enrichment, 2026-05-22) ──────────────
+        // Pre-format the readable units the LLM tends to want — without
+        // these it would try to convert notional to millions / shares to
+        // thousands inline (a known arithmetic-failure mode).
+        breakdown.put("notional_million_dollars", BreakdownFmt.round(notionalDollars / 1_000_000.0, 2));
+        breakdown.put("size_thousand_shares",     BreakdownFmt.round(size / 1_000.0, 1));
+        breakdown.put("event_session_phase",      BreakdownFmt.sessionPhase(ts));
+        breakdown.put("event_phase_label",        BreakdownFmt.sessionPhaseLabel(ts));
 
         ArrayNode sourceRefs = json.createArrayNode();
         ObjectNode ref = json.createObjectNode();
@@ -123,7 +132,20 @@ public final class LargeTradeScorer implements EventScorer {
         ref.put("trade_id", tradeId);
         sourceRefs.add(ref);
 
-        com.longexposure.scoring.Enrich.symbol(breakdown, ctx, symbol);
+        com.longexposure.scoring.SymbolFields.apply(breakdown, ctx, symbol);
+
+        // Derived fields that depend on SymbolFields populating prev_close /
+        // round_lot. Done AFTER SymbolFields.apply so we can read what it
+        // wrote into the breakdown.
+        if (breakdown.has("prev_close_dollars") && breakdown.get("prev_close_dollars").asDouble() > 0) {
+            double prevClose = breakdown.get("prev_close_dollars").asDouble();
+            double pctVsPrevClose = (priceDollars - prevClose) / prevClose * 100.0;
+            breakdown.put("price_vs_prev_close_pct", BreakdownFmt.round(pctVsPrevClose, 2));
+        }
+        if (breakdown.has("round_lot") && breakdown.get("round_lot").asInt() > 0) {
+            int roundLot = breakdown.get("round_lot").asInt();
+            breakdown.put("implied_round_lots", size / roundLot);
+        }
 
         double score = Math.log10(notionalDollars);
 

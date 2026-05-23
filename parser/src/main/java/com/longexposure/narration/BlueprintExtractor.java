@@ -83,7 +83,7 @@ public final class BlueprintExtractor {
         // deterministically after the LLM call returns:
         //
         //   1. company_name — the canonical company display string for the
-        //      subject. Sourced from the breakdown (which Enrich already
+        //      subject. Sourced from the breakdown (which SymbolFields already
         //      normalized via CompanyNameNormalizer). Pass-through ensures
         //      the renderer sees ground truth.
         //

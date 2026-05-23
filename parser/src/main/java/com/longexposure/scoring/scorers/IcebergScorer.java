@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.longexposure.scoring.EventScorer;
-import com.longexposure.scoring.Humanize;
+import com.longexposure.scoring.BreakdownFmt;
 import com.longexposure.scoring.ScoredEvent;
 import com.longexposure.scoring.ScoringContext;
 import org.slf4j.Logger;
@@ -180,16 +180,32 @@ public final class IcebergScorer implements EventScorer {
         java.util.Arrays.sort(sizes);
         int medianSize = sizes[sizes.length / 2];
 
+        long durationNanos = last.tsNanos - first.tsNanos;
+        double durationSec = durationNanos / 1_000_000_000.0;
+        double priceDollars = first.priceRaw / 10_000.0;
+        double notionalDollars = totalShares * priceDollars;
+
         ObjectMapper json = ctx.json();
         ObjectNode breakdown = json.createObjectNode();
-        breakdown.put("fills",            Humanize.formatCount(run.size()));
-        breakdown.put("total_shares",     Humanize.formatCount(totalShares));
-        breakdown.put("price_dollars",    first.priceRaw / 10_000.0);
-        breakdown.put("median_fill_size", Humanize.formatCount(medianSize));
-        breakdown.put("size_cv",          cv);
-        breakdown.put("duration",         Humanize.durationNanos(last.tsNanos - first.tsNanos));
-        breakdown.put("start_et",         Humanize.toEtTime(first.ts));
-        breakdown.put("end_et",           Humanize.toEtTime(last.ts));
+        breakdown.put("fills",            BreakdownFmt.formatCount(run.size()));
+        breakdown.put("total_shares",     BreakdownFmt.formatCount(totalShares));
+        breakdown.put("price_dollars",    priceDollars);
+        breakdown.put("median_fill_size", BreakdownFmt.formatCount(medianSize));
+        breakdown.put("size_cv",          BreakdownFmt.round(cv, 3));
+        breakdown.put("duration",         BreakdownFmt.durationNanos(durationNanos));
+        breakdown.put("start_et",         BreakdownFmt.toEtTime(first.ts));
+        breakdown.put("end_et",           BreakdownFmt.toEtTime(last.ts));
+
+        // ─── derived fields (DETECT enrichment, 2026-05-22) ──────────────
+        breakdown.put("duration_seconds",       BreakdownFmt.round(durationSec, 1));
+        breakdown.put("notional_dollars",       BreakdownFmt.round(notionalDollars, 2));
+        breakdown.put("notional_per_fill",      BreakdownFmt.round(notionalDollars / run.size(), 2));
+        breakdown.put("inter_fill_seconds_avg", BreakdownFmt.round(durationSec / run.size(), 2));
+        breakdown.put("fill_size_uniformity",
+                cv < 0.05 ? "very_uniform" :
+                cv < 0.20 ? "uniform" : "mixed");
+        breakdown.put("event_session_phase",    BreakdownFmt.sessionPhase(first.ts));
+        breakdown.put("event_phase_label",      BreakdownFmt.sessionPhaseLabel(first.ts));
 
         ArrayNode sourceRefs = json.createArrayNode();
         int refsToEmit = Math.min(run.size(), MAX_SOURCE_REFS);
@@ -209,7 +225,7 @@ public final class IcebergScorer implements EventScorer {
             sourceRefs.add(trunc);
         }
 
-        com.longexposure.scoring.Enrich.symbol(breakdown, ctx, first.symbol);
+        com.longexposure.scoring.SymbolFields.apply(breakdown, ctx, first.symbol);
 
         double score = Math.log10(Math.max(totalShares, 1)) * run.size();
 

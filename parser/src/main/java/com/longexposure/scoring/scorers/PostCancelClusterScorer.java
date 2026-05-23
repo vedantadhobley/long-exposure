@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.longexposure.scoring.EventScorer;
-import com.longexposure.scoring.Humanize;
+import com.longexposure.scoring.BreakdownFmt;
 import com.longexposure.scoring.ScoredEvent;
 import com.longexposure.scoring.ScoringContext;
 import com.longexposure.scoring.Side;
@@ -197,15 +197,31 @@ public final class PostCancelClusterScorer implements EventScorer {
         java.util.Arrays.sort(lifetimes);
         double medianLifetimeMs = lifetimes[lifetimes.length / 2] / 1_000_000.0;
 
+        long durationNanos = last.addNanos - first.addNanos;
+        double durationSec = durationNanos / 1_000_000_000.0;
+
         ObjectMapper json = ctx.json();
         ObjectNode breakdown = json.createObjectNode();
-        breakdown.put("orders",             Humanize.formatCount(cluster.size()));
-        breakdown.put("total_shares",       Humanize.formatCount(totalShares));
-        breakdown.put("median_order_lifetime", Humanize.durationMs(medianLifetimeMs));
+        breakdown.put("orders",             BreakdownFmt.formatCount(cluster.size()));
+        breakdown.put("total_shares",       BreakdownFmt.formatCount(totalShares));
+        breakdown.put("median_order_lifetime", BreakdownFmt.durationMs(medianLifetimeMs));
         breakdown.put("side",               Side.label(first.side));
-        breakdown.put("duration",           Humanize.durationNanos(last.addNanos - first.addNanos));
-        breakdown.put("start_et",           Humanize.toEtTime(first.addTs));
-        breakdown.put("end_et",             Humanize.toEtTime(last.addTs));
+        breakdown.put("duration",           BreakdownFmt.durationNanos(durationNanos));
+        breakdown.put("start_et",           BreakdownFmt.toEtTime(first.addTs));
+        breakdown.put("end_et",             BreakdownFmt.toEtTime(last.addTs));
+
+        // ─── derived fields (DETECT enrichment, 2026-05-22) ──────────────
+        if (durationSec > 0) {
+            breakdown.put("orders_per_second", BreakdownFmt.round(cluster.size() / durationSec, 1));
+        }
+        breakdown.put("shares_per_order_avg", BreakdownFmt.round(totalShares / (double) cluster.size(), 1));
+        breakdown.put("median_lifetime_ms",   BreakdownFmt.round(medianLifetimeMs, 2));
+        if (durationNanos > 0) {
+            breakdown.put("median_lifetime_pct_of_duration",
+                          BreakdownFmt.round(medianLifetimeMs * 1_000_000.0 / durationNanos * 100.0, 1));
+        }
+        breakdown.put("event_session_phase",  BreakdownFmt.sessionPhase(first.addTs));
+        breakdown.put("event_phase_label",    BreakdownFmt.sessionPhaseLabel(first.addTs));
 
         ArrayNode sourceRefs = json.createArrayNode();
         int refsToEmit = Math.min(cluster.size(), MAX_SOURCE_REFS);
@@ -224,7 +240,7 @@ public final class PostCancelClusterScorer implements EventScorer {
             sourceRefs.add(trunc);
         }
 
-        com.longexposure.scoring.Enrich.symbol(breakdown, ctx, first.symbol);
+        com.longexposure.scoring.SymbolFields.apply(breakdown, ctx, first.symbol);
 
         double score = Math.log10(Math.max(totalShares, 1)) * cluster.size();
 
