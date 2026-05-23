@@ -1,5 +1,6 @@
 package com.longexposure.temporal.workflows;
 
+import com.longexposure.temporal.activities.CompressChunksActivity;
 import com.longexposure.temporal.activities.NotATradingDay;
 import com.longexposure.temporal.activities.PipelineRunRecorderActivity;
 import com.longexposure.temporal.activities.RecordValidationActivity;
@@ -30,8 +31,11 @@ import java.time.ZonedDateTime;
  * SynthesizeDay, Cleanup). The orchestrator itself only retains direct
  * activity calls for cross-cutting metadata that threads through the run —
  * {@link PipelineRunRecorderActivity}'s idempotency check + start/complete
- * bookkeeping. Everything else dispatches to child workflows so the
- * cron path and the ad-hoc developer-invoked path share the same code.
+ * bookkeeping — and the post-pipeline {@link CompressChunksActivity} that
+ * compresses the day's chunks in-place so disk stays ~13 GB/day rather
+ * than ~230 GB/day uncompressed. Everything else dispatches to child
+ * workflows so the cron path and the ad-hoc developer-invoked path
+ * share the same code.
  *
  * <p>Concurrency: Parse and Validate run in parallel (validators read
  * raw files from disk, not the DB, so they don't depend on parse).
@@ -64,6 +68,23 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
             ActivityOptions.newBuilder()
                     .setStartToCloseTimeout(Duration.ofSeconds(30))
                     .setRetryOptions(transientRetry(3))
+                    .build());
+
+    /**
+     * Compress newly-ingested chunks at the end of each pipeline run.
+     * Sized generously: empirically a full day's worth of chunks
+     * (39 chunks, including the 75 GB order_lifecycle) takes ~26 min
+     * to compress; 60 min start-to-close covers tail latency. Heartbeat
+     * timeout 5 min — the longest single chunk (order_lifecycle) takes
+     * ~7 min, but the implementation heartbeats between each
+     * compress_chunk call.
+     */
+    private final CompressChunksActivity compressor = Workflow.newActivityStub(
+            CompressChunksActivity.class,
+            ActivityOptions.newBuilder()
+                    .setStartToCloseTimeout(Duration.ofMinutes(60))
+                    .setHeartbeatTimeout(Duration.ofMinutes(10))
+                    .setRetryOptions(transientRetry(2))
                     .build());
 
     // ─── Child workflow stubs ────────────────────────────────────────────────
@@ -206,8 +227,18 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
                 LOG.warn("synthesize child failed (pipeline continues)  date={} err={}",
                         date, cwf.getMessage());
             }
+            // Compress the day's chunks now so disk stays lean.
+            // Without this, ~230 GB of uncompressed data sits on disk
+            // until the schema.sql compression policy's next daily run.
+            try {
+                long compressed = compressor.compress(date);
+                LOG.info("compressed chunks  date={} count={}", date, compressed);
+            } catch (ActivityFailure af) {
+                LOG.warn("compress chunks failed (pipeline continues; policy will compress later)  date={} err={}",
+                        date, af.getMessage());
+            }
         } else {
-            LOG.info("skipping score + narrate + interpret + synthesize — parse failed  date={}", date);
+            LOG.info("skipping score + narrate + interpret + synthesize + compress — parse failed  date={}", date);
         }
 
         // Phase 4: Cleanup + retention. Files deleted only on success;

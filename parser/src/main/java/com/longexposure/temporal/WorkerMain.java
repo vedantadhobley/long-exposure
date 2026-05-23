@@ -1,6 +1,7 @@
 package com.longexposure.temporal;
 
 import com.longexposure.temporal.activities.CleanupFilesActivityImpl;
+import com.longexposure.temporal.activities.CompressChunksActivityImpl;
 import com.longexposure.temporal.activities.DeepTopsValidatorActivityImpl;
 import com.longexposure.temporal.activities.DownloadFileActivityImpl;
 import com.longexposure.temporal.activities.DplsDeepValidatorActivityImpl;
@@ -123,6 +124,7 @@ public final class WorkerMain {
                 new SelectTopEventsActivityImpl(),
                 new ListSelectedEventsActivityImpl(),
                 new CleanupFilesActivityImpl(),
+                new CompressChunksActivityImpl(),
                 new RetentionSweepActivityImpl(),
                 new PipelineRunRecorderActivityImpl(),
                 new RefreshSymbolMetadataActivityImpl());

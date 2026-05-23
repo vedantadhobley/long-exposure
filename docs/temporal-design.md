@@ -30,7 +30,7 @@ Twelve workflows registered on task queue `long-exposure-daily-pipeline`. The or
 
 **Composition model.**
 
-`DailyPipelineWorkflow` is *purely* orchestration — its `run()` body reads top-to-bottom as phase names (Download → Parse + Validate in parallel → Score → Narrate → Interpret → SynthesizeDay → Cleanup) with no embedded activity wiring. Each phase is owned by its child workflow, called via `Workflow.newChildWorkflowStub()`. This way:
+`DailyPipelineWorkflow` is *purely* orchestration — its `run()` body reads top-to-bottom as phase names (Download → Parse + Validate in parallel → Score → Narrate → Interpret → SynthesizeDay → CompressChunks → Cleanup) with no embedded activity wiring. Each phase is owned by its child workflow (or, for `CompressChunks`, a direct activity), called via `Workflow.newChildWorkflowStub()` / `newActivityStub()`. This way:
 
 1. **No duplicated wiring** between the cron-driven path and ad-hoc developer-invoked paths. `ScoreWorkflow` is one workflow with one implementation; both paths run the identical code.
 2. **Each phase is independently invokable** for replay, backfill, or iterative development.
@@ -117,7 +117,8 @@ flowchart TD
     Select --> Narrate[NarrateEvents<br/>two-pass extract+render+verify<br/>→ narratives]
     Narrate --> Interpret[InterpretEvents<br/>per-event surrounding-context LLM<br/>→ interpretations]
     Interpret --> Synthesize[SynthesizeDay<br/>one LLM call across day's events<br/>→ daily_synthesis]
-    Synthesize --> CleanupGate
+    Synthesize --> Compress[CompressChunks<br/>compress today's chunks now<br/>~13 GB on disk per day vs ~230 GB uncompressed]
+    Compress --> CleanupGate
 
     CleanupGate{runRetentionSweep<br/>AND status=ok?}
     CleanupGate -->|yes| Cleanup[CleanupFiles<br/>delete 3 .pcap.gz]
@@ -226,7 +227,7 @@ docker exec long-exposure-dev-temporal temporal workflow start \
 
 ## Activities
 
-Eighteen activity classes total, split across two task queues:
+Nineteen activity classes total, split across two task queues:
 
 - **Main queue** (`long-exposure-daily-pipeline`): every non-LLM activity. Default Temporal concurrency (200 slots) since none of these saturate a shared bottleneck.
 - **Narration queue** (`NARRATION_TASK_QUEUE`): the three LLM-bound activities (`NarrateEventActivity`, `InterpretEventActivity`, `SynthesizeDayActivity`). Worker configured with `setMaxConcurrentActivityExecutionSize(2)` to cap LLM-call concurrency at the GPU's safe parallelism on `llama-large.joi`. The JVM-wide `Semaphore(2, fair)` inside `LlamaClient` is the second-line defense.
@@ -421,6 +422,30 @@ Ad-hoc runs (`runRetentionSweep=false`) preserve files for re-run / forensics.
 
 **Retry.** None — single attempt.
 
+### `CompressChunksActivity`
+
+**What.** Compresses every uncompressed TimescaleDB chunk whose time
+range overlaps the trading date, across all compression-enabled
+hypertables. Calls `compress_chunk()` per chunk with a Temporal
+heartbeat between each (the largest single chunk, the 75 GB
+`order_lifecycle` chunk, takes ~7 min on its own). Idempotent — chunks
+already compressed are not in the candidate set.
+
+**Why this exists alongside the `add_compression_policy(..., INTERVAL '1 day')`
+configured in `schema.sql`**: the policy runs on TimescaleDB's internal
+job scheduler (default daily), so during a multi-day backfill or
+intra-day re-run, a day's ~230 GB of uncompressed data would sit on
+disk until the next scheduled policy run. The activity compresses
+immediately at the end of `DailyPipelineWorkflow` so steady-state disk
+use stays ~13 GB/day from minute one. The schema policy stays as a
+steady-state safety net for any chunks the activity missed (e.g., on
+an activity failure).
+
+**Empirical baseline**: a full day's chunks (39 chunks on 2026-05-08,
+peak ~75 GB on order_lifecycle) compresses in ~26 min single-threaded.
+
+**Timeouts.** start-to-close 60 min, heartbeat 10 min. transient × 2.
+
 ### `RetentionSweepActivity`
 
 **What.** Drops chunks older than `cutoffDate - retainDays` (30 days) from
@@ -586,6 +611,7 @@ pre-cleans normally before re-writing.
 | `InterpretEvent` (LLM) | 5min | 1min | transient × 2 |
 | `SynthesizeDay` (LLM) | 5min | 1min | transient × 2 |
 | `CleanupFiles` | 5min | — | none (best-effort) |
+| `CompressChunks` | 60min | 10min | transient × 2 |
 | `RetentionSweep` | 15min | — | transient × 3 |
 | `PipelineRunRecorder` | 30s | — | default × 3 |
 
