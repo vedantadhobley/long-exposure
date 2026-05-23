@@ -593,3 +593,76 @@ CREATE TABLE IF NOT EXISTS symbols (
 
 CREATE INDEX IF NOT EXISTS symbols_listing_exchange_idx ON symbols (listing_exchange);
 CREATE INDEX IF NOT EXISTS symbols_is_etf_idx           ON symbols (is_etf);
+
+-- ─── Interpretations (INTERPRET stage) ───────────────────────────────────────
+-- Per-event interpretive narration. Sits downstream of DESCRIBE (the
+-- narratives table) and provides sequential / causal context that the
+-- per-event description cannot produce on its own — by reading the
+-- breakdown PLUS a pre-aggregated summary of the surrounding ±60-sec
+-- trade window.
+--
+-- Separate from narratives because:
+--   1. Independent prompt versioning (re-running INTERPRET shouldn't
+--      invalidate the DESCRIBE cache).
+--   2. Independent grounding contract (numbers ⊆ breakdown ∪ window
+--      summary, vs DESCRIBE's numbers ⊆ blueprint ∪ breakdown).
+--   3. Independent verifier_passed flag (INTERPRET can fail while
+--      DESCRIBE passes).
+--
+-- Keyed by interpretation_hash = SHA256 of
+--   scorer_id + breakdown + pre_window_summary + post_window_summary
+--   + INTERPRET_PROMPT_VERSION + MODEL_ID
+-- Re-running with identical inputs hits the cache; changing prompt
+-- version or model invalidates.
+
+CREATE TABLE IF NOT EXISTS interpretations (
+    interpretation_hash    BYTEA            PRIMARY KEY,
+    created_at             TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
+    trading_date           DATE             NOT NULL,
+    selected_id            BIGINT           NOT NULL,
+    event_type             TEXT             NOT NULL,
+    symbol                 TEXT,
+    event_ts               TIMESTAMPTZ      NOT NULL,
+    event_ts_end           TIMESTAMPTZ,
+    score                  DOUBLE PRECISION NOT NULL,
+    interpretation         TEXT             NOT NULL,
+    pre_window_summary     JSONB            NOT NULL,
+    post_window_summary    JSONB            NOT NULL,
+    model_id               TEXT             NOT NULL,
+    verifier_passed        BOOLEAN          NOT NULL,
+    verifier_notes         JSONB
+);
+
+CREATE INDEX IF NOT EXISTS interpretations_trading_date_idx ON interpretations (trading_date DESC);
+CREATE INDEX IF NOT EXISTS interpretations_selected_id_idx  ON interpretations (selected_id);
+CREATE INDEX IF NOT EXISTS interpretations_symbol_idx       ON interpretations (symbol);
+
+-- ─── Daily synthesis (SYNTHESIZE stage) ──────────────────────────────────────
+-- One row per trading date. Records the day-level themes paragraph produced
+-- by SynthesizeDayActivity — a single LLM call that reads ALL of the day's
+-- per-event narrations + interpretations and identifies cross-event patterns
+-- no per-event view can surface (TQQQ-bursts-at-open, coordinated 3x ETF
+-- activity, sector clustering, time-of-day concentration).
+--
+-- Grounding is structurally looser than DESCRIBE / INTERPRET: SYNTHESIZE is
+-- interpretive by nature, claiming "today saw heavy halt activity in small
+-- caps" requires summarizing across events rather than anchoring every
+-- token to a single breakdown field. The verifier still enforces:
+--   1. Tickers in synthesis prose must exist in the day's narrations
+--      (no fabrication of symbols not seen today).
+--   2. No claims about external news / events we don't have.
+-- Primary key by trading_date — re-running replaces.
+
+CREATE TABLE IF NOT EXISTS daily_synthesis (
+    trading_date               DATE        PRIMARY KEY,
+    synthesis_text             TEXT        NOT NULL,
+    events_considered          INTEGER     NOT NULL,
+    narrations_considered      INTEGER     NOT NULL,
+    interpretations_considered INTEGER     NOT NULL,
+    day_aggregates             JSONB       NOT NULL,    -- per-scorer counts, top symbols, etc.
+    model_id                   TEXT        NOT NULL,
+    prompt_version             TEXT        NOT NULL,
+    verifier_passed            BOOLEAN     NOT NULL,
+    verifier_notes             JSONB,
+    created_at                 TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

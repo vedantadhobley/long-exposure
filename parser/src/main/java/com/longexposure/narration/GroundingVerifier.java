@@ -271,7 +271,7 @@ public final class GroundingVerifier {
     }
 
     /** Find every number-token in the haystack and canonicalize each. */
-    private static Set<String> canonicalNumbersIn(final String haystack) {
+    static Set<String> canonicalNumbersIn(final String haystack) {
         Set<String> out = new HashSet<>();
         Matcher m = NUMBER_RE.matcher(haystack);
         while (m.find()) {
@@ -289,7 +289,7 @@ public final class GroundingVerifier {
      * <p>"431.0", "431.00", "431.000" all → "431".
      * "13.60" → "13.6". "76,120" → "76120".
      */
-    private static String canonicalize(final String token) {
+    static String canonicalize(final String token) {
         String cleaned = token.replace(",", "").replace("_", "");
         try {
             BigDecimal bd = new BigDecimal(cleaned).stripTrailingZeros();
@@ -310,10 +310,20 @@ public final class GroundingVerifier {
         return sb.toString();
     }
 
-    private static void appendAllValues(final JsonNode node, final StringBuilder sb) {
+    public static void appendAllValues(final JsonNode node, final StringBuilder sb) {
         if (node == null || node.isNull()) return;
         if (node.isValueNode()) {
-            sb.append(node.asText()).append(' ');
+            // Numeric JSON nodes need special handling: Jackson's asText()
+            // delegates to Double.toString() for floating-point values,
+            // which produces scientific notation for magnitudes ≥ 1e7
+            // ("10694140.05" → "1.069414005E7"). NUMBER_RE then misses
+            // the value and the verifier falsely rejects matching prose.
+            // Use BigDecimal.toPlainString() to force the readable form.
+            if (node.isNumber()) {
+                sb.append(node.decimalValue().toPlainString()).append(' ');
+            } else {
+                sb.append(node.asText()).append(' ');
+            }
             return;
         }
         if (node.isArray()) {

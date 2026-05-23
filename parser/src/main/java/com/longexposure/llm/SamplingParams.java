@@ -53,6 +53,25 @@ public record SamplingParams(
     public static final SamplingParams RENDER = new SamplingParams(
             0.7, 0.8, 20, 0.0, 1.5, 1.0);
 
+    /**
+     * Qwen3.5 model-card "Instruct mode for reasoning tasks" — verbatim.
+     * Used for the SYNTHESIZE stage (daily themes paragraph across all
+     * narrations + interpretations). The task is genuinely reasoning-
+     * shaped: the model has to find cross-event patterns spanning ~164
+     * narration paragraphs, which benefits from higher sampling variety
+     * + a strong presence penalty against narrow repetition.
+     *
+     * <p>Knob differences from RENDER:
+     * <ul>
+     *   <li>temperature 1.0 (vs 0.7) — broader exploration of phrasings
+     *   <li>top_p 1.0 (vs 0.8) — no nucleus cutoff
+     *   <li>top_k 40 (vs 20) — wider per-step candidate pool
+     *   <li>presence_penalty 2.0 (vs 1.5) — stronger anti-narrow-repetition
+     * </ul>
+     */
+    public static final SamplingParams SYNTHESIZE = new SamplingParams(
+            1.0, 1.0, 40, 0.0, 2.0, 1.0);
+
     public static SamplingParams of(double t, double tp, int tk, double mp,
                                     double pp, double rp) {
         return new SamplingParams(t, tp, tk, mp, pp, rp);

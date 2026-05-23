@@ -10,7 +10,9 @@ import com.longexposure.temporal.activities.ParseAndWriteDplsActivityImpl;
 import com.longexposure.temporal.activities.PipelineRunRecorderActivityImpl;
 import com.longexposure.temporal.activities.EnrichWithCoOccurrenceActivityImpl;
 import com.longexposure.temporal.activities.ListSelectedEventsActivityImpl;
+import com.longexposure.temporal.activities.InterpretEventActivityImpl;
 import com.longexposure.temporal.activities.NarrateEventActivityImpl;
+import com.longexposure.temporal.activities.SynthesizeDayActivityImpl;
 import com.longexposure.temporal.activities.RecordValidationActivityImpl;
 import com.longexposure.temporal.activities.RefreshSymbolMetadataActivityImpl;
 import com.longexposure.temporal.activities.ResolveUrlActivityImpl;
@@ -23,7 +25,9 @@ import com.longexposure.temporal.workflows.DailyPipelineWorkflowImpl;
 import com.longexposure.temporal.workflows.DailyPipelineWorkflowInput;
 import com.longexposure.temporal.workflows.DownloadWorkflowImpl;
 import com.longexposure.temporal.workflows.MaterializeWorkflowImpl;
+import com.longexposure.temporal.workflows.InterpretWorkflowImpl;
 import com.longexposure.temporal.workflows.NarrateWorkflowImpl;
+import com.longexposure.temporal.workflows.SynthesizeDayWorkflowImpl;
 import com.longexposure.temporal.workflows.ParseWorkflowImpl;
 import com.longexposure.temporal.workflows.RefreshSymbolsWorkflow;
 import com.longexposure.temporal.workflows.RefreshSymbolsWorkflowImpl;
@@ -101,6 +105,8 @@ public final class WorkerMain {
                 ScoreWorkflowImpl.class,
                 SelectWorkflowImpl.class,
                 NarrateWorkflowImpl.class,
+                InterpretWorkflowImpl.class,
+                SynthesizeDayWorkflowImpl.class,
                 CleanupWorkflowImpl.class,
                 RefreshSymbolsWorkflowImpl.class);
         worker.registerActivitiesImplementations(
@@ -134,7 +140,10 @@ public final class WorkerMain {
                 io.temporal.worker.WorkerOptions.newBuilder()
                         .setMaxConcurrentActivityExecutionSize(2)
                         .build());
-        narrationWorker.registerActivitiesImplementations(new NarrateEventActivityImpl());
+        narrationWorker.registerActivitiesImplementations(
+                new NarrateEventActivityImpl(),
+                new InterpretEventActivityImpl(),
+                new SynthesizeDayActivityImpl());
 
         factory.start();
         LOG.info("workers started  main_queue={} narration_queue={} narration_concurrency=2",
