@@ -2,7 +2,7 @@
 
 Project scratchpad, agent + human editable. Cross-references @plan.md (sprint-by-sprint history), @decisions.md (architectural rationale), and @scoring-and-narration.md (the scoring + narration design spec).
 
-Last refresh: 2026-05-22.
+Last refresh: 2026-05-25.
 
 > **🚀 Active sprint: see [`launch-sprint.md`](launch-sprint.md)** — 10-day plan, 2026-05-21 through 2026-05-30, ending in Monday 2026-06-01 publication. Whitepaper writing happens Sunday in parallel; IEX day 1 is Tuesday 2026-06-02. This `todo.md` continues to track the rolling open items + post-launch backlog; `launch-sprint.md` is the explicit work plan with daily milestones and acceptance criteria.
 
@@ -43,9 +43,28 @@ The seven scorers — halt, large_trade, sweep, post_cancel_cluster, layering, i
 6. ✅ **`Humanize` → `BreakdownFmt` + `Enrich` → `SymbolFields` rename pass** (done 2026-05-22) — class names now reflect actual responsibilities; `round2` deleted in favor of explicit `round(v, 2)`.
 7. ✅ **INTERPRET production wiring** (done 2026-05-22) — `InterpretEventActivity` + `InterpretWorkflow` + `InterpretationVerifier` + `TradeWindow` helper + `interpretations` table. v5 prompt at **98.78% verifier-passed** on 2026-05-08 (5 iterations chasing rounding, unit-conversion, ticker-presence, approximation patterns). Full design in [`interpretation-design.md`](interpretation-design.md).
 8. ✅ **SYNTHESIZE production wiring** (done 2026-05-22) — `SynthesizeDayActivity` + `SynthesizeDayWorkflow` + `SynthesisVerifier` + `daily_synthesis` table + `SamplingParams.SYNTHESIZE` (Qwen reasoning preset). End-to-end on 2026-05-08: paragraph published, ticker check clean, 1 magnitude-approximation warning.
-9. **Small-batch backfill** — pick 3-5 recent trading days, run the full pipeline on each. Validates cross-day robustness before frontend work. ~85 min wall-clock per day (~40 min LLM-bound, serialized).
-10. **Frontend integration** in `vedanta-systems` — wire `/api/long-exposure/synthesis/:date` + `/api/long-exposure/event/:id` (with interpretation field) into the React browser component.
-11. **Full 30-day backfill** — post-launch. ~20 hours of LLM-bound compute, run overnight across 2-3 nights. Unlocks SUMMARIZE + inter-day scorers.
+9. ✅ **Small-batch backfill (week 05-18→05-22)** — done 2026-05-23/24. Cross-day robustness confirmed: DESCRIBE 98-100%, INTERPRET 97-100%, zero integrity gaps, 5 syntheses. Audit in conversation; failure-class understanding corrected (see Post-backfill polish below).
+10. ✅ **Week-aligned 2-week retention** — done 2026-05-25. `RetentionSweepActivity.weekBoundary()` + unit test; closed the `order_lifecycle`/`scored_events`/`selected_events` gaps. See `decisions.md` 2026-05-25.
+11. 🔄 **2-week backfill: prior week (05-11→05-15)** — running 2026-05-25 (serial, ~12 h) to reach the 2-full-week target. Replaces the 30-day backfill (see `decisions.md` 2026-05-25).
+
+### Inter-day work — the current focus (Days 5-6, enabled by the 2-week data)
+
+The retention reframe split "inter-day" into two tracks with different data needs (1 week is enough for the LLM rollup; baselines want 2+):
+
+12. **AGGREGATE — weekly themes / editorial column** (list item #6). One LLM call reading the week's daily syntheses → a "week of …" rollup. Fully supported on 1 week already (5 syntheses in hand). Tiny prompt (~1.2K tokens). New `SynthesizeWeekActivity`/`Workflow` + `AggregateVerifier`. **Fix dotted-ticker tokenization here AND in `SynthesisVerifier` together** (see Post-backfill polish — the BRK.B false-positive; AGGREGATE's verifier will mirror the same ticker check, so share the fix).
+13. **Inter-day scorer plumbing** (`VolumeDeviationScorer`) — build + validate the mechanism against the 2-week trailing baseline (the `daily_volume_by_symbol` cagg + a `BaselineProvider`). "Nx the 2-week median." Robust-enough on 2 weeks; deepens if retention later extends to 4.
+
+### Frontend — the launch critical path (Days 7-8, NOT started)
+
+14. **API + browser wiring** in `vedanta-systems` — routes for synthesis / interpretation / drill-down; `long-exposure-browser` consuming them. **Must pick latest-per-`selected_id`** (the `narratives`/`interpretations` tables carry rows from every prompt-version iteration — 2,560 narrative rows across 6 days; the SYNTHESIZE loader's `DISTINCT ON` is the pattern to mirror).
+15. **The three wow items** (agreed 2026-05-25): **#1** intraday price/volume chart with event markers (the "long exposure photograph" — highest wow); **#2** visible-grounding badge ("every figure traces to IEX data" → expandable breakdown — the verifier is the moat, show it); **#4** recursive drill from a narration to its raw atomic events. If the frontend overruns, #1 and #2 are must-keep; #4 is the first to drop.
+16. **Prod bring-up + dev→prod copy** — copy only the narrative-layer tables (narratives/interpretations/daily_synthesis/selected_events/scored_events/symbols/pipeline_runs/validation_runs — kilobytes, no re-parse, preserves the audited prose). Wire tables stay in dev / accumulate in prod via cron. Procedure → `operations.md`.
+
+### Post-launch
+
+17. **Extend retention to 4 weeks** if deeper baselines wanted (one-line `RETENTION_WEEKS` change) — and only *then* revisit the cross-node stage-pipelined backfill (considered + deferred 2026-05-25; see `decisions.md` and the parallelization audit below — not worth the orchestration complexity at 2-week scope).
+18. **Monthly AGGREGATE** (reads multiple weekly rollups) — needs ≥2 weekly rollups, i.e. ≥2 weeks of data, which we'll have.
+19. **SUMMARIZE stage + the rest of the inter-day scorers** (`TimeInBookDriftScorer`).
 
 ### Prompt-level limitations (queued for v5)
 
@@ -429,7 +448,7 @@ End-to-end walkthrough of pipeline stages — what's parallel, what could be, wh
 
 - [ ] **Parallelize the 7 scorers in `ScoreEventsActivity`.** **Trigger: before 30-day backfill or when dev iteration cost gets painful.** Sequential scoring of 7 scorers takes ~13 min on 2026-05-08 data, dominated by 3 heavies (PostCancel ~3:44, Layering ~3:27, LiquidityWithdrawal ~3:50; everything else <10 s combined). Running them in parallel would bound total at the slowest individual scorer ≈ 4 min — **saves ~9 min per scoring run**. Implementation: split `ScoreEventsActivity` into N activities (likely one per scorer or per scorer-group), fire from `ScoreWorkflowImpl` via `Async.function()`. Each parallel activity needs its own JDBC connection + `work_mem` setting + COPY buffer. **Risk**: PostCancel + Layering both read `order_lifecycle`, running them simultaneously could re-introduce the spill-to-disk problem we fixed via the lifecycle table — need to verify under load. Effort: ~3 hours of careful work.
 
-- [ ] **Day-level parallelism for the 30-day backfill.** **Trigger: only when actually running the backfill.** Each trading day's pipeline (parse → score → narrate) is independent. Sequential: 30 days × ~30 min = ~15 hours. Running 3-5 days concurrently could bring that down to ~5-6 hours. **Risks**: (1) Postgres mem pressure — running 5 days' scoring + materializing in parallel could OOM the host; need throttle (probably 3 max). (2) The narration task queue's worker cap is `2` global across all days, so concurrent days' narrations still serialize across the GPU cap. Concurrency is most effective on the parse + score + materialize stages, less on narration. Implementation: parent workflow that fires N `DailyPipelineWorkflow` child workflows in parallel with a configurable concurrency window (e.g., 3 at a time). Effort: 1-2 days of work.
+- [ ] **Day-level / cross-node stage-pipelined backfill.** **DEFERRED 2026-05-25 — see `decisions.md` "Cross-node stage-pipelined backfill: considered, deferred".** The idea: overlap the two disjoint resource pools — run day N+1's luv-side stages (download/parse/score/materialize/compress) while day N's LLM stages run on joi — so the backfill isn't gated by the sum of both. Real but bounded: the LLM stages of different days can never overlap (joi's 2-slot cap + one-LLM-workflow rule), so total LLM time (~50 min/day) is an irreducible floor; pipelining only hides the luv-side time behind it (~12 h → ~5-6 h for a 5-day run). **Only ever useful for backfill, never the nightly cron.** Now that retention is capped at 2 weeks the absolute saving is small and one-time, so it doesn't justify the orchestration complexity (cross-day LLM-phase mutex + mid-pipeline failure handling) this close to launch. Revisit only if retention extends to 4+ weeks or we start frequent re-backfills. Implementation if revived: parent workflow firing `DailyPipelineWorkflow` children with a configurable concurrency window + a shared LLM-phase lock. Effort: 1-2 days.
 
 ### Considered — rejected for now
 

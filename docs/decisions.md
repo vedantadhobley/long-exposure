@@ -6,6 +6,35 @@ Append-only record of architectural and operational decisions, ordered by date. 
 
 ---
 
+## 2026-05-25 — Retention: rolling 2 full weeks, week-aligned (supersedes 30-day); backfill scoped to 2 weeks
+
+**Context.** The original plan called for a 30-(trading-)day backfill + a flat 30-calendar-day `drop_chunks` retention. Two realizations changed this:
+
+1. **30 trading days ≈ 6 weeks** (one calendar month ≈ 22 trading days). At ~13 GB/trading-day compressed that's ~390 GB of heavy wire substrate, plus ~3 days of mostly-serial LLM-bound compute to produce. That's a lot of disk and joi-time for a launch where the value is the *narrative archive*, not deep re-scoreability.
+2. **The narrative archive and the wire substrate have completely different lifetimes.** `narratives` / `interpretations` / `daily_synthesis` are kilobytes/day and are the product — kept indefinitely. The wire hypertables + `order_lifecycle` + `scored_events` / `selected_events` are the heavy *re-score substrate*; dropping them only costs the ability to re-score days older than the window, never the visible archive (which grows one day at a time, forever).
+
+**Decided.**
+
+- **Retention = rolling 2 *full* weeks, week-aligned.** Keep the current (possibly partial) week plus 2 completed weeks; the 2-weeks-ago week drops only when the current week closes, so we never dip below 2 complete weeks. Boundary = `Monday(cutoff) − retainWeeks` (`RETENTION_WEEKS = 2`). Implemented in `RetentionSweepActivityImpl.weekBoundary()` (pure, unit-tested) shipped 2026-05-25.
+- **Scope the backfill to 2 weeks, not 30 days.** We already had one week (05-18→05-22); backfilled one prior week (05-11→05-15) to reach the 2-week target. ~12 h serial, vs ~3 days for the 6-week version.
+- **Closed two retention gaps in the same change:** `order_lifecycle` (a large derived hypertable that was never being cleaned) now chunk-drops; `scored_events`/`selected_events` DELETE by `trading_date`. `narratives`/`interpretations`/`daily_synthesis`/`symbols`/`pipeline_runs`/`validation_runs` are kept indefinitely.
+
+**Why week-aligned and not a flat day count.** A flat "last 30 days" boundary is unaligned to the weekly AGGREGATE rollup and would mid-week leave you with a ragged 1.x-week trailing baseline. Week-aligned dropping guarantees the inter-day scorers and the weekly AGGREGATE always see whole weeks, and the policy reads naturally ("we keep 2 full weeks").
+
+**What this enables / costs.** Enough trailing baseline for the inter-day scorers ("Nx the median") to be meaningful, plus a 2nd weekly rollup for a future monthly AGGREGATE — at ~130 GB floor / ~195 GB peak instead of ~390 GB. Cost: can't re-score a day once it ages past ~2 weeks (its wire rows are gone). Accepted; the policy `retainWeeks` knob extends to 4 weeks trivially if we later want deeper baselines.
+
+## 2026-05-25 — Cross-node stage-pipelined backfill: considered, deferred
+
+**Context.** The pipeline uses two disjoint resource pools — luv (CPU + Postgres: download / parse / score / materialize / compress) and joi (GPU: the three LLM stages, capped at 2 concurrent decode streams). In a strictly-serial per-day backfill, joi sits idle during luv's ~1.5 h of parse/score/compress, and luv sits idle during joi's ~50 min of LLM. The idea (raised 2026-05-25): pipeline across days — run day N+1's luv-side stages while day N's LLM stages run on joi — overlapping the two pools.
+
+**Decided: keep serial; backlog the pipelined version.** Reasons:
+
+- **The LLM time is an irreducible floor.** joi's 2-slot cap + the one-LLM-workflow-at-a-time rule mean the LLM stages of different days can never overlap each other. Total LLM time (~50 min/day) is the hard minimum for any backfill regardless of orchestration; pipelining only hides the luv-side time *behind* the LLM time. For a 5-day backfill that's roughly 12 h serial → ~5–6 h pipelined — a real ~2× but **one-time and small in absolute terms** now that we've scoped to 2 weeks.
+- **It's only ever useful for backfill, never for the nightly cron** (one day/night has nothing to overlap) — correctly observed at the time.
+- **Cost is real:** a parent workflow that staggers stages across days with an explicit cross-day LLM-phase mutex, plus error handling for a day failing mid-pipeline, plus testing — several hours of orchestration work and new failure modes, this close to launch.
+
+The decision to cap retention at 2 weeks is what tips this: the optimization was compelling at 30 days (~3 days → ~1.5 days), marginal at 2 weeks. **Backlog it** — it becomes worth building if we ever extend retention to 4+ weeks or start doing frequent re-backfills. Recorded as the "day-level parallelism for backfill" item already in `docs/todo.md`'s parallelization audit; this entry captures *why we're not doing it now*.
+
 ## 2026-05-22 — Pipeline-stage naming pass: function names replace "Layer N"
 
 **Context.** The original architecture used "Layer 0 / Layer 1 / Layer 2 / Layer 3 / Layer 4" pipeline-stage vocabulary inherited from `concepts.md`'s data-funnel pedagogy. Multiple problems compounded:

@@ -11,36 +11,42 @@ This sprint runs straight into the start at IEX. The discipline is: **no bandaid
 - [x] All 5 issues from the 2026-05-21 audit resolved + validated by full re-narration (DESCRIBE: 163/164 = 99.39%)
 - [x] SYNTHESIZE (daily themes) shipping in the pipeline; produces a paragraph that reads cleanly (done 2026-05-22, end-to-end on 2026-05-08; cross-day validation pending small-batch backfill)
 - [x] INTERPRET (per-event interpretation) shipping with documented quality wins (done 2026-05-22; 162/164 = 98.78% on 2026-05-08; v5 prompt after 5 iterations). Architecture decision recorded in `decisions.md`.
+- [x] End-to-end smoke testing of the full pipeline on ≥5 trading days (done 2026-05-23/24: the 05-18→05-22 week, audited — DESCRIBE 98-100%, INTERPRET 97-100%, zero integrity gaps)
+- [x] Data retention policy implemented + documented (**week-aligned rolling 2-full-weeks**, not 30-day — `RetentionSweepActivity` + unit test, shipped 2026-05-25; narratives/interpretations/daily_synthesis kept indefinitely). See `decisions.md` 2026-05-25.
+- [ ] **2-week backfill complete** (week 05-18→05-22 done; prior week 05-11→05-15 running 2026-05-25). Replaces the 30-day backfill — see `decisions.md` 2026-05-25.
+- [ ] **Inter-day AGGREGATE** (weekly themes / editorial column, list item #6) shipping — reads the week's daily syntheses; verifier mirrors `SynthesisVerifier` (fix dotted-ticker tokenization in both — see todo.md)
 - [ ] Code audit complete — no dead code, no maintained magic numbers in primary paths, logging uniform, error handling defensive, comments current
 - [ ] All docs current: every cross-reference works, numbers consistent across docs, no stale references to retired features
 - [ ] README publication-ready: opening pitch tight, screenshots embedded, install/run instructions verified by a fresh checkout
-- [ ] `vedanta-systems` long-exposure-browser: surfaces today's daily synthesis at top of page, per-event drill-down, symbol filter, date picker, mobile responsive, dark-mode-correct
-- [ ] 30-day backfill in flight or complete (acceptable to have it running into Sunday)
-- [ ] Data retention policy implemented + documented (rolling 30-day with auto-cleanup; narratives kept indefinitely)
-- [ ] End-to-end smoke testing of the full pipeline on at least 5 trading days
+- [ ] `vedanta-systems` long-exposure-browser (the critical path — not yet started): surfaces daily synthesis at top, per-event drill-down, symbol filter, date picker, mobile responsive, dark-mode-correct — **plus the three agreed wow items**: (#1) intraday price/volume chart with event markers — the "long exposure photograph"; (#2) visible grounding badge ("every figure traces to IEX data" → expandable breakdown); (#4) recursive drill from a narration down to its raw atomic events
+- [ ] Prod bring-up on luv + **dev→prod data copy** (narrative-layer tables only — kilobytes; no re-parse) — procedure to be written into `operations.md`
 - [ ] LinkedIn post drafted (Vedanta authors; agent reviews for technical accuracy)
-- [ ] Whitepaper drafted (Vedanta authors Sunday; agent fact-checks against docs)
+- [ ] Whitepaper drafted (Vedanta authors Sunday; **lead with the grounding methodology** — pure-code verifier, no LLM-as-judge, 98-99% on a strict rubric — list item #3; agent fact-checks against docs)
 - [ ] Cron schedule unpaused before Monday so Tuesday 00:00 ET ingests last Monday's data automatically
 
 ---
 
 ## Calendar
 
-| Day | Date | Primary stream | Milestone |
+**Reconciled 2026-05-25 (Day 5).** We're meaningfully *ahead on the engine* — the hard, risky backend work is done and validated — and the remaining critical path is now almost entirely **frontend + content**, not pipeline. The original calendar front-loaded backend across Days 1-8; reality compressed the backend into Days 1-5 and the smoke-test (was Day 9) is already done. The frontend has **not** started and is the gating item for 6/1.
+
+| Day | Date | Status | What actually happened / plan |
 |---|---|---|---|
-| 1 | **Thu 5/21** ✅ done | Issue fixes | All 5 audit findings resolved; re-narration validated 163/164 (1 genuine number-fabrication catch by the verifier, not a regression) |
-| 2 | **Fri 5/22** ✅ done early | Naming pass + DETECT enrichment + INTERPRET + SYNTHESIZE shipped (originally scheduled across Days 2-5, completed in one extended day). Verifier pass rates: DESCRIBE 99.39%, INTERPRET 98.78%, SYNTHESIZE end-to-end published on 2026-05-08. |
-| 3 | **Sat 5/23** | Small-batch backfill (3-5 trading days) | Validate cross-day robustness before frontend work |
-| 4 | **Sun 5/24** | Frontend integration in vedanta-systems | `/api/long-exposure/synthesis/:date` + `long-exposure-browser` updates for INTERPRET + SYNTHESIZE display |
-| 5 | **Mon 5/25** | Frontend integration polish + 30-day backfill kicked off | Backfill runs overnight |
-| 6 | **Tue 5/26** | Code audit | Clean scan: dead code, magic numbers, logging, error handling, comments |
-| 7 | **Wed 5/27** | Docs final pass + frontend audit | All docs current; cross-refs verified; frontend gaps identified |
-| 8 | **Thu 5/28** | Frontend integration polish | long-exposure-browser feature-complete |
-| 9 | **Fri 5/29** | 30-day backfill + smoke testing | Backfill in flight; multi-day end-to-end testing complete |
-| 10 | **Sat 5/30** | Final QA + publication prep | Last QA pass, screenshots, LinkedIn draft, GitHub public-readiness |
-| — | **Sun 5/31** | Whitepaper (Vedanta) + monitoring | Long backfills continue. Agent on standby for fact-checks. |
-| — | **Mon 6/1** | **Publish.** IEX announcement on LinkedIn. | Live. |
-| — | **Tue 6/2** | Vedanta day 1 at IEX | Pipeline runs autonomously via cron. |
+| 1 | **Thu 5/21** | ✅ done | 5 audit findings resolved; re-narration 163/164. |
+| 2 | **Fri 5/22** | ✅ done early | Naming pass + DETECT enrichment + INTERPRET + SYNTHESIZE shipped (was scheduled Days 2-5). DESCRIBE 99.39%, INTERPRET 98.78%. |
+| 3 | **Sat 5/23** | ✅ done | INTERPRET+SYNTHESIZE wired into `DailyPipelineWorkflow`; compression-as-IaC (18×); `CompressChunksActivity`; SchemaManager dollar-quote fix; 5-day backfill (05-18→05-22) launched. |
+| 4 | **Sun 5/24** | ✅ done | Backfill completed + **cross-day audit** (per-day verifier rates, integrity, synthesis quality); corrected the iceberg/`total_shares` misdiagnosis; logged dotted-ticker verifier bug. *(Frontend, originally planned here, slipped — backend audit took the day.)* |
+| 5 | **Mon 5/25** ◀ **today** | in progress | **Week-aligned 2-week retention** shipped + tested; **prior-week backfill (05-11→05-15)** running to reach the 2-week target; docs reconciled. **Inter-day AGGREGATE (item #6) starting** — reads the week's syntheses. |
+| 6 | **Tue 5/26** | planned | Finish inter-day: AGGREGATE weekly column + inter-day scorer plumbing (`VolumeDeviation`) validated on the 2-week baseline. Fix `SynthesisVerifier`/AGGREGATE dotted-ticker tokenization together. |
+| 7 | **Wed 5/27** | planned | **Frontend push begins (critical path).** API routes for synthesis + interpretation + drill-down; `long-exposure-browser` consuming them; verify it picks latest-per-`selected_id`. Frontend audit → concrete gap list. |
+| 8 | **Thu 5/28** | planned | **Frontend wow items**: (#1) intraday chart with event markers, (#2) visible-grounding badge + breakdown expand, (#4) recursive drill to raw events. Mobile + dark-mode correct. |
+| 9 | **Fri 5/29** | planned | Code audit + docs final pass + README publication-ready (screenshots from the now-live frontend). Prod bring-up + dev→prod narrative-table copy. |
+| 10 | **Sat 5/30** | planned | Final QA, LinkedIn draft, GitHub public-readiness, unpause cron. Buffer for frontend overrun. |
+| — | **Sun 5/31** | — | Whitepaper (Vedanta authors; lead with the grounding methodology, item #3). Agent fact-checks. |
+| — | **Mon 6/1** | — | **Publish.** LinkedIn + vedanta.systems + GitHub public. |
+| — | **Tue 6/2** | — | Vedanta day 1 at IEX. Pipeline runs autonomously via cron. |
+
+**Buffer note:** the backend lead time is real slack, but it only de-risks launch if it goes into the frontend (Days 7-8, the one thing not started). If the frontend overruns, the droppable items are the inter-day scorers (Day 6) and the recursive drill-down (#4) — the chart (#1) and visible grounding (#2) are the high-wow, must-keep frontend pieces.
 
 ---
 
@@ -209,22 +215,22 @@ In `~/workspace/dev/vedanta-systems`:
 
 ## Data retention strategy
 
-Documented separately because it's load-bearing for sustainable operations:
+Documented separately because it's load-bearing for sustainable operations. **Policy: week-aligned rolling 2 *full* weeks** (implemented + unit-tested 2026-05-25; supersedes the earlier 30-day plan — see `decisions.md` 2026-05-25). Keep the current (partial) week + 2 completed weeks; the 2-weeks-ago week drops only when the current week closes, so we never dip below 2 full weeks. Boundary = `Monday(cutoff) − RETENTION_WEEKS` (=2), in `RetentionSweepActivityImpl.weekBoundary()`.
 
-| Data | Retention | Mechanism | Notes |
+| Data | Retention | Mechanism | Status |
 |---|---|---|---|
-| `.pcap.gz` files in `/storage/raw/` | Deleted after successful pipeline | `CleanupFilesActivity` runs at end of each daily run | Already implemented; verify in Day 9 audit |
-| Wire-format hypertables (13 tables) | Rolling 30 days | `RetentionSweepActivity` via TimescaleDB `drop_chunks('table', INTERVAL '30 days')` | Already implemented; expand if Layer 0 needs longer history |
-| `order_lifecycle` hypertable | Rolling 30 days | Same `drop_chunks` mechanism | |
-| `scored_events` | Rolling 30 days | Add `DELETE WHERE trading_date < CURRENT_DATE - 30` to `RetentionSweepActivity` | **New work in Day 9** |
-| `selected_events` | Rolling 30 days | Same | **New work in Day 9** |
-| `narratives` | **Kept indefinitely** | No retention | Small table (~90-164 rows/day; ~30 KB/day; 11 MB/year). Historical narratives are the product. |
-| `daily_synthesis` | **Kept indefinitely** | No retention | One row per trading day. Tiny. The day-level archive. |
+| `.pcap.gz` files in `/storage/raw/` | Deleted after successful pipeline | `CleanupFilesActivity` at end of each daily run | ✅ implemented |
+| Wire-format hypertables (13 tables) | 2 full weeks, week-aligned | `RetentionSweepActivity`: `drop_chunks` (DPLS-only) + per-row DELETE by `feed_source='DPLS'` (TOPS-shared) | ✅ implemented 2026-05-25 |
+| `order_lifecycle` hypertable | 2 full weeks, week-aligned | `drop_chunks` — **was previously never cleaned; gap closed 2026-05-25** | ✅ implemented |
+| `scored_events` | 2 full weeks, week-aligned | `DELETE WHERE trading_date < weekBoundary` | ✅ implemented 2026-05-25 |
+| `selected_events` | 2 full weeks, week-aligned | Same | ✅ implemented 2026-05-25 |
+| `narratives` | **Kept indefinitely** | No retention | ~90-167 rows/day; ~30 KB/day. The product. |
+| `interpretations` | **Kept indefinitely** | No retention | One row per selected event. Tiny. |
+| `daily_synthesis` | **Kept indefinitely** | No retention | One row per trading day. The day-level archive. |
 | `symbols` | Refreshed weekly | `RefreshSymbolsWorkflow` upserts | Static reference; no rows expire |
-| `validation_runs` | Rolling 90 days | Add to `RetentionSweepActivity` | **New work in Day 9** |
-| `pipeline_runs` | Rolling 90 days | Add to `RetentionSweepActivity` | **New work in Day 9** |
+| `validation_runs` / `pipeline_runs` | **Kept indefinitely** | No retention | Tiny bookkeeping; not worth a sweep path |
 
-The principle: **raw + intermediate data has a TTL, narrated outputs are forever.** A reader visiting vedanta.systems can browse every narrated day from launch onward indefinitely. The intermediate wire-format data lives just long enough to re-narrate if needed.
+The principle: **the heavy re-score substrate has a 2-week TTL; narrated outputs are forever.** A reader visiting vedanta.systems can browse every narrated day from launch onward indefinitely. Dropping the wire substrate only costs the ability to *re-score* a day older than ~2 weeks, never the visible archive. The `RETENTION_WEEKS` knob extends to 4 weeks trivially if deeper baselines are wanted later.
 
 ---
 
