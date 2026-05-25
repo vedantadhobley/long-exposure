@@ -40,8 +40,8 @@ public final class CleanupWorkflowImpl implements CleanupWorkflow {
     @Override
     public void run(final Input input) {
         LocalDate date = input.targetDate();
-        LOG.info("cleanup start  date={} deleteFiles={} retention={}d",
-                date, input.deleteFiles(), input.retentionDays());
+        LOG.info("cleanup start  date={} deleteFiles={} retention={}w",
+                date, input.deleteFiles(), input.retentionWeeks());
 
         if (input.deleteFiles()) {
             String stem = date.format(DateTimeFormatter.ofPattern("yyyyMMdd"));
@@ -53,7 +53,7 @@ public final class CleanupWorkflowImpl implements CleanupWorkflow {
 
         if (input.runRetentionSweep()) {
             try {
-                retention.sweep(date, input.retentionDays());
+                retention.sweep(date, input.retentionWeeks());
             } catch (ActivityFailure af) {
                 // Retention failure isn't fatal — the pipeline already
                 // succeeded; we just have extra-old chunks to clean

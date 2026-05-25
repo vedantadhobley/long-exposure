@@ -55,8 +55,13 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
 
     private static final Logger LOG = Workflow.getLogger(DailyPipelineWorkflowImpl.class);
 
-    /** Days to retain in Postgres. */
-    private static final int RETENTION_DAYS = 30;
+    /**
+     * Completed weeks of heavy wire/derived data to retain (the current
+     * week is always kept on top of these). Week-aligned, minimum-2-full-
+     * weeks policy — see {@link com.longexposure.temporal.activities.RetentionSweepActivity}.
+     * Narratives / interpretations / daily_synthesis are kept indefinitely.
+     */
+    private static final int RETENTION_WEEKS = 2;
 
     /** Placeholder date used by the cron schedule — workflow resolves to yesterday-ET at start. */
     private static final LocalDate PLACEHOLDER_DATE = LocalDate.of(1970, 1, 1);
@@ -250,7 +255,7 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
                 && "passed".equals(validation.status());
 
         cleanupChild.run(new CleanupWorkflow.Input(
-                date, deleteFiles, input.runRetentionSweep(), RETENTION_DAYS));
+                date, deleteFiles, input.runRetentionSweep(), RETENTION_WEEKS));
 
         LOG.info("workflow end  date={} status={}", date, finalStatus);
         return finalStatus;

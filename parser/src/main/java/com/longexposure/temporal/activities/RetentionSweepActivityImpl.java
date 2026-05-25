@@ -8,27 +8,34 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
+import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import java.time.temporal.TemporalAdjusters;
 
 /**
  * Implementation of {@link RetentionSweepActivity}.
  *
- * <p>For each DPLS-only hypertable, uses TimescaleDB's
- * {@code drop_chunks(table_name, older_than)} to drop chunks older than
- * the cutoff. Chunk-level drop is O(chunks), independent of row count.
+ * <p>For DPLS-only hypertables (including the derived
+ * {@code order_lifecycle}), uses TimescaleDB's
+ * {@code drop_chunks(table_name, older_than)} — O(chunks), independent
+ * of row count. For tables shared with TOPS (the validation oracle), a
+ * per-row DELETE filtered by {@code feed_source='DPLS'} avoids clobbering
+ * the TOPS rows. The derived standard tables ({@code scored_events},
+ * {@code selected_events}) are DELETEd by {@code trading_date}.
  *
- * <p>For tables shared with TOPS (the validation oracle), we use a
- * per-row DELETE filtered by {@code feed_source='DPLS'} to avoid
- * clobbering the TOPS rows. Slower but correct.
+ * <p>The drop boundary is week-aligned — see
+ * {@link #weekBoundary(LocalDate, int)} and the policy description on
+ * {@link RetentionSweepActivity}.
  */
 public final class RetentionSweepActivityImpl implements RetentionSweepActivity {
 
     private static final Logger LOG = LoggerFactory.getLogger(RetentionSweepActivityImpl.class);
 
-    /** DPLS-only tables — safe to chunk-drop. */
+    /** DPLS-only hypertables — safe to chunk-drop (includes the derived lifecycle table). */
     private static final String[] DPLS_ONLY_TABLES = {
-            "orders_add", "orders_modify", "orders_delete", "orders_executed", "clear_books"
+            "orders_add", "orders_modify", "orders_delete", "orders_executed",
+            "clear_books", "order_lifecycle"
     };
 
     /** Tables shared with TOPS — must DELETE per-row by feed_source. */
@@ -37,13 +44,32 @@ public final class RetentionSweepActivityImpl implements RetentionSweepActivity 
             "official_prices", "securities", "retail_liquidity"
     };
 
-    @Override
-    public SweepResult sweep(final LocalDate cutoffDate, final int retainDays) {
-        LocalDate olderThanDate = cutoffDate.minusDays(retainDays);
-        Timestamp olderThan = Timestamp.from(olderThanDate.atStartOfDay().toInstant(ZoneOffset.UTC));
+    /** Derived standard (non-hypertable) tables — DELETE by trading_date. */
+    private static final String[] DERIVED_DATE_TABLES = {
+            "scored_events", "selected_events"
+    };
 
-        LOG.info("retention sweep start  cutoff={} retain_days={} older_than={}",
-                cutoffDate, retainDays, olderThan);
+    /**
+     * Week-aligned drop boundary: the Monday of {@code cutoffDate}'s week,
+     * minus {@code retainWeeks} weeks. Everything strictly before the
+     * returned date is dropped. {@code retainWeeks=2} keeps the current
+     * (partial) week plus the 2 most-recent completed weeks, so we never
+     * hold fewer than 2 full completed weeks.
+     *
+     * <p>Pure + deterministic so it's unit-testable without a DB.
+     */
+    static LocalDate weekBoundary(final LocalDate cutoffDate, final int retainWeeks) {
+        LocalDate currentMonday = cutoffDate.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY));
+        return currentMonday.minusWeeks(retainWeeks);
+    }
+
+    @Override
+    public SweepResult sweep(final LocalDate cutoffDate, final int retainWeeks) {
+        LocalDate boundaryDate = weekBoundary(cutoffDate, retainWeeks);
+        Timestamp olderThan = Timestamp.from(boundaryDate.atStartOfDay().toInstant(ZoneOffset.UTC));
+
+        LOG.info("retention sweep start  cutoff={} retain_weeks={} drop_before={} (week-aligned)",
+                cutoffDate, retainWeeks, boundaryDate);
 
         int chunksDropped = 0;
         long rowsDeleted = 0;
@@ -79,6 +105,21 @@ public final class RetentionSweepActivityImpl implements RetentionSweepActivity 
                     }
                 } catch (Exception e) {
                     LOG.warn("shared-row delete failed  table={} err={}", table, e.getMessage());
+                }
+            }
+
+            // Derived standard tables key off trading_date, not a ts column.
+            for (String table : DERIVED_DATE_TABLES) {
+                String sql = "DELETE FROM " + table + " WHERE trading_date < ?";
+                try (PreparedStatement st = conn.prepareStatement(sql)) {
+                    st.setObject(1, boundaryDate);
+                    long deleted = st.executeLargeUpdate();
+                    rowsDeleted += deleted;
+                    if (deleted > 0) {
+                        LOG.info("deleted derived rows  table={} count={}", table, deleted);
+                    }
+                } catch (Exception e) {
+                    LOG.warn("derived-row delete failed  table={} err={}", table, e.getMessage());
                 }
             }
         } catch (Exception e) {

@@ -31,6 +31,6 @@ public interface CleanupWorkflow {
             LocalDate targetDate,
             boolean   deleteFiles,        // true when run finished OK; false to keep files for debugging
             boolean   runRetentionSweep,  // true in cron mode; false ad-hoc
-            int       retentionDays       // typically 30
+            int       retentionWeeks      // completed weeks to keep (current week is always kept); typically 2
     ) {}
 }
