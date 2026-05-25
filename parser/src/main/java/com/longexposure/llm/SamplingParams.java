@@ -72,6 +72,16 @@ public record SamplingParams(
     public static final SamplingParams SYNTHESIZE = new SamplingParams(
             1.0, 1.0, 40, 0.0, 2.0, 1.0);
 
+    /**
+     * Weekly AGGREGATE stage (themes across a week of daily syntheses).
+     * Same Qwen "Instruct mode for reasoning tasks" knobs as
+     * {@link #SYNTHESIZE} — AGGREGATE is the same shape of task one level
+     * up (find cross-day patterns across ~5 daily-theme paragraphs), so it
+     * wants the same higher-variety + strong-presence-penalty profile.
+     * Named separately so call sites read as the stage they belong to.
+     */
+    public static final SamplingParams AGGREGATE = SYNTHESIZE;
+
     public static SamplingParams of(double t, double tp, int tk, double mp,
                                     double pp, double rp) {
         return new SamplingParams(t, tp, tk, mp, pp, rp);

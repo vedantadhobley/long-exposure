@@ -14,6 +14,7 @@ import com.longexposure.temporal.activities.ListSelectedEventsActivityImpl;
 import com.longexposure.temporal.activities.InterpretEventActivityImpl;
 import com.longexposure.temporal.activities.NarrateEventActivityImpl;
 import com.longexposure.temporal.activities.SynthesizeDayActivityImpl;
+import com.longexposure.temporal.activities.AggregateWeekActivityImpl;
 import com.longexposure.temporal.activities.RecordValidationActivityImpl;
 import com.longexposure.temporal.activities.RefreshSymbolMetadataActivityImpl;
 import com.longexposure.temporal.activities.ResolveUrlActivityImpl;
@@ -29,6 +30,7 @@ import com.longexposure.temporal.workflows.MaterializeWorkflowImpl;
 import com.longexposure.temporal.workflows.InterpretWorkflowImpl;
 import com.longexposure.temporal.workflows.NarrateWorkflowImpl;
 import com.longexposure.temporal.workflows.SynthesizeDayWorkflowImpl;
+import com.longexposure.temporal.workflows.AggregateWeekWorkflowImpl;
 import com.longexposure.temporal.workflows.ParseWorkflowImpl;
 import com.longexposure.temporal.workflows.RefreshSymbolsWorkflow;
 import com.longexposure.temporal.workflows.RefreshSymbolsWorkflowImpl;
@@ -108,6 +110,7 @@ public final class WorkerMain {
                 NarrateWorkflowImpl.class,
                 InterpretWorkflowImpl.class,
                 SynthesizeDayWorkflowImpl.class,
+                AggregateWeekWorkflowImpl.class,
                 CleanupWorkflowImpl.class,
                 RefreshSymbolsWorkflowImpl.class);
         worker.registerActivitiesImplementations(
@@ -145,7 +148,8 @@ public final class WorkerMain {
         narrationWorker.registerActivitiesImplementations(
                 new NarrateEventActivityImpl(),
                 new InterpretEventActivityImpl(),
-                new SynthesizeDayActivityImpl());
+                new SynthesizeDayActivityImpl(),
+                new AggregateWeekActivityImpl());
 
         factory.start();
         LOG.info("workers started  main_queue={} narration_queue={} narration_concurrency=2",

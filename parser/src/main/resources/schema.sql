@@ -667,6 +667,27 @@ CREATE TABLE IF NOT EXISTS daily_synthesis (
     created_at                 TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- AGGREGATE stage: one LLM call per week reading that week's daily_synthesis
+-- paragraphs → a single "week of …" themes paragraph (cross-day patterns no
+-- single day can show: regimes building across the week, recurring symbols,
+-- session-phase drift). The level above SYNTHESIZE. Keyed by week_start
+-- (Monday of the ISO week) — re-running replaces. Kept indefinitely (tiny;
+-- the weekly editorial archive). Verified by the same prose grounding check
+-- as SYNTHESIZE (tickers ⊆ the week's daily-synthesis tickers; numbers ⊆ the
+-- daily syntheses + week aggregates).
+CREATE TABLE IF NOT EXISTS weekly_aggregate (
+    week_start       DATE        PRIMARY KEY,   -- Monday of the ISO week
+    week_end         DATE        NOT NULL,       -- last trading day with a synthesis that week
+    aggregate_text   TEXT        NOT NULL,
+    days_considered  INTEGER     NOT NULL,       -- number of daily syntheses read
+    week_aggregates  JSONB       NOT NULL,       -- rolled-up per-scorer totals, top symbols, per-day counts
+    model_id         TEXT        NOT NULL,
+    prompt_version   TEXT        NOT NULL,
+    verifier_passed  BOOLEAN     NOT NULL,
+    verifier_notes   JSONB,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 
 -- ─── TimescaleDB compression ─────────────────────────────────────────────────
 -- Compression is REQUIRED for production — without it the host disk fills up

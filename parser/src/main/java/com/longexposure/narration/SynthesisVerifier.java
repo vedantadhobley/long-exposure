@@ -44,11 +44,21 @@ public final class SynthesisVerifier {
     private static final Pattern NUMBER_RE = Pattern.compile("\\d[\\d,_]*(?:\\.\\d+)?");
 
     /**
-     * Ticker-shaped tokens — 2-5 uppercase letters, optionally followed
-     * by a "." or "=" suffix (handles "OTAI=" — IEX symbols sometimes
-     * carry suffix characters). Anchored to word boundaries.
+     * Ticker-shaped tokens — 2-5 uppercase letters, optionally followed by
+     * either a class-share suffix ({@code .A} / {@code .B}, e.g.
+     * {@code BRK.B}) or a single trailing {@code .}/{@code =} (IEX symbols
+     * sometimes carry suffix characters, e.g. {@code OTAI=}). Anchored to
+     * word boundaries.
+     *
+     * <p>The {@code \.[A-Z]{1,2}} alternative is what fixes the dotted-ticker
+     * false-positive: without it the engine matched just {@code BRK.} out of
+     * {@code BRK.B} (the {@code \b} falls between {@code .} and {@code B}),
+     * then failed the day-symbol lookup. Now {@code BRK.B} is captured whole
+     * and matches the symbol set directly. Shared by SYNTHESIZE and the
+     * weekly AGGREGATE verification (both route through this class).
      */
-    private static final Pattern TICKER_RE = Pattern.compile("\\b([A-Z]{2,5}[.=]?)\\b");
+    private static final Pattern TICKER_RE =
+            Pattern.compile("\\b([A-Z]{2,5}(?:\\.[A-Z]{1,2}|[.=])?)\\b");
 
     /**
      * Common English / finance acronyms that look like tickers. Synthesis
@@ -66,6 +76,25 @@ public final class SynthesisVerifier {
     );
 
     public SynthesisVerifier() {}
+
+    /**
+     * Extract the distinct ticker-shaped tokens from arbitrary prose, using
+     * the same regex + acronym filter as the fabrication check. Used by the
+     * weekly AGGREGATE stage to build the legitimate-ticker universe for a
+     * week (= union of tickers across that week's daily syntheses), which is
+     * then passed back into {@link #verify} as the allowed-symbol set. Keeps
+     * the dotted-ticker handling in one place across both stages.
+     */
+    public static Set<String> extractTickers(final String text) {
+        Set<String> out = new HashSet<>();
+        if (text == null) return out;
+        Matcher m = TICKER_RE.matcher(text);
+        while (m.find()) {
+            String t = m.group(1);
+            if (!ALLOWED_NON_TICKERS.contains(t)) out.add(t);
+        }
+        return out;
+    }
 
     /**
      * @param prose          synthesis paragraph from the LLM
@@ -89,8 +118,10 @@ public final class SynthesisVerifier {
         // without flagging fabrication.
         Set<String> normalizedDaySymbols = new HashSet<>();
         for (String s : daySymbols) {
-            normalizedDaySymbols.add(s);
-            normalizedDaySymbols.add(s.replaceAll("[.=]$", ""));
+            normalizedDaySymbols.add(s);                          // "BRK.B", "OTAI="
+            normalizedDaySymbols.add(s.replaceAll("[.=]$", ""));  // "OTAI" (trailing suffix dropped)
+            int dot = s.indexOf('.');
+            if (dot > 0) normalizedDaySymbols.add(s.substring(0, dot)); // "BRK.B" -> "BRK" shorthand
         }
 
         Set<String> proseTickers = new HashSet<>();
