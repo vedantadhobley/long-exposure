@@ -35,6 +35,9 @@ import java.util.function.Consumer;
  * rather than illiquid-ticker noise:
  * <ul>
  *   <li>{@code >= MIN_BASELINE_DAYS} prior days, so the median is meaningful
+ *   <li>{@code baseline_median >= MIN_BASELINE_SHARES} — the load-bearing
+ *       one: without a baseline floor the ratio explodes for near-zero
+ *       baselines (a 10-share/day name showing 117k reads as 11,706×)
  *   <li>{@code today_volume >= MIN_VOLUME_SHARES} absolute floor
  *   <li>{@code deviation_x >= MIN_DEVIATION} (today / baseline-median)
  * </ul>
@@ -64,6 +67,18 @@ public final class VolumeDeviationScorer implements EventScorer {
 
     /** Absolute floor on today's volume — keeps illiquid-ticker noise out. */
     private static final long MIN_VOLUME_SHARES = 100_000L;
+
+    /**
+     * Floor on the BASELINE median. Load-bearing: ranking by ratio explodes
+     * for near-zero baselines — a name that normally trades 10 shares/day on
+     * IEX showing 117k once reads as an 11,706× "surge", which is noise, not a
+     * story. Requiring the baseline itself to be a real volume (≥25k IEX
+     * shares/day ≈ a genuinely-traded small/mid-cap, since IEX is ~3% of
+     * consolidated volume) keeps the divide-by-tiny artifacts out. Validated
+     * against 2026-05-22: without it the top 8 were sub-5k-baseline noise;
+     * with it the top events are FUTU/TIGR/SPCE/PTON/NTAP-class real surges.
+     */
+    private static final long MIN_BASELINE_SHARES = 25_000L;
 
     /** Minimum today/baseline ratio to surface as an event. */
     private static final double MIN_DEVIATION = 3.0;
@@ -96,7 +111,7 @@ public final class VolumeDeviationScorer implements EventScorer {
                 FROM today t
                 JOIN baseline b USING (symbol)
                 WHERE b.days >= ?
-                  AND b.med_vol > 0
+                  AND b.med_vol >= ?
                   AND t.today_vol >= ?
                   AND t.today_vol >= ? * b.med_vol
                 ORDER BY (t.today_vol::float8 / b.med_vol) DESC
@@ -113,8 +128,9 @@ public final class VolumeDeviationScorer implements EventScorer {
             st.setTimestamp(2, windowStart);   // baseline window start (inclusive)
             st.setTimestamp(3, dayBucket);     // baseline window end (exclusive = today)
             st.setInt(4, MIN_BASELINE_DAYS);
-            st.setLong(5, MIN_VOLUME_SHARES);
-            st.setDouble(6, MIN_DEVIATION);
+            st.setLong(5, MIN_BASELINE_SHARES);
+            st.setLong(6, MIN_VOLUME_SHARES);
+            st.setDouble(7, MIN_DEVIATION);
             try (ResultSet rs = st.executeQuery()) {
                 while (rs.next()) {
                     emit.accept(buildEvent(ctx, rs, dayStart));
