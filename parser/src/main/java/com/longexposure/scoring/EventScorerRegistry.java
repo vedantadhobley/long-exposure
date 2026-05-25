@@ -7,6 +7,7 @@ import com.longexposure.scoring.scorers.LayeringScorer;
 import com.longexposure.scoring.scorers.LiquidityWithdrawalScorer;
 import com.longexposure.scoring.scorers.PostCancelClusterScorer;
 import com.longexposure.scoring.scorers.SweepScorer;
+import com.longexposure.scoring.scorers.VolumeDeviationScorer;
 
 import java.util.List;
 
@@ -30,9 +31,10 @@ public final class EventScorerRegistry {
             new PostCancelClusterScorer(),
             new LayeringScorer(),
             new IcebergScorer(),
-            new LiquidityWithdrawalScorer()
-            // interday scorers (Sprint 3+):
-            //   new VolumeDeviationScorer(),
-            //   new TimeInBookDriftScorer()
+            new LiquidityWithdrawalScorer(),
+            // interday scorers — read beyond a single day via the
+            // daily_volume_by_symbol cagg + the 2-week retained window:
+            new VolumeDeviationScorer()
+            //   new TimeInBookDriftScorer()  (next)
     );
 }
