@@ -94,36 +94,47 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
 
     // ─── Child workflow stubs ────────────────────────────────────────────────
 
-    private static ChildWorkflowOptions childOptions() {
+    /**
+     * Child-workflow options with a human-readable, parent-derived workflow
+     * ID: {@code <parentId>-<phase>} (e.g. {@code daily-2026-05-22-narrate}).
+     * Without an explicit ID Temporal assigns a random UUID, which makes the
+     * Temporal UI unreadable — you can't tell which date/phase a child row
+     * belongs to. Parent IDs are unique per run, so {@code parent + phase} is
+     * unique too. Safe to call from field initializers: they execute on the
+     * workflow thread (the existing {@code newChildWorkflowStub} calls already
+     * rely on that), so {@link Workflow#getInfo()} is available.
+     */
+    private static ChildWorkflowOptions childOptions(final String phase) {
         return ChildWorkflowOptions.newBuilder()
+                .setWorkflowId(Workflow.getInfo().getWorkflowId() + "-" + phase)
                 .setTaskQueue(DailyPipelineWorkflow.TASK_QUEUE)
                 .setParentClosePolicy(ParentClosePolicy.PARENT_CLOSE_POLICY_TERMINATE)
                 .build();
     }
 
     private final DownloadWorkflow downloadChild = Workflow.newChildWorkflowStub(
-            DownloadWorkflow.class, childOptions());
+            DownloadWorkflow.class, childOptions("download"));
 
     private final ParseWorkflow parseChild = Workflow.newChildWorkflowStub(
-            ParseWorkflow.class, childOptions());
+            ParseWorkflow.class, childOptions("parse"));
 
     private final ValidateWorkflow validateChild = Workflow.newChildWorkflowStub(
-            ValidateWorkflow.class, childOptions());
+            ValidateWorkflow.class, childOptions("validate"));
 
     private final ScoreWorkflow scoreChild = Workflow.newChildWorkflowStub(
-            ScoreWorkflow.class, childOptions());
+            ScoreWorkflow.class, childOptions("score"));
 
     private final NarrateWorkflow narrateChild = Workflow.newChildWorkflowStub(
-            NarrateWorkflow.class, childOptions());
+            NarrateWorkflow.class, childOptions("narrate"));
 
     private final InterpretWorkflow interpretChild = Workflow.newChildWorkflowStub(
-            InterpretWorkflow.class, childOptions());
+            InterpretWorkflow.class, childOptions("interpret"));
 
     private final SynthesizeDayWorkflow synthesizeChild = Workflow.newChildWorkflowStub(
-            SynthesizeDayWorkflow.class, childOptions());
+            SynthesizeDayWorkflow.class, childOptions("synthesize"));
 
     private final CleanupWorkflow cleanupChild = Workflow.newChildWorkflowStub(
-            CleanupWorkflow.class, childOptions());
+            CleanupWorkflow.class, childOptions("cleanup"));
 
     // ─── run() ───────────────────────────────────────────────────────────────
 
