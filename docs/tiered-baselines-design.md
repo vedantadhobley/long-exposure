@@ -38,15 +38,18 @@ opposite jobs and must stay separate:
         ▼
   AGGREGATE   weekly themes     [BUILT]   1 LLM call/week,  reads week's daily themes
         ▼
-  AGGREGATE   monthly themes    [NEW]     1 LLM call/month, reads month's weekly themes
+  AGGREGATE   monthly themes    [DEFERRED — see §3 decision; the prose stack tops at weekly]
 ```
+
+> **Note (decided 2026-05-26):** the prose stack tops out at the **weekly** tier
+> (recomputed daily, ~8-week prior window — §3, §4.3). The monthly *prose* rollup
+> shown above is **deferred** (a long-reach compression feature for later). The
+> monthly *numeric* tier (the baseline cagg) is separate and stays optional (§2.4).
 
 **The two stacks connect exactly once, one-directionally:** numeric baselines
 feed the detectors → detected events get narrated into the prose stack. The
 prose **never** flows back into detection (a detector needs numbers to ground
 "22× the median"; it can't and must not ground a decision on an LLM paragraph).
-
-The rest of this doc details each stack's monthly extension.
 
 ---
 
@@ -169,14 +172,30 @@ public interface BaselineProvider {
 
 ---
 
-## 3. Prose theme stack (human output) — AGGREGATE-monthly
+## 3. Prose theme stack (human output)
 
-This is the **genuinely valuable new build**: a monthly themes paragraph, one
-level above the weekly `AGGREGATE`. It's an exact mirror of `AggregateWeek*`
-(shipped 2026-05-25), one tier up — reads `weekly_aggregate` rows for a month,
-writes one paragraph.
+> **DECIDED 2026-05-26 — the prose stack tops out at the WEEKLY tier; the monthly
+> *prose* rollup is dropped (deferred).** Final shape:
+> - **Daily SYNTHESIZE** — day-local: "what happened today," reads only that day's
+>   narrations. No prior-period context.
+> - **Weekly AGGREGATE** — the top prose tier. **Recomputed daily as
+>   "week-so-far"** (not once on Friday), reading *this week's days so far* +
+>   **the prior ~8 weekly rollups** (tunable). This single tier carries the
+>   semantic trend, timely, with ~2 months of recent reach.
+> - **Monthly *prose* rollup — NOT built.** ~8 weekly paragraphs already cover the
+>   trend horizon a daily/weekly market readout uses. A monthly prose tier is a
+>   pure long-reach *compression* feature — add it later (it's a clean mirror of
+>   `AggregateWeek*`, see §3.6) only when quarterly/yearly semantic columns are
+>   wanted.
+> - **The long timeline is NOT lost:** long-range *magnitude* ("vs its 11-month
+>   norm") stays available via the optional monthly *numeric* cagg (§2.4) — a
+>   better home for quantitative long-range signal than prose anyway.
+>
+> §3.1–§3.5 below detail the monthly-prose build; they are **deferred** — kept as
+> the spec for when we add quarterly/yearly columns. The *active* prose work is
+> the weekly tier's recompute-daily + prior-week window (§4.3).
 
-### 3.1 Table
+### 3.1 Table — (deferred monthly-prose build)
 
 ```sql
 CREATE TABLE IF NOT EXISTS monthly_aggregate (
@@ -281,21 +300,18 @@ arcs, timely at every tier.
 | Intraday scorers (×7) | **0** — today only | — | wire tables / `order_lifecycle` | per-day patterns |
 | Inter-day scorer — *recent tier* | ~2–4 weeks | **daily** (exact median) | `daily_volume_by_symbol` | "vs its 4-week norm" |
 | Inter-day scorer — *long tier* | ~12 months | **monthly** (mean / sketch) | `monthly_volume_by_symbol` | "vs its 11-month norm" |
-| Daily SYNTHESIZE | **0** — today's events | — | `narratives` + `interpretations` | the day's themes |
-| Weekly AGGREGATE | this week-so-far **+ prior ~3–4 weeks** | weekly prose | `daily_synthesis` (this week) + prior `weekly_aggregate`s | week themes + week-over-week trend |
-| Monthly AGGREGATE | this month-so-far **+ prior ~3–6 months** | monthly prose | `weekly_aggregate` (this month) + prior `monthly_aggregate`s | month themes + month-over-month trend |
+| Daily SYNTHESIZE | **0** — today's events | — | `narratives` + `interpretations` | the day's themes (day-local) |
+| Weekly AGGREGATE (top prose tier; recomputed **daily** as week-so-far) | this week-so-far **+ prior ~8 weeks** | weekly prose | `daily_synthesis` (this week) + prior `weekly_aggregate`s | week themes + ~2-month trend, **timely** |
+| ~~Monthly AGGREGATE (prose)~~ | **DEFERRED** — not built (§3) | — | — | long-reach *semantic* compression, when quarterly/yearly columns wanted |
 
-Mapping your "week + 3–4 weeks prior + 11–12 months prior" intuition: the
-multi-resolution *magnitude* shape (recent weeks at daily resolution + the year
-at monthly resolution) is the **numeric baseline** (§4.2). The *semantic* shape
-is the prose window above — each rollup reads a real span of prior same-tier
-periods (so the weekly genuinely analyzes week-over-week trends, not just its own
-week). The one place we *don't* go a flat year deep is the **weekly** prose
-prompt: instead of stuffing 11–12 months of weekly paragraphs into the weekly
-call, that longer arc is the **monthly** tier's job (it reads the months) plus
-the numeric long-tier — so each tier reads a *bounded* prior window and the
-deeper reach comes from the tier above. Net: timely trend awareness at every
-level without any single prompt carrying a year of prose.
+So the **prose** semantic trend is carried by a single tier — the weekly rollup,
+recomputed daily, reading ~8 prior weeks — giving ~2 months of timely
+week-over-week trend. The **numeric** side (§4.2) independently carries the
+per-symbol *magnitude* reach out to a year (the optional monthly cagg). Your
+"week + prior weeks + prior months" intuition splits cleanly across the two: the
+prose handles the recent ~8-week semantic arc; the numbers handle the
+year-deep magnitude arc. No monthly *prose* tier needed until we want genuinely
+long semantic columns — and then it's a clean add (§3, deferred).
 
 ### 4.2 Numeric side — the multi-resolution baseline window (detail + wiring)
 
@@ -336,69 +352,66 @@ tier even when the last 4 weeks look "normal."
 
 ### 4.3 Prose side — own period + a real prior-period window (detail + wiring)
 
-Each prose rollup reads two things: its **substance** = its own period's
-tier-below outputs (the weekly reads *this week's* daily syntheses), **plus** a
-**prior-period window** = the prior ~3–4 same-tier rollups, so it can actually
-*analyze* week-over-week (or month-over-month) trends rather than describe its
-own period in a vacuum. This is the part that closes the latency gap.
+**Decided shape:** the weekly rollup is the *single* prose trend tier. It reads
+its **substance** = this week's daily syntheses, **plus** a **prior-week window**
+= the prior **~8** weekly rollups (tunable), so it analyzes week-over-week trends
+rather than describing its own week in a vacuum. The daily synthesis stays
+day-local; there is **no monthly prose tier** (deferred, §3).
 
-**Recompute cadence (this is the bit that answers "would a Monday have last
-Friday's data?").** The daily SYNTHESIZE is day-local — Monday's synthesis sees
-only Monday. But the **weekly rollup is recomputed *daily* as "week-so-far"**:
-the Monday run reads this week's days so far (just Monday) **+ the prior ~3–4
-finalized weekly rollups** (which contain last week, i.e. last Friday's themes).
-So the cross-day / cross-week trend *does* reach Monday — it lives in the
-**weekly-so-far** rollup, not the daily one. Same one tier up: the monthly is
-recomputed weekly as "month-so-far." Cheap, because each recompute is **one** LLM
-call over short paragraphs, not a re-narration.
+**Recompute cadence (answers "would a Monday have last Friday's data?").** The
+daily SYNTHESIZE is day-local — Monday's synthesis sees only Monday. But the
+**weekly rollup is recomputed *daily* as "week-so-far"**: the Monday run reads
+this week's days so far (just Monday) **+ the prior ~8 finalized weekly rollups**
+(which contain last week, i.e. last Friday's themes). So the cross-day /
+cross-week trend *does* reach Monday — it lives in the **weekly-so-far** rollup,
+not the daily one. Cheap: each recompute is **one** LLM call over ~9 short
+paragraphs (this-week-so-far + ~8 priors), not a re-narration.
 
 Wiring:
 - `AggregateWeekActivity` loads this week's `daily_synthesis` rows (substance) +
-  the prior ~3–4 `weekly_aggregate` rows, passing the latter under a labelled
+  the prior **~8** `weekly_aggregate` rows, passing the latter under a labelled
   `PRIOR WEEKS (trend context)` heading: *use to analyze week-over-week trends;
   do not present their tickers/numbers as this week's facts.*
 - The "week-so-far" recompute is just `AggregateWeekWorkflow` run on each day of
   the open week (it already resolves the ISO week and reads days-so-far). Upsert
   by `week_start` means each daily run **replaces** the in-progress row; the
-  Friday run is the finalized week. Archive keeps finalized weeks; the live page
-  shows "this week so far."
+  last run of the week is the finalized week. Archive keeps finalized weeks; the
+  live page shows "this week so far."
 - **Grounding (load-bearing):** the prior-window paragraphs must enter the
   verifier's allowed-ticker universe + number haystack, else a legitimate "vs
   last week" reference trips the fabrication check (the TSEM-class catch). So the
   window is *opt-in per claim*: a ticker/number is accepted if it traces to **this
-  period's inputs OR the prior-period window.**
-- **Where we cap it:** the *weekly* prompt reads ~3–4 prior weeks, **not** a flat
-  11–12 months of weekly paragraphs. The longer arc is the **monthly** tier's job
-  (it reads the months) plus the numeric long-tier. So each tier carries a
-  *bounded* prior window; deeper reach comes from climbing one tier up, keeping
-  any single prompt small and its grounding surface contained.
+  period's inputs OR the prior-week window.**
+- **Window size:** start at **~8 weeks** (≈2 months of trend). 8 short paragraphs
+  is ~2K tokens — trivial. Tunable to ~16 (~4 months) if wanted. Beyond that,
+  *that's* when a monthly prose tier earns its keep (compression — 12 monthly
+  paragraphs reach a year where 52 weekly ones would bloat); until then, no
+  monthly prose.
 
-### 4.4 How the two windows compose end-to-end
+### 4.4 How it composes end-to-end
 
 ```
 day D scoring run
   ├─ intraday scorers      → today's wire only
   └─ inter-day scorers     → recent tier (≤4 wk, daily, exact)
-                             + long tier (≤12 mo, monthly, approx)   ⟵ MAGNITUDE history (numbers)
+                             + long tier (≤12 mo, monthly cagg, approx)   ⟵ MAGNITUDE history (numbers)
         ↓ both norms baked into each event's breakdown
    DESCRIBE / INTERPRET     → render the pre-computed norms (no lookback in the LLM)
         ↓
    daily SYNTHESIZE         → today's narrations only (day-local)
         ↓
-   weekly AGGREGATE         → this week-so-far  + prior ~3–4 weekly rollups   ⟵ SEMANTIC trend, recomputed DAILY
+   weekly AGGREGATE         → this week-so-far  + prior ~8 weekly rollups   ⟵ SEMANTIC trend, recomputed DAILY
    (recomputed each day)      (so Monday already carries last week / last Friday)
-        ↓
-   monthly AGGREGATE        → this month-so-far + prior ~3–6 monthly rollups  ⟵ recomputed WEEKLY
-   (recomputed each week)
-        ↓
-   [quarterly / yearly]     → deeper arcs come from climbing one tier further
+
+   [monthly prose rollup]   → DEFERRED — long-reach semantic compression, add when
+                              quarterly/yearly columns are wanted (§3)
 ```
 
-Two histories, both timely: **magnitude** enters once as numbers at scoring time
-(rendered per-event); **semantic** trend is carried by the prose rollups, each
-reading a *bounded* prior window of its own tier (so trends surface at that
-tier's cadence, recomputed live) with the truly long arc handled by the tier
-above. No single LLM prompt ever carries a year of prose.
+Two histories: **magnitude** enters once as numbers at scoring time (rendered
+per-event, reaching a year via the numeric monthly cagg); **semantic** trend is
+carried by the *single* weekly prose tier, recomputed daily over a ~8-week prior
+window. No monthly prose tier, no prompt carrying a year of prose, and the long
+*magnitude* timeline is preserved on the numeric side.
 
 ---
 
@@ -428,8 +441,12 @@ launch. That's the whole point of the tiering.
    leverage — gives exact 1-year baselines immediately, no new objects.*
 2. **`BaselineProvider` + refactor `VolumeDeviationScorer`** onto it.
    Behavior-preserving; decouples scoring from SQL; sets up reuse.
-3. **AGGREGATE-monthly** (prose) — mirror `AggregateWeek*`. Independent of 1/2;
-   can ship as soon as ≥1 month of `weekly_aggregate` rows exists.
+3. **Weekly rollup: recompute-daily + prior-week window** — make `AggregateWeek`
+   read this-week-so-far + the prior ~8 `weekly_aggregate` rows (with the
+   verifier grounding extension, §4.3), and run it daily on the open week
+   (upsert-by-`week_start`). *This is the active prose-trend work.* (The monthly
+   *prose* rollup is **deferred** — §3 — a later compression feature, not in this
+   sequence.)
 4. **`TimeInBookDriftScorer` + its lifetime cagg** — the second inter-day scorer,
    using the same `BaselineProvider` pattern.
 5. **Monthly numeric tier (`monthly_volume_by_symbol`)** — only if we want
