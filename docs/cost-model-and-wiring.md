@@ -364,3 +364,73 @@ same day with nothing new → hash matches → skip. No gratuitous recompute, no
 
 All incremental — the per-event skip is independently shippable and is the piece
 that unblocks cheap re-scoring.
+
+### 6.7 Implementation plan — the parameter-independent abstraction
+
+Goal: **one** uniform "memoized LLM stage" so that window sizes, prompt text,
+prompt count, model, sampling, and even adding a new stage/tier are all just
+*inputs* — the wiring itself never changes.
+
+**The pattern, as code.** Every LLM stage reduces to: *given a scope (a date / a
+week), produce items; for each item gather inputs → content-hash → skip-if-fresh
+→ compute → store.* The runner is identical for all stages; a stage differs only
+in what it reads, how it hashes, and how it computes:
+
+```java
+interface MemoizedStage<ITEM> {
+    String     stageId();                            // "describe" | "interpret" | "synthesize" | "aggregate"
+    List<ITEM> items(Scope scope, Connection c);     // events for a day / the day / the week
+    byte[]     inputHash(ITEM item, Connection c);   // SHA-256 over: tier-below output identities
+                                                     //   + params (window sizes, caps)
+                                                     //   + prompt TEXT(s) + model + sampling
+    boolean    isFresh(byte[] hash, Connection c);   // verified row with this hash exists?
+    void       computeAndStore(ITEM item, byte[] hash, LlamaClient llm, Connection c);
+}
+
+// the runner — one loop, reused by every stage:
+for (ITEM item : stage.items(scope, c)) {
+    byte[] h = stage.inputHash(item, c);
+    if (stage.isFresh(h, c)) continue;     // skip: already computed for these exact inputs
+    stage.computeAndStore(item, h, llm, c);
+}
+```
+
+**Why this is parameter-independent (the property you want):**
+- **Window sizes** (8 vs 16 weeks, the ±60 s interpret window, per-scorer caps) are
+  read inside `items()` / `inputHash()` from config. Changing one changes the
+  *input set* → the hash → auto-recompute. The runner never knows the numbers.
+- **Prompt text / count / model / sampling** fold into `inputHash` (hash the
+  actual strings, however many prompts the stage calls). Any change
+  auto-invalidates. A stage doing 1 vs 2 vs N LLM calls is entirely inside
+  `computeAndStore` — the runner is oblivious.
+- **Adding a stage or tier** = implement the interface + register. Skip, cascade,
+  and idempotency come for free.
+
+**Supporting pieces (all small):**
+1. `StageHash` — canonical serialize (sorted JSON keys, fixed number format) +
+   SHA-256, plus `promptFingerprint(systemPrompt, userTemplate, model, sampling)`.
+   **The one thing to get right is canonicalization** — identical logical inputs
+   must always serialize byte-identically, or the skip silently misses.
+2. Schema: `narratives` / `interpretations` already key by their hash (reuse).
+   Add a `content_hash BYTEA` + index to `daily_synthesis` and `weekly_aggregate`
+   so they're skippable (keep `trading_date` / `week_start` as the upsert key; the
+   hash is just the freshness check).
+3. Per-event freshness moves into the fan-out lister: `ListSelectedEvents` returns
+   only **non-fresh** ids, so `NarrateWorkflow` never even schedules an activity
+   for a cached event.
+
+**Phasing + difficulty (low–moderate overall):**
+
+| Phase | What | Effort | When |
+|---|---|---|---|
+| 1 | Per-event DESCRIBE+INTERPRET exists-skip on the *current* hashes (in the fan-out lister) | ~½ day | launch-relevant — unblocks cheap re-score |
+| 2 | Extract `MemoizedStage` + `StageHash` + runner; refactor DESCRIBE+INTERPRET onto it | ~1 day | post-launch |
+| 3 | Content-address SYNTHESIZE + AGGREGATE (hash columns + skip) | ~1–2 days | post-launch, with the rollup recompute-daily work |
+| 4 | Switch version-strings → prompt-TEXT + model + sampling hashing (foolproof) | ~½ day + one deliberate full re-run | post-launch |
+
+**Difficulty: low–moderate, low-risk.** Content-addressed memoization is a
+well-understood pattern; every stage is independent (no tricky concurrency, no
+new algorithms); it's mostly a uniform mechanical refactor. The only real care
+points: (a) **canonical hashing** (§6.7-1), and (b) the Phase-4 hash-scheme switch
+re-hashes everything once — a deliberate one-time full re-run, cheap *because the
+skip already exists*. It pays for itself the first time you re-score history.
