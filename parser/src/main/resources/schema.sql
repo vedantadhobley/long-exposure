@@ -310,10 +310,34 @@ FROM trades
 GROUP BY day, symbol
 WITH NO DATA;
 
--- Refresh policy: every hour, refresh the previous 30 days. Tuned later if
--- the trading-day cadence (T+1 ingest) makes a daily refresh sufficient.
+-- Refresh policy: every hour, refresh the trailing 400 days (~1 year).
+--
+-- The window is deliberately FAR longer than the 2-week wire retention. A
+-- continuous aggregate is its own materialized hypertable that DECOUPLES from
+-- its source once materialized: the hourly refresh persists each day's
+-- per-symbol volume row well before RetentionSweepActivity drops the
+-- underlying `trades` chunks (hourly refresh always leads the 2-week,
+-- once-nightly drop). So the cagg accumulates a rolling ~1 year of EXACT daily
+-- baselines (~2.2 M tiny rows) even though raw wire data only lives 2 weeks —
+-- this is what makes inter-day baselines ("Nx the trailing median") durable
+-- without keeping the heavy wire substrate around. See
+-- docs/tiered-baselines-design.md §2.2/§2.6/§6.
+--
+-- INVARIANT (load-bearing): the refresh window must never be shorter than the
+-- wire retention, and RetentionSweepActivity must never drop this cagg's
+-- materialization hypertable. It doesn't — it touches only the wire tables +
+-- order_lifecycle + scored/selected_events. No cagg retention policy: the
+-- daily tier is tiny, so we let it accumulate (cap later with
+-- add_retention_policy('daily_volume_by_symbol', INTERVAL '400 days') if ever
+-- needed).
+--
+-- NOTE: add_..._policy(if_not_exists => TRUE) creates the policy on a fresh DB
+-- but will NOT update an existing policy's window. The dev DB's prior 30-day
+-- policy was migrated to 400 days manually on 2026-05-26 via
+-- remove_continuous_aggregate_policy(...) + this add(...); any future install
+-- gets 400 days directly from this statement.
 SELECT add_continuous_aggregate_policy('daily_volume_by_symbol',
-    start_offset => INTERVAL '30 days',
+    start_offset => INTERVAL '400 days',
     end_offset   => INTERVAL '1 hour',
     schedule_interval => INTERVAL '1 hour',
     if_not_exists => TRUE);

@@ -49,6 +49,16 @@ public final class RetentionSweepActivityImpl implements RetentionSweepActivity 
             "scored_events", "selected_events"
     };
 
+    // INVARIANT (do not break): the sweep must NEVER drop the
+    // `daily_volume_by_symbol` continuous aggregate (nor any future baseline
+    // cagg) or its materialization hypertable. The cagg holds a rolling ~1 year
+    // of per-symbol daily baselines that intentionally OUTLIVES the 2-week wire
+    // retention (a cagg decouples from its source once materialized — see
+    // schema.sql daily_volume_by_symbol + docs/tiered-baselines-design.md §2.2).
+    // Adding it to any list above would silently destroy the inter-day baseline
+    // history. Caggs are bounded by their own (currently absent) retention
+    // policy, never by this sweep.
+
     /**
      * Week-aligned drop boundary: the Monday of {@code cutoffDate}'s week,
      * minus {@code retainWeeks} weeks. Everything strictly before the
