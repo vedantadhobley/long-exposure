@@ -109,7 +109,7 @@ public final class LargeTradeScorer implements EventScorer {
         ObjectNode breakdown = json.createObjectNode();
         breakdown.put("size_shares",          BreakdownFmt.formatCount(size));
         breakdown.put("price_dollars",        priceDollars);
-        breakdown.put("notional_dollars",     BreakdownFmt.round(notionalDollars, 2));
+        breakdown.put("notional_dollars",     BreakdownFmt.formatDollars(notionalDollars));
         // trade_id and sale_condition_flags are intentionally NOT in the
         // breakdown — they're wire-format metadata that leaked into prose
         // as "trade ID 173670060632532234" / "flags 0". Still preserved in

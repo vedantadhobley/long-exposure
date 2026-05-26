@@ -207,7 +207,7 @@ public final class LayeringScorer implements EventScorer {
         breakdown.put("orders_per_level",      BreakdownFmt.round(ordersPerLevel, 2));
         breakdown.put("shares_per_level",      totalShares / distinctLevels);
         breakdown.put("notional_per_level",
-                      BreakdownFmt.round((totalShares * midPriceDollars) / distinctLevels, 2));
+                      BreakdownFmt.formatDollars((totalShares * midPriceDollars) / distinctLevels));
         breakdown.put("price_range_dollars",   BreakdownFmt.round(priceRangeDollars, 4));
         if (midPriceDollars > 0) {
             breakdown.put("price_range_basis_points",

@@ -123,6 +123,29 @@ public final class BreakdownFmt {
         return String.format("%,d", n);
     }
 
+    /**
+     * Format a dollar amount as {@code $X,XXX.XX} — leading {@code $},
+     * thousand separators, exactly two decimals. Used by scorers to
+     * pre-format notional values before they enter the breakdown JSON, so
+     * the LLM renders "$1,047,129.40" instead of the raw double
+     * "1047129.4" (which read as "notional value of 1047129.4 dollars").
+     *
+     * <p>For large notional amounts (always positive here). The two-decimal
+     * form matches the grounding verifier's comma/precision handling, so the
+     * formatted string still verifies against the prose. Share prices are NOT
+     * routed through this — their sub-penny precision is left to the numeric
+     * value.
+     *
+     * <p>Examples:
+     * <ul>
+     *   <li>{@code formatDollars(431.0)} → {@code "$431.00"}
+     *   <li>{@code formatDollars(1_047_129.4)} → {@code "$1,047,129.40"}
+     * </ul>
+     */
+    public static String formatDollars(final double v) {
+        return "$" + String.format("%,.2f", v);
+    }
+
     // ─── session phase ───────────────────────────────────────────────────────
 
     /** Length of the US-equity regular session in seconds (09:30 – 16:00 ET = 6.5 h). */

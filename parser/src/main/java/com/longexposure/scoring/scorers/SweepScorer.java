@@ -194,7 +194,7 @@ public final class SweepScorer implements EventScorer {
         breakdown.put("executions",        BreakdownFmt.formatCount(cluster.size()));
         breakdown.put("distinct_levels",   BreakdownFmt.formatCount(distinctLevels));
         breakdown.put("total_shares",      BreakdownFmt.formatCount(totalShares));
-        breakdown.put("notional_dollars",  BreakdownFmt.round(notional, 2));
+        breakdown.put("notional_dollars",  BreakdownFmt.formatDollars(notional));
         breakdown.put("min_price_dollars", minPriceDollars);
         breakdown.put("max_price_dollars", maxPriceDollars);
         breakdown.put("duration",          BreakdownFmt.durationNanos(durationNanos));
@@ -205,7 +205,7 @@ public final class SweepScorer implements EventScorer {
         // Pre-compute every quantity the LLM might want to mention so it
         // never has to do arithmetic at inference time.
         breakdown.put("duration_ms",          BreakdownFmt.round(durationMs, 2));
-        breakdown.put("notional_per_level",   BreakdownFmt.round(notional / distinctLevels, 2));
+        breakdown.put("notional_per_level",   BreakdownFmt.formatDollars(notional / distinctLevels));
         breakdown.put("shares_per_level",     totalShares / distinctLevels);
         breakdown.put("price_range_dollars",  BreakdownFmt.round(priceRangeDollars, 4));
         if (midPriceDollars > 0) {
