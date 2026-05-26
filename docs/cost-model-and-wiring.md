@@ -109,7 +109,7 @@ row with this `event_hash` already exists, skip the LLM and keep it.*
   whose events land inside existing co-occurrence windows would shift those
   breakdowns → new hashes → those events correctly re-narrate.
 - Small change; **do it before any large re-score/backfill.** Tracked in
-  `todo.md`.
+  `todo.md`. Full design + the auto-invalidation model in **Part 6**.
 
 ---
 
@@ -252,3 +252,115 @@ narrative archive.
 monthly_aggregate, symbols, validation_runs, pipeline_runs, the baseline caggs.
 **2-week TTL:** the 13 wire hypertables, order_lifecycle, scored_events,
 selected_events.
+
+---
+
+## Part 6 — Content-addressed skip / memoization (design)
+
+Status: **design, not built** (2026-05-26). This is the backbone that makes the
+pipeline cheap to re-run *and* automatically correct under change. Build the
+minimal version (§6.5) before any large re-score/backfill.
+
+### 6.1 What the skip does
+
+Before an LLM stage computes an item, check whether a prior **verified** output
+already exists for that item's content hash. If so, reuse it and skip the LLM
+call; otherwise compute. Concretely for DESCRIBE:
+
+```sql
+-- in NarrateEventActivity, before pipeline.narrate(...):
+SELECT 1 FROM narratives WHERE event_hash = ? AND verifier_passed = true
+-- hit  → return the existing row, skip the 2 LLM calls
+-- miss → run the pipeline, upsert (as today)
+```
+
+Skip only on `verifier_passed = true` so a previously-**failed** item is retried
+on the next run (a prompt fix should get another shot); a passed item is reused.
+(Tradeoff: a persistently-failing item re-runs every time — fine, failures are
+~1%.)
+
+### 6.2 The hash IS the invalidation oracle (why this is auto-adaptable)
+
+The skip is only as smart as what the hash captures. The hash is a **fingerprint
+of every input that affects the output**, so invalidation is automatic and
+content-driven — you never maintain a "what's stale" list:
+
+- **Scorer/methodology change** → different `breakdown` → new hash → recompute. ✓
+- **Prompt change** → new hash → recompute. ✓
+- **Nothing changed** → same hash → skip. ✓ (re-running old data is ~free)
+
+This is **content-addressed memoization**. Re-run the whole pipeline over a year
+of history after a tweak, and *only the items whose inputs actually changed*
+recompute; everything else is a cache hit. "Did I invalidate the right things?"
+stops being a manual worry and becomes a property of the data model.
+
+### 6.3 Make it foolproof: hash the prompt TEXT, not a version string
+
+Today the prompt enters the hash as a hand-maintained constant
+(`PROMPT_VERSION = "v7…"`). Weak link: edit the prompt text but forget to bump
+the constant → hash unchanged → **stale output silently reused**. Fix: hash the
+**actual prompt template text** (plus model id + sampling params), so *any* edit
+auto-invalidates with zero human discipline:
+
+```
+event_hash = SHA256( scorer_id
+                   + breakdown_json
+                   + describe_system_prompt_TEXT + describe_render_prompt_TEXT
+                   + model_id
+                   + sampling_params )          // EXTRACT + RENDER presets
+```
+
+Same idea for every stage. This is the version to build if we'll be iterating on
+prompts and re-running old data (we will).
+
+### 6.4 The pattern across tiers — and the automatic cascade
+
+Every LLM stage is content-addressed: its output row stores a hash of *(its
+ordered inputs + its prompt text + model + sampling)*; it skips if a verified row
+with that hash exists.
+
+| Stage | hash inputs | recomputes automatically when… |
+|---|---|---|
+| DESCRIBE (per event) | scorer_id + breakdown + describe prompts + model | the event's breakdown or the prompt changes |
+| INTERPRET (per event) | breakdown + ±window summaries + interpret prompt + model | breakdown, window data, or prompt changes |
+| SYNTHESIZE (per day) | sorted **hashes** of the day's narratives+interps + synth prompt + model | any narrative/interp in the day changed, or the prompt changed |
+| AGGREGATE (per week) | sorted **hashes** of the week's daily syntheses + prior-week rollup hashes + agg prompt + model | any daily synthesis in the week changed (e.g. a new day landed), a prior-week rollup changed, or the prompt changed |
+
+Because each tier's hash **includes the identities of the tier below**, a change
+propagates up *exactly as far as it matters* and no further:
+
+```
+tweak one scorer's breakdown
+  → that event's DESCRIBE hash changes      → re-narrate that 1 event
+  → that day's SYNTHESIZE input-set changes → re-synthesize that 1 day
+  → that week's AGGREGATE input-set changes → re-aggregate that 1 week
+  → (nothing else recomputes)
+change nothing → every stage is a cache hit, top to bottom
+```
+
+That's the bounded, automatic cascade: re-run anything, anytime; the system
+recomputes precisely the affected slice.
+
+### 6.5 "Rollups recompute daily" composes cleanly with this
+
+The weekly rollup recomputes daily as "week-so-far" (see
+`tiered-baselines-design.md` §4.3). With content-addressing it self-regulates:
+Monday→Tuesday the week gains a day → the set of input daily-synthesis hashes
+changes → the AGGREGATE hash changes → it re-runs (correct, new data). Re-run the
+same day with nothing new → hash matches → skip. No gratuitous recompute, no
+"is the rollup stale?" bookkeeping — the input-hash answers it.
+
+### 6.6 Build scope
+
+- **Minimal (do before any large re-score):** the DESCRIBE + INTERPRET
+  exists-skip (§6.1), keyed on the *current* `event_hash` / `interpretation_hash`.
+  This alone makes the 05-18→22 re-score and every future re-score cheap (only
+  changed/new events run). ~half-day.
+- **Foolproof (do when iterating on prompts):** switch the hash inputs from
+  version strings to prompt **text** + model + sampling (§6.3).
+- **Full (when SYNTHESIZE/AGGREGATE get the recompute-daily treatment):**
+  content-address those two tiers on their input-hashes (§6.4) so the daily
+  weekly-recompute and any synthesis re-run skip when unchanged.
+
+All incremental — the per-event skip is independently shippable and is the piece
+that unblocks cheap re-scoring.
