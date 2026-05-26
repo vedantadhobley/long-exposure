@@ -242,7 +242,130 @@ page.
 
 ---
 
-## 4. Retention interplay — why this is the elegant payoff
+## 4. Tiered context windows — reach, resolution, and the wiring
+
+The question this section answers: **how far back does each level reach, at what
+resolution, and how does that context get assembled and handed to the scorer /
+narrative driver?** The governing principle (decided 2026-05-26):
+
+> **Numbers carry the long memory; prose stays mostly period-local.** The
+> multi-resolution history (recent weeks at daily granularity + the year at
+> monthly granularity) lives in the **numeric** baselines that feed the
+> detectors. The **prose** rollups stay anchored to their own period, with at
+> most a light prior-period "continuity" nudge. So "this is 4.7× its 11-month
+> norm" is surfaced as a *scorer number narrated per event*, not as the weekly
+> LLM re-summarizing a year of prose.
+
+Why: a number compares cleanly and grounds trivially (the scorer puts both
+figures in the breakdown). Prose that reaches back a year would bloat the prompt
+and multiply the grounding surface (every prior-period claim is another
+fabrication-check target — cf. the TSEM catch in the weekly verifier). Reach is
+cheap and verifiable on the numeric side; expensive and fuzzy on the prose side.
+
+### 4.1 Reach + resolution matrix
+
+| Driver | Lookback reach | Resolution | Source | What it enables |
+|---|---|---|---|---|
+| Intraday scorers (×7) | **0** — today only | — | wire tables / `order_lifecycle` | per-day patterns |
+| Inter-day scorer — *recent tier* | ~2–4 weeks | **daily** (exact median) | `daily_volume_by_symbol` | "vs its 4-week norm" |
+| Inter-day scorer — *long tier* | ~12 months | **monthly** (mean / sketch) | `monthly_volume_by_symbol` | "vs its 11-month norm" |
+| Daily SYNTHESIZE | **0** — today's events | — | `narratives` + `interpretations` | the day's themes |
+| Weekly AGGREGATE | this week **+ light: prior 1–2 weeks** | weekly prose | `daily_synthesis` (+ recent `weekly_aggregate`) | week themes + continuity |
+| Monthly AGGREGATE | this month **+ light: prior 1–2 months** | monthly prose | `weekly_aggregate` (+ recent `monthly_aggregate`) | month themes + continuity |
+
+Mapping your "week + 3–4 weeks prior + 11–12 months prior" intuition: that
+multi-resolution shape is **exactly right for the numeric baseline** (recent
+weeks at daily resolution + the year at monthly resolution). For the **prose**
+weekly rollup, the same depth would be heavy — so we let the *numbers* carry the
+3-to-12-month reach and keep the weekly prose to its own week plus a 1–2-week
+continuity glance.
+
+### 4.2 Numeric side — the multi-resolution baseline window (detail + wiring)
+
+A scorer on day **D** assembles a two-tier window, both ending just before D:
+
+- **Recent tier** — the last ~N days from `daily_volume_by_symbol`, queried with
+  `percentile_cont(0.5)` for an **exact** median. This is what `VolumeDeviationScorer`
+  does today (over the retained ~2 weeks; extend the cagg horizon to widen it).
+- **Long tier** — the last ~12 months from `monthly_volume_by_symbol`
+  (cagg-on-cagg, §2.4), giving an approximate monthly norm (mean, or a toolkit
+  percentile sketch). Cheap (one row/symbol/month) and reaches back a year+.
+
+Assembled once per scoring run by the `BaselineProvider` (§2.5), which gains the
+long-tier method:
+
+```java
+public interface BaselineProvider {
+    OptionalDouble trailingMedianVolume(String symbol, LocalDate asOf, int days);   // recent tier (exact)
+    int            trailingDayCount   (String symbol, LocalDate asOf, int days);
+    OptionalDouble monthlyNormVolume  (String symbol, LocalDate asOf, int months);  // long tier (approx)
+}
+```
+
+Wiring per scoring run (in `ScoreEventsActivity`):
+1. Build one `CaggBaselineProvider` over the activity's JDBC connection (mirrors
+   how the `symbols` cache is loaded once).
+2. Each inter-day scorer calls both tiers and writes **both norms into the
+   breakdown** (the grounding contract): e.g.
+   `{ todays_volume, week4_median, week4_deviation_x, month12_norm, month12_deviation_x }`.
+3. DESCRIBE/INTERPRET then narrate from those pre-computed fields — the LLM never
+   divides or reaches for history; it just renders "4.7× its 4-week median and
+   2.1× its 11-month norm."
+
+Two-tier so a quiet symbol that only recently became active doesn't get a noisy
+ratio (recent tier thin → fall back to / cross-check against the monthly norm),
+and a symbol with a genuine multi-month regime shift surfaces against the long
+tier even when the last 4 weeks look "normal."
+
+### 4.3 Prose side — period-local + light continuity (detail + wiring)
+
+Each prose rollup's **substance** is its own period's tier-below outputs
+(unchanged from §3): the weekly AGGREGATE reads *this week's* daily syntheses;
+the monthly reads *this month's* weekly aggregates. The **only** cross-period
+addition is a small **continuity block** — the prior **1–2** same-tier rollups,
+included so the LLM can say "the third straight week of rising halts" instead of
+narrating each week in a vacuum.
+
+Wiring of the continuity block:
+- `AggregateWeekActivity` additionally loads the prior 1–2 `weekly_aggregate`
+  rows and passes them under a clearly-labelled `PRIOR WEEKS (context only)`
+  prompt heading, with the instruction: *use only to establish continuity; do
+  not introduce their tickers/numbers as this week's facts.*
+- **Grounding implication (load-bearing):** those prior-period paragraphs must be
+  added to the verifier's allowed-ticker universe + number haystack — otherwise a
+  legitimate "vs last week" reference is flagged as fabrication (exactly the
+  TSEM-class catch). So continuity context is *opt-in per claim*: the verifier
+  accepts tickers/numbers that trace to **either** this period's inputs **or**
+  the continuity block.
+- Keep it to 1–2 priors. Each added prior period is another grounding surface and
+  more prompt; the marginal narrative value tapers fast, and the real long-range
+  signal is already carried numerically (§4.2) and surfaced per-event.
+
+### 4.4 How the two windows compose end-to-end
+
+```
+day D scoring run
+  ├─ intraday scorers      → today's wire only
+  └─ inter-day scorers     → recent tier (≤4 wk, daily, exact)
+                             + long tier (≤12 mo, monthly, approx)   ⟵ numbers carry the year
+        ↓ both norms baked into each event's breakdown
+   DESCRIBE / INTERPRET     → render the pre-computed norms (no lookback in the LLM)
+        ↓
+   daily SYNTHESIZE         → today's narrations only
+        ↓
+   weekly AGGREGATE         → this week's syntheses  + [prior 1–2 weekly aggregates] (continuity)
+        ↓
+   monthly AGGREGATE        → this month's weeklies  + [prior 1–2 monthly aggregates] (continuity)
+```
+
+The long memory enters **once**, as numbers, at scoring time; everything above it
+either renders those numbers (per-event prose) or summarizes its own period with
+a light backward glance (rollups). No level re-derives a year of history in an
+LLM prompt.
+
+---
+
+## 5. Retention interplay — why this is the elegant payoff
 
 | Layer | Size | Retention | Purpose |
 |---|---|---|---|
@@ -261,7 +384,7 @@ launch. That's the whole point of the tiering.
 
 ---
 
-## 5. Build phasing (post-launch, in dependency order)
+## 6. Build phasing (post-launch, in dependency order)
 
 1. **Extend daily cagg retention + refresh window** (`30 days` → `~400 days`),
    and confirm `RetentionSweepActivity` never touches it. *Smallest, highest
@@ -280,7 +403,7 @@ Items 1–3 are each a few hours; 4 is a new scorer + cagg; 5 is optional.
 
 ---
 
-## 6. Open questions / decisions to make at build time
+## 7. Open questions / decisions to make at build time
 
 - **Toolkit dependency?** Percentile sketches (`timescaledb_toolkit`) give proper
   approximate quantiles at the monthly tier; mean is dependency-free. Lean
