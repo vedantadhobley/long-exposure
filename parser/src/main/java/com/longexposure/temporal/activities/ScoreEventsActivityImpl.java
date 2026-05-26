@@ -1,6 +1,8 @@
 package com.longexposure.temporal.activities;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.longexposure.scoring.BaselineProvider;
+import com.longexposure.scoring.CaggBaselineProvider;
 import com.longexposure.scoring.EventScorer;
 import com.longexposure.scoring.EventScorerRegistry;
 import com.longexposure.scoring.ScoredEvent;
@@ -117,10 +119,16 @@ public final class ScoreEventsActivityImpl implements ScoreEventsActivity {
             LOG.info("symbols loaded  count={}", symbols.size());
             actx.heartbeat("symbols_loaded:" + symbols.size());
 
+            // Baseline provider for the inter-day scorers, built once and
+            // sharing this connection. Decouples the scorers from cagg SQL.
+            // The cagg's freshness for the trading day is guaranteed upstream
+            // by RefreshBaselinesActivity (runs before this in ScoreWorkflow).
+            BaselineProvider baselines = new CaggBaselineProvider(conn);
+
             ScoringContext sctx = new ScoringContext(
                     tradingDate, conn, pipelineRunId, json,
                     detail -> actx.heartbeat("scorer_progress:" + detail),
-                    symbols);
+                    symbols, baselines);
             CopyManager copyManager = conn.unwrap(PGConnection.class).getCopyAPI();
 
             for (EventScorer scorer : EventScorerRegistry.ALL) {

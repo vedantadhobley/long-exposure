@@ -3,6 +3,7 @@ package com.longexposure.scoring.scorers;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.longexposure.scoring.BaselineProvider;
 import com.longexposure.scoring.BreakdownFmt;
 import com.longexposure.scoring.EventScorer;
 import com.longexposure.scoring.ScoredEvent;
@@ -10,11 +11,12 @@ import com.longexposure.scoring.ScoringContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
 import java.util.function.Consumer;
 
 /**
@@ -88,74 +90,66 @@ public final class VolumeDeviationScorer implements EventScorer {
 
     @Override
     public void score(final ScoringContext ctx, final Consumer<ScoredEvent> emit) {
-        // today's volume vs the median of prior days in [D-window, D).
-        // percentile_cont(0.5) is the median; computed over the small cagg
-        // (one row per symbol per day), so this is cheap.
-        String sql = """
-                WITH today AS (
-                    SELECT symbol, total_volume AS today_vol, trade_count AS today_tc
-                    FROM daily_volume_by_symbol
-                    WHERE day = ?
-                ),
-                baseline AS (
-                    SELECT symbol,
-                           percentile_cont(0.5) WITHIN GROUP (ORDER BY total_volume) AS med_vol,
-                           percentile_cont(0.5) WITHIN GROUP (ORDER BY trade_count)  AS med_tc,
-                           count(*) AS days
-                    FROM daily_volume_by_symbol
-                    WHERE day >= ? AND day < ?
-                    GROUP BY symbol
-                )
-                SELECT t.symbol, t.today_vol, t.today_tc,
-                       b.med_vol, b.med_tc, b.days
-                FROM today t
-                JOIN baseline b USING (symbol)
-                WHERE b.days >= ?
-                  AND b.med_vol >= ?
-                  AND t.today_vol >= ?
-                  AND t.today_vol >= ? * b.med_vol
-                ORDER BY (t.today_vol::float8 / b.med_vol) DESC
-                """;
-
+        // All cagg access goes through the BaselineProvider now — the scorer
+        // holds only policy (the gates + the score formula), not SQL. Two bulk
+        // reads: today's per-symbol volume snapshot, and each symbol's median
+        // over the trailing [D-window, D) window. Joined + gated in Java; both
+        // maps are ~8.8k tiny entries so this is trivial.
+        BaselineProvider baselines = ctx.baselines();
         Instant dayStart = ctx.tradingDate().atStartOfDay().toInstant(ZoneOffset.UTC);
-        Timestamp dayBucket    = Timestamp.from(dayStart);
-        Timestamp windowStart  = Timestamp.from(
-                ctx.tradingDate().minusDays(BASELINE_WINDOW_DAYS).atStartOfDay().toInstant(ZoneOffset.UTC));
+
+        Map<String, BaselineProvider.DayVolume> today =
+                baselines.dayVolumes(ctx.tradingDate());
+        Map<String, BaselineProvider.TrailingVolume> baseline =
+                baselines.trailingVolumeBaselines(ctx.tradingDate(), BASELINE_WINDOW_DAYS);
+
+        // Collect the qualifying surges, then emit in ratio-descending order
+        // (preserves the prior SQL's ORDER BY (today_vol / med_vol) DESC).
+        List<Hit> hits = new ArrayList<>();
+        for (Map.Entry<String, BaselineProvider.DayVolume> e : today.entrySet()) {
+            String symbol = e.getKey();
+            BaselineProvider.DayVolume t = e.getValue();
+            BaselineProvider.TrailingVolume b = baseline.get(symbol);
+            if (b == null) continue;                              // JOIN today ∩ baseline
+
+            // Gates — identical to the prior WHERE clause. medVol >= floor > 0,
+            // so the ratio test below is the algebraic equivalent of the SQL's
+            // today_vol >= MIN_DEVIATION * med_vol.
+            if (b.dayCount()   <  MIN_BASELINE_DAYS)   continue;
+            if (b.medianVolume() < MIN_BASELINE_SHARES) continue;
+            if (t.volume()     <  MIN_VOLUME_SHARES)   continue;
+            double deviationX = t.volume() / b.medianVolume();
+            if (deviationX     <  MIN_DEVIATION)       continue;
+
+            hits.add(new Hit(symbol, t.volume(), t.tradeCount(),
+                    b.medianVolume(), b.medianTradeCount(), b.dayCount(), deviationX));
+        }
+        hits.sort(Comparator.comparingDouble((Hit h) -> h.deviationX).reversed());
 
         long emitted = 0;
-        try (PreparedStatement st = ctx.conn().prepareStatement(sql)) {
-            st.setTimestamp(1, dayBucket);     // today's bucket
-            st.setTimestamp(2, windowStart);   // baseline window start (inclusive)
-            st.setTimestamp(3, dayBucket);     // baseline window end (exclusive = today)
-            st.setInt(4, MIN_BASELINE_DAYS);
-            st.setLong(5, MIN_BASELINE_SHARES);
-            st.setLong(6, MIN_VOLUME_SHARES);
-            st.setDouble(7, MIN_DEVIATION);
-            try (ResultSet rs = st.executeQuery()) {
-                while (rs.next()) {
-                    emit.accept(buildEvent(ctx, rs, dayStart));
-                    emitted++;
-                    if (emitted % 50 == 0) ctx.heartbeat().send("volume_deviation:" + emitted);
-                }
-            }
-        } catch (Exception e) {
-            throw new RuntimeException("VolumeDeviationScorer query failed for date=" + ctx.tradingDate(), e);
+        for (Hit h : hits) {
+            emit.accept(buildEvent(ctx, h, dayStart));
+            emitted++;
+            if (emitted % 50 == 0) ctx.heartbeat().send("volume_deviation:" + emitted);
         }
 
         LOG.info("VolumeDeviationScorer  date={} window_days={} min_dev={}x emitted={}",
                 ctx.tradingDate(), BASELINE_WINDOW_DAYS, MIN_DEVIATION, emitted);
     }
 
-    private static ScoredEvent buildEvent(final ScoringContext ctx, final ResultSet rs,
-                                          final Instant dayStart) throws Exception {
-        String symbol   = rs.getString("symbol");
-        long   todayVol  = rs.getLong("today_vol");
-        long   todayTc   = rs.getLong("today_tc");
-        double medVol    = rs.getDouble("med_vol");
-        double medTc     = rs.getDouble("med_tc");
-        int    days      = rs.getInt("days");
+    /** One qualifying surge — the joined today+baseline figures for a symbol. */
+    private record Hit(String symbol, long todayVol, long todayTc,
+                       double medVol, double medTc, int days, double deviationX) {}
 
-        double deviationX = todayVol / medVol;
+    private static ScoredEvent buildEvent(final ScoringContext ctx, final Hit h,
+                                          final Instant dayStart) {
+        String symbol   = h.symbol();
+        long   todayVol  = h.todayVol();
+        long   todayTc   = h.todayTc();
+        double medVol    = h.medVol();
+        double medTc     = h.medTc();
+        int    days      = h.days();
+        double deviationX = h.deviationX();
 
         ObjectMapper json = ctx.json();
         ObjectNode breakdown = json.createObjectNode();

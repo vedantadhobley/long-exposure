@@ -2,6 +2,7 @@ package com.longexposure.temporal.workflows;
 
 import com.longexposure.temporal.activities.EnrichWithCoOccurrenceActivity;
 import com.longexposure.temporal.activities.MaterializeOrderLifecycleActivity;
+import com.longexposure.temporal.activities.RefreshBaselinesActivity;
 import com.longexposure.temporal.activities.ScoreEventsActivity;
 import com.longexposure.temporal.activities.SelectTopEventsActivity;
 import io.temporal.activity.ActivityOptions;
@@ -15,6 +16,15 @@ import java.time.LocalDate;
 public final class ScoreWorkflowImpl implements ScoreWorkflow {
 
     private static final Logger LOG = Workflow.getLogger(ScoreWorkflowImpl.class);
+
+    private final RefreshBaselinesActivity refreshBaselines = Workflow.newActivityStub(
+            RefreshBaselinesActivity.class,
+            ActivityOptions.newBuilder()
+                    // Single-day cagg refresh — fast (a day's bucket over a tiny
+                    // cagg), but allow headroom for a first-run full materialize.
+                    .setStartToCloseTimeout(Duration.ofMinutes(15))
+                    .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(2).build())
+                    .build());
 
     private final MaterializeOrderLifecycleActivity materialize = Workflow.newActivityStub(
             MaterializeOrderLifecycleActivity.class,
@@ -52,6 +62,9 @@ public final class ScoreWorkflowImpl implements ScoreWorkflow {
     @Override
     public long run(final LocalDate date) {
         LOG.info("score start  date={}", date);
+        // Ensure the volume cagg includes this day before the inter-day scorer
+        // reads it (the hourly background policy may not have caught up yet).
+        refreshBaselines.refreshBaselines(date);
         long materialized = materialize.materializeOrderLifecycle(date);
         LOG.info("order_lifecycle materialized  date={} rows={}", date, materialized);
         long scored = scoreEvents.scoreEvents(date, null);

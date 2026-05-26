@@ -16,6 +16,7 @@ import com.longexposure.temporal.activities.NarrateEventActivityImpl;
 import com.longexposure.temporal.activities.SynthesizeDayActivityImpl;
 import com.longexposure.temporal.activities.AggregateWeekActivityImpl;
 import com.longexposure.temporal.activities.RecordValidationActivityImpl;
+import com.longexposure.temporal.activities.RefreshBaselinesActivityImpl;
 import com.longexposure.temporal.activities.RefreshSymbolMetadataActivityImpl;
 import com.longexposure.temporal.activities.ResolveUrlActivityImpl;
 import com.longexposure.temporal.activities.RetentionSweepActivityImpl;
@@ -121,6 +122,7 @@ public final class WorkerMain {
                 new DplsTopsValidatorActivityImpl(),
                 new DeepTopsValidatorActivityImpl(),
                 new RecordValidationActivityImpl(),
+                new RefreshBaselinesActivityImpl(),
                 new MaterializeOrderLifecycleActivityImpl(),
                 new ScoreEventsActivityImpl(),
                 new EnrichWithCoOccurrenceActivityImpl(),

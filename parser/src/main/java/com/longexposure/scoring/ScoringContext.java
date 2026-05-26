@@ -14,8 +14,9 @@ import java.util.UUID;
  * tag scored_events.pipeline_run with, a shared {@link ObjectMapper}
  * for JSON building, a {@link HeartbeatCallback} the scorer's inner
  * loops invoke periodically to keep the host Temporal activity alive,
- * and the in-memory {@link SymbolMetadata} cache that scorers consult to
- * enrich event breakdowns.
+ * the in-memory {@link SymbolMetadata} cache that scorers consult to
+ * enrich event breakdowns, and a {@link BaselineProvider} the inter-day
+ * scorers read historical baselines through.
  *
  * <p>Records are immutable. Scorers should NOT close the connection;
  * the activity owns its lifecycle.
@@ -23,6 +24,10 @@ import java.util.UUID;
  * <p>The {@code symbols} map is loaded ONCE per scoring run from the
  * {@code symbols} reference table by the host activity. Per-event
  * lookup is O(1) and incurs zero database calls.
+ *
+ * <p>{@code baselines} is built once per run too, sharing {@code conn}; it
+ * decouples the inter-day scorers from the cagg SQL (see
+ * {@link CaggBaselineProvider}).
  */
 public record ScoringContext(
         LocalDate                    tradingDate,
@@ -30,7 +35,8 @@ public record ScoringContext(
         UUID                         pipelineRunId,    // nullable
         ObjectMapper                 json,
         HeartbeatCallback            heartbeat,
-        Map<String, SymbolMetadata>  symbols
+        Map<String, SymbolMetadata>  symbols,
+        BaselineProvider             baselines
 ) {
     /** Heartbeat hook the scorer's hot loops should call every N rows. */
     @FunctionalInterface
