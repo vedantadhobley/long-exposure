@@ -185,8 +185,10 @@ public interface BaselineProvider {
 > - **Monthly *prose* rollup — NOT built.** ~8 weekly paragraphs already cover the
 >   trend horizon a daily/weekly market readout uses. A monthly prose tier is a
 >   pure long-reach *compression* feature — add it later (it's a clean mirror of
->   `AggregateWeek*`, see §3.6) only when quarterly/yearly semantic columns are
->   wanted.
+>   `AggregateWeek*`, see §3.1–§3.5) only when we want to compress settled older
+>   weeks or surface quarterly/yearly semantic columns. **When built it recomputes
+>   at a coarse cadence (weekly at most), NOT daily** — its inputs are *settled*
+>   prior weeks, so there's nothing to refresh intra-day.
 > - **The long timeline is NOT lost:** long-range *magnitude* ("vs its 11-month
 >   norm") stays available via the optional monthly *numeric* cagg (§2.4) — a
 >   better home for quantitative long-range signal than prose anyway.
@@ -372,6 +374,14 @@ Wiring:
   the prior **~8** `weekly_aggregate` rows, passing the latter under a labelled
   `PRIOR WEEKS (trend context)` heading: *use to analyze week-over-week trends;
   do not present their tickers/numbers as this week's facts.*
+- **Stateless rebuild, NOT incremental (decided 2026-05-26).** Each daily
+  recompute reads this week's *actual daily syntheses* (re-read fresh, all days
+  so far incl. the new day) — it does **not** read its own prior "week-so-far"
+  output. Reading its own prior version would compound summaries
+  (summary-of-summary drift, lossier each day); the daily syntheses are kept
+  forever, so we always rebuild from source. Net the recompute is itself
+  multi-resolution: *this* week at day granularity + prior weeks at week
+  granularity.
 - The "week-so-far" recompute is just `AggregateWeekWorkflow` run on each day of
   the open week (it already resolves the ISO week and reads days-so-far). Upsert
   by `week_start` means each daily run **replaces** the in-progress row; the
