@@ -28,7 +28,7 @@ import java.time.ZonedDateTime;
  *
  * <p>Composition principle: every <em>phase</em> of the pipeline is a
  * child workflow (Download, Parse, Validate, Score, Narrate, Interpret,
- * SynthesizeDay, Cleanup). The orchestrator itself only retains direct
+ * SynthesizeDay, AggregateWeek, Cleanup). The orchestrator itself only retains direct
  * activity calls for cross-cutting metadata that threads through the run —
  * {@link PipelineRunRecorderActivity}'s idempotency check + start/complete
  * bookkeeping — and the post-pipeline {@link CompressChunksActivity} that
@@ -39,9 +39,9 @@ import java.time.ZonedDateTime;
  *
  * <p>Concurrency: Parse and Validate run in parallel (validators read
  * raw files from disk, not the DB, so they don't depend on parse).
- * Score, Narrate, Interpret, and SynthesizeDay are strictly sequential —
- * each consumes the previous stage's output and the three LLM-bound
- * stages compete for the same 2-concurrent {@code llama-large.joi}
+ * Score, Narrate, Interpret, SynthesizeDay, and AggregateWeek are strictly
+ * sequential — each consumes the previous stage's output and the four
+ * LLM-bound stages compete for the same 2-concurrent {@code llama-large.joi}
  * slots, so even within one DailyPipelineWorkflow they cannot overlap.
  * Across days, this same constraint means running multiple
  * DailyPipelineWorkflow instances in parallel would oversubscribe the
@@ -133,6 +133,9 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
     private final SynthesizeDayWorkflow synthesizeChild = Workflow.newChildWorkflowStub(
             SynthesizeDayWorkflow.class, childOptions("synthesize"));
 
+    private final AggregateWeekWorkflow aggregateChild = Workflow.newChildWorkflowStub(
+            AggregateWeekWorkflow.class, childOptions("aggregate"));
+
     private final CleanupWorkflow cleanupChild = Workflow.newChildWorkflowStub(
             CleanupWorkflow.class, childOptions("cleanup"));
 
@@ -205,19 +208,20 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
         String notes = buildNotes(parseError, validation, validateError);
         recorder.completeRun(runId, finalStatus, messageCount, validatorStatus, notes);
 
-        // Phase 3: Score → Narrate → Interpret → Synthesize, only if
-        // parse succeeded. Validation failure doesn't gate scoring —
+        // Phase 3: Score → Narrate → Interpret → Synthesize → Aggregate,
+        // only if parse succeeded. Validation failure doesn't gate scoring —
         // unverified data is still queryable. Failures here log but
         // don't fail the workflow; downstream stages skip when their
         // upstream's output is missing, and each can be re-run via
         // its ad-hoc workflow.
         //
-        // The four stages are strictly sequential by data dependency
+        // The five stages are strictly sequential by data dependency
         // and LLM concurrency:
         //   - Score writes scored_events that Narrate reads
         //   - Narrate writes narratives that Interpret + Synthesize read
-        //   - Narrate, Interpret, and Synthesize all compete for the
-        //     same 2-concurrent llama-large.joi slots
+        //   - Synthesize writes daily_synthesis that Aggregate reads
+        //   - Narrate, Interpret, Synthesize, and Aggregate all compete
+        //     for the same 2-concurrent llama-large.joi slots
         if (parseError == null) {
             try {
                 scoreChild.run(date);
@@ -243,6 +247,18 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
                 LOG.warn("synthesize child failed (pipeline continues)  date={} err={}",
                         date, cwf.getMessage());
             }
+            // Recompute this date's week "so far" rollup. Runs every day so the
+            // week-level paragraph stays current as the week fills in; the
+            // activity content-addresses on its inputs, so the only day it does
+            // real LLM work is when a new daily synthesis (or a prior-week
+            // rollup) actually changed since the last run. Reads daily_synthesis
+            // which the synthesize step just wrote.
+            try {
+                aggregateChild.run(date);
+            } catch (ChildWorkflowFailure cwf) {
+                LOG.warn("aggregate child failed (pipeline continues)  date={} err={}",
+                        date, cwf.getMessage());
+            }
             // Compress the day's chunks now so disk stays lean.
             // Without this, ~230 GB of uncompressed data sits on disk
             // until the schema.sql compression policy's next daily run.
@@ -254,7 +270,7 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
                         date, af.getMessage());
             }
         } else {
-            LOG.info("skipping score + narrate + interpret + synthesize + compress — parse failed  date={}", date);
+            LOG.info("skipping score + narrate + interpret + synthesize + aggregate + compress — parse failed  date={}", date);
         }
 
         // Phase 4: Cleanup + retention. Files deleted only on success;

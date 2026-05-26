@@ -685,8 +685,11 @@ CREATE TABLE IF NOT EXISTS weekly_aggregate (
     prompt_version   TEXT        NOT NULL,
     verifier_passed  BOOLEAN     NOT NULL,
     verifier_notes   JSONB,
+    content_hash     BYTEA,                      -- SHA256(this week's day syntheses + prior-week rollups + prompt + model); the recompute-skip key
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- content_hash added 2026-05-26 for the recompute-daily skip; ALTER so existing DBs pick it up.
+ALTER TABLE weekly_aggregate ADD COLUMN IF NOT EXISTS content_hash BYTEA;
 
 
 -- ─── TimescaleDB compression ─────────────────────────────────────────────────

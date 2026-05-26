@@ -14,6 +14,8 @@ import io.temporal.activity.ActivityExecutionContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -55,7 +57,10 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             .getOrDefault("LLAMA_MODEL", "Qwen3.5-122B-A10B");
 
     /** Bumped when the prompt changes. */
-    private static final String PROMPT_VERSION = "aggregate-v1-2026-05-25";
+    private static final String PROMPT_VERSION = "aggregate-v4-no-priors-guard-2026-05-26";
+
+    /** Prior weekly rollups passed as week-over-week trend context (§4.3). Tunable. */
+    private static final int PRIOR_WEEKS = 8;
 
     private static final String SYSTEM_PROMPT = """
             You are a financial-data journalist writing one paragraph identifying
@@ -68,7 +73,13 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
                 totals across the week, top symbols by event count across the week,
                 and per-day event counts.
               - PER-DAY LIST: each trading day's already-written themes paragraph,
-                in chronological order, labeled by date.
+                in chronological order, labeled by date. THIS is the substance of
+                your paragraph.
+              - PRIOR WEEKS (trend context): up to a few preceding weeks' themes
+                paragraphs. Use these ONLY to frame week-over-week trends ("a third
+                straight week of rising halt activity", "the layering that dominated
+                last week faded"). Do NOT present a prior week's tickers or numbers
+                as if they happened THIS week.
 
             OUTPUT: one paragraph (3-6 sentences, ~450-750 chars). Financial-journalist
             register (FT / Bloomberg). Acronyms (LULD, NBBO, MCB, VWAP, HFT) glossed
@@ -89,15 +100,20 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             Every ticker you mention must appear in the per-day paragraphs above.
             Every numeric claim must trace to either the week metadata or a specific
             per-day paragraph — no introducing numbers from outside the inputs, no
-            approximation or rounding. The week's dates are in the metadata; do not
-            invent or restate them in a different format.
+            approximation or rounding. Cite numbers VERBATIM as they appear; do NOT
+            sum, subtract, or otherwise combine two numbers into a new one (e.g. do
+            not add two symbols' event counts together — that derived total is not
+            in the data). The week's dates are in the metadata; do not invent or
+            restate them in a different format.
 
             REGISTER:
 
             You have no news source: the data shows wire activity, not its cause.
             Do not claim external events ("the Fed", "earnings", "geopolitics"). Do
-            not speculate about intent. Do not editorialize about severity. Do not
-            compare to other weeks — you only have this one.
+            not speculate about intent. Do not editorialize about severity.
+            Week-over-week comparison IS welcome when grounded in the PRIOR WEEKS
+            block (e.g. "the third straight week of …"); just don't reach beyond
+            the prior-week paragraphs provided.
             """;
 
     @Override
@@ -113,6 +129,11 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             SchemaManager.apply(conn);
 
             actx.heartbeat("load");
+            // Stateless rebuild: read THIS week's daily syntheses fresh every
+            // run. We never read this week's own prior aggregate_text (that
+            // would compound LLM drift across the daily recompute). The
+            // "week-so-far" trend instead comes from the PRECEDING weeks, which
+            // are already-finalized and don't change underneath us.
             List<DayRow> days = loadWeek(conn, json, weekStart, weekEndExclusive);
             if (days.isEmpty()) {
                 LOG.warn("no daily syntheses for week — skipping aggregate  week_start={}", weekStart);
@@ -120,12 +141,29 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             }
             LocalDate weekEnd = days.get(days.size() - 1).tradingDate;
 
+            // Prior finalized weeks, newest-first, for week-over-week trend context.
+            List<PriorWeek> priors = loadPriorWeeks(conn, weekStart, PRIOR_WEEKS);
+
+            // Content-addressed recompute skip. The hash covers everything that
+            // can change the output: prompt/model version, this week's day
+            // paragraphs (which grow as the week fills in, and change if a day
+            // is re-synthesized), and the prior weeks' paragraphs. If a verified
+            // row already carries this exact hash, the LLM call is redundant.
+            byte[] contentHash = contentHash(days, priors);
+            if (hashUnchanged(conn, weekStart, contentHash)) {
+                LOG.info("aggregate skip (cached)  week_start={} days={} priors={}",
+                        weekStart, days.size(), priors.size());
+                return 1;
+            }
+
             actx.heartbeat("rollup");
             ObjectNode weekAggregates = rollUp(days, weekStart, weekEnd, json);
 
             // Allowed-ticker universe + number haystack come from the daily
             // syntheses themselves (each was already verified ticker-clean
-            // against its own day). Reusing SynthesisVerifier.extractTickers
+            // against its own day) PLUS the prior weeks' paragraphs (so a
+            // grounded week-over-week comparison naming last week's ticker
+            // passes the verifier). Reusing SynthesisVerifier.extractTickers
             // keeps the dotted-ticker handling identical to SYNTHESIZE.
             Set<String> weekTickers = new HashSet<>();
             StringBuilder haystack = new StringBuilder(16 * 1024);
@@ -135,9 +173,13 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
                 weekTickers.addAll(SynthesisVerifier.extractTickers(d.synthesisText));
                 haystack.append(d.synthesisText).append('\n');
             }
+            for (PriorWeek p : priors) {
+                weekTickers.addAll(SynthesisVerifier.extractTickers(p.aggregateText));
+                haystack.append(p.aggregateText).append('\n');
+            }
 
             actx.heartbeat("prompt");
-            String userPrompt = buildUserPrompt(weekStart, weekEnd, weekAggregates, days);
+            String userPrompt = buildUserPrompt(weekStart, weekEnd, weekAggregates, days, priors);
 
             actx.heartbeat("llm");
             long llmT0 = System.nanoTime();
@@ -149,7 +191,8 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             SynthesisVerifier.Result verify = verifier.verify(aggregate, weekTickers, haystack.toString());
 
             actx.heartbeat("upsert");
-            upsert(conn, weekStart, weekEnd, aggregate, weekAggregates, days.size(), verify, json);
+            upsert(conn, weekStart, weekEnd, aggregate, weekAggregates, days.size(),
+                    verify, contentHash, json);
 
             LOG.info("aggregated  week_start={} week_end={} days={} llm_ms={} verifier_passed={} mismatches={}",
                     weekStart, weekEnd, days.size(), llmElapsedMs,
@@ -237,25 +280,46 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
     }
 
     private String buildUserPrompt(final LocalDate weekStart, final LocalDate weekEnd,
-                                   final ObjectNode weekAggregates, final List<DayRow> days) {
+                                   final ObjectNode weekAggregates, final List<DayRow> days,
+                                   final List<PriorWeek> priors) {
         StringBuilder sb = new StringBuilder(16 * 1024);
         sb.append("Trading week: ").append(weekStart).append(" to ").append(weekEnd).append("\n\n");
         sb.append("WEEK METADATA: ").append(weekAggregates.toString()).append("\n\n");
-        sb.append("PER-DAY THEMES (chronological, ").append(days.size()).append(" days):\n\n");
+
+        if (priors.isEmpty()) {
+            // Be explicit: with no prior weeks, week-over-week phrasing has no
+            // ground to stand on. Silently omitting the block let the model
+            // invent "a three-week streak noted in prior summaries" from nothing.
+            sb.append("PRIOR WEEKS: none available — this is the earliest week in the archive. "
+                    + "Do NOT make any week-over-week comparison or reference earlier weeks, "
+                    + "streaks, or trends; describe only THIS week.\n\n");
+        } else {
+            // Chronological (oldest-first) reads more naturally as a trend run-up.
+            sb.append("PRIOR WEEKS (trend context only — do NOT present these as this week's activity):\n\n");
+            for (int i = priors.size() - 1; i >= 0; i--) {
+                PriorWeek p = priors.get(i);
+                sb.append("[week of ").append(p.weekStart).append("] ")
+                  .append(p.aggregateText == null ? "(no aggregate)" : p.aggregateText.trim())
+                  .append("\n\n");
+            }
+        }
+
+        sb.append("THIS WEEK — PER-DAY THEMES (chronological, ").append(days.size()).append(" days):\n\n");
         for (DayRow d : days) {
             sb.append("[").append(d.tradingDate).append("] ")
               .append(d.synthesisText == null ? "(no synthesis)" : d.synthesisText.trim())
               .append("\n\n");
         }
-        sb.append("Now write the week's themes paragraph (3-6 sentences, journalist register, "
-                + "synthesize across days, ground every claim in the data above).");
+        sb.append("Now write THIS week's themes paragraph (3-6 sentences, journalist register, "
+                + "synthesize across this week's days, ground every claim in the data above; "
+                + "use the prior weeks only to frame week-over-week trends).");
         return sb.toString();
     }
 
     private void upsert(final Connection conn, final LocalDate weekStart, final LocalDate weekEnd,
                         final String aggregate, final ObjectNode weekAggregates,
                         final int daysConsidered, final SynthesisVerifier.Result verify,
-                        final ObjectMapper json) throws Exception {
+                        final byte[] contentHash, final ObjectMapper json) throws Exception {
         ObjectNode verifierNotes = json.createObjectNode();
         verifierNotes.put("tickers_checked", verify.tickersChecked());
         verifierNotes.put("numbers_checked", verify.numbersChecked());
@@ -265,9 +329,9 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
                 INSERT INTO weekly_aggregate (
                     week_start, week_end, aggregate_text, days_considered,
                     week_aggregates, model_id, prompt_version,
-                    verifier_passed, verifier_notes
+                    verifier_passed, verifier_notes, content_hash
                 )
-                VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?::jsonb)
+                VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?::jsonb, ?)
                 ON CONFLICT (week_start) DO UPDATE SET
                     week_end        = EXCLUDED.week_end,
                     aggregate_text  = EXCLUDED.aggregate_text,
@@ -277,6 +341,7 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
                     prompt_version  = EXCLUDED.prompt_version,
                     verifier_passed = EXCLUDED.verifier_passed,
                     verifier_notes  = EXCLUDED.verifier_notes,
+                    content_hash    = EXCLUDED.content_hash,
                     created_at      = NOW()
                 """;
         try (PreparedStatement st = conn.prepareStatement(sql)) {
@@ -289,7 +354,80 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             st.setString(7, PROMPT_VERSION);
             st.setBoolean(8, verify.passed());
             st.setString(9, verifierNotes.toString());
+            st.setBytes(10, contentHash);
             st.executeUpdate();
+        }
+    }
+
+    /** Preceding finalized weekly rollups, newest-first, capped at {@code n}. */
+    private List<PriorWeek> loadPriorWeeks(final Connection conn, final LocalDate weekStart,
+                                           final int n) throws Exception {
+        String sql = """
+                SELECT week_start, aggregate_text
+                FROM weekly_aggregate
+                WHERE week_start < ?
+                ORDER BY week_start DESC
+                LIMIT ?
+                """;
+        List<PriorWeek> out = new ArrayList<>();
+        try (PreparedStatement st = conn.prepareStatement(sql)) {
+            st.setObject(1, weekStart);
+            st.setInt(2, n);
+            try (ResultSet rs = st.executeQuery()) {
+                while (rs.next()) {
+                    PriorWeek p = new PriorWeek();
+                    p.weekStart     = rs.getObject("week_start", LocalDate.class);
+                    p.aggregateText = rs.getString("aggregate_text");
+                    out.add(p);
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * SHA-256 over everything that determines the output: prompt + model
+     * version, this week's day paragraphs (date + text), and the prior weeks'
+     * paragraphs (week_start + text). Deterministic ordering — days are already
+     * chronological, priors are newest-first from the query.
+     */
+    private static byte[] contentHash(final List<DayRow> days, final List<PriorWeek> priors) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            md.update(PROMPT_VERSION.getBytes(StandardCharsets.UTF_8));
+            md.update((byte) 0);
+            md.update(MODEL_ID.getBytes(StandardCharsets.UTF_8));
+            md.update((byte) 0);
+            for (DayRow d : days) {
+                md.update(d.tradingDate.toString().getBytes(StandardCharsets.UTF_8));
+                md.update((byte) 0);
+                md.update((d.synthesisText == null ? "" : d.synthesisText).getBytes(StandardCharsets.UTF_8));
+                md.update((byte) 0);
+            }
+            md.update((byte) 0x1e);   // record separator between the two lists
+            for (PriorWeek p : priors) {
+                md.update(p.weekStart.toString().getBytes(StandardCharsets.UTF_8));
+                md.update((byte) 0);
+                md.update((p.aggregateText == null ? "" : p.aggregateText).getBytes(StandardCharsets.UTF_8));
+                md.update((byte) 0);
+            }
+            return md.digest();
+        } catch (Exception e) {
+            throw new RuntimeException("content hash failed", e);
+        }
+    }
+
+    /** True if a verified row for this week already carries this exact content hash. */
+    private static boolean hashUnchanged(final Connection conn, final LocalDate weekStart,
+                                         final byte[] contentHash) throws Exception {
+        String sql = "SELECT 1 FROM weekly_aggregate "
+                + "WHERE week_start = ? AND content_hash = ? AND verifier_passed = true LIMIT 1";
+        try (PreparedStatement st = conn.prepareStatement(sql)) {
+            st.setObject(1, weekStart);
+            st.setBytes(2, contentHash);
+            try (ResultSet rs = st.executeQuery()) {
+                return rs.next();
+            }
         }
     }
 
@@ -307,5 +445,10 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
         LocalDate tradingDate;
         String synthesisText;
         JsonNode dayAggregates;
+    }
+
+    private static final class PriorWeek {
+        LocalDate weekStart;
+        String aggregateText;
     }
 }
