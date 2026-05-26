@@ -50,6 +50,39 @@ This sprint runs straight into the start at IEX. The discipline is: **no bandaid
 
 ---
 
+## Backend-completion plan (revised 2026-05-26 — backend-first)
+
+**Strategy (decided 2026-05-26):** finish the backend *completely* before the
+frontend, so the data model is set-and-forget and the frontend is just a view
+over clean, self-maintaining data. Allocation: **rest of Tue 5/26 + Wed/Thu/Fri**
+= backend; **Sat 5/30** = frontend (≈1 day, improvable over time);
+**Sun 5/31** = whitepaper + finishing touches; **Mon 6/1** = publish.
+
+The backbone goal: **content-addressed, parameter-independent** wiring (see
+`cost-model-and-wiring.md` §6 + `tiered-baselines-design.md` §4) so any future
+prompt/scorer/window change re-runs only what changed, automatically.
+
+| Phase | What | Status / effort |
+|---|---|---|
+| **1 — Memoization skip (per-event)** | content-addressed skip in DESCRIBE + INTERPRET (`event_hash`/`interpretation_hash` exists-check before the LLM; reuse passes, retry failures) | ✅ **done 2026-05-26** (committed `4247805`; proven on 05-13: 168 skips / 2 calls / 40 s vs ~50 min) |
+| **2 — Weekly rollup machinery** ◀ NEXT | the real "rollup wiring" (today's AGGREGATE is own-week-only, manual, not in the pipeline). Build: (a) prior-**~8**-week window into `AggregateWeek` + extend its verifier haystack to the prior-week paragraphs; (b) **stateless rebuild** from this week's daily syntheses (not its own prior output); (c) **recompute-daily "week-so-far"** (run on each open-week day, upsert-by-`week_start`, last run finalizes); (d) **content-address AGGREGATE** so the daily recompute skips when the week's inputs are unchanged; (e) wire AGGREGATE into `DailyPipelineWorkflow` after SYNTHESIZE | ~1 day (Wed) |
+| **3 — Tiered numeric baselines** | extend daily cagg retention/refresh (30→~400 d) + `BaselineProvider` abstraction + refactor `VolumeDeviationScorer` onto it (multi-resolution window plumbing; monthly *numeric* cagg deferred — no months of data yet) | ~1 day (Thu) |
+| **4 — Polish batch + uniform cheap re-run** | breakdown/prompt fixes (iceberg `total_shares`, `BreakdownFmt` number formatting, dotted-ticker `SynthesisVerifier`/AGGREGATE fix, layering `orders_per_second`) → then re-run all days — **cheap now** (skip re-narrates only changed events). Also re-score 05-18→22 for vol-dev uniformity. End-state: clean, uniform 2-week dataset | ~1 day (Fri) |
+| **5 — Robustness (if time)** | `TimeInBookDriftScorer` (reuses `BaselineProvider`); `SchemaManager` concurrent-CREATE race; `isAlreadyIngested`-marks-ok-before-LLM fix; extract the full `MemoizedStage` abstraction (§6.7 phase 2) | stretch |
+
+**Deferred (post-launch, not in this sprint):** monthly *prose* rollup (long-reach
+compression — see tiered-baselines §3); monthly *numeric* cagg; prompt-TEXT
+hashing (§6.7 phase 4); the full `MemoizedStage` refactor if not reached in 5.
+
+**Backend "done" = Fri night:** the per-event skip + the daily-recomputed,
+prior-week-windowed, pipeline-wired weekly rollup + tiered baselines + a clean
+uniform dataset, all content-addressed so re-runs are cheap and auto-correct.
+
+> Supersedes the Day 6-10 calendar rows above for the remaining days
+> (those predate the backend-first decision).
+
+---
+
 ## Day-by-day breakdown
 
 ### Day 1 — Issue fixes (Thursday 5/21, today)
