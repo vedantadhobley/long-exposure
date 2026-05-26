@@ -62,9 +62,14 @@ The retention reframe split "inter-day" into two tracks with different data need
 
 ### Post-launch
 
-17. **Extend retention to 4 weeks** if deeper baselines wanted (one-line `RETENTION_WEEKS` change) — and only *then* revisit the cross-node stage-pipelined backfill (considered + deferred 2026-05-25; see `decisions.md` and the parallelization audit below — not worth the orchestration complexity at 2-week scope).
-18. **Monthly AGGREGATE** (reads multiple weekly rollups) — needs ≥2 weekly rollups, i.e. ≥2 weeks of data, which we'll have.
-19. **SUMMARIZE stage + the rest of the inter-day scorers** (`TimeInBookDriftScorer`).
+> **Tiered baselines + monthly rollups — full design in [`tiered-baselines-design.md`](tiered-baselines-design.md)** (2026-05-26). Items 17–20 below are the headline tasks from it; the doc has the detailed implementation (cagg-on-cagg DDL, `BaselineProvider` interface, AGGREGATE-monthly activity/workflow mirror, retention table, build phasing, median-decomposability gotcha). Key insight: the daily `daily_volume_by_symbol` cagg is tiny (~2.2 M rows/yr) and already *outlives* the 2-week wire TTL (caggs decouple from source once materialized) — so keeping it ~1 yr gives exact baselines for free; the monthly *numeric* tier is optional, while the monthly *prose* tier (AGGREGATE-monthly) is the real new build.
+
+17. **Extend daily cagg retention/refresh window** (`30 days` → `~400 days`) + confirm `RetentionSweepActivity` never drops it → exact 1-year baselines, no new objects. Smallest, highest-leverage item (design §5.1).
+18. **`BaselineProvider` + refactor `VolumeDeviationScorer`** onto it (design §2.5) — decouples scoring from inline SQL, opens the monthly tier + `TimeInBookDriftScorer` reuse.
+19. **AGGREGATE-monthly** (prose) — mirror `AggregateWeek*` one tier up: `monthly_aggregate` table + `AggregateMonthActivity`/`Workflow`, reuse `SynthesisVerifier` + `SamplingParams.AGGREGATE` (design §3). Independent; ships once ≥1 month of `weekly_aggregate` exists.
+20. **`TimeInBookDriftScorer` + its lifetime cagg** (design §2.6); **monthly numeric tier** (`monthly_volume_by_symbol` cagg-on-cagg, design §2.4) only if multi-year reach is wanted — decide mean-fallback vs toolkit percentile sketch then.
+- **Extend retention to 4 weeks** if deeper baselines wanted (one-line `RETENTION_WEEKS` change) — and only *then* revisit the cross-node stage-pipelined backfill (considered + deferred 2026-05-25; see `decisions.md` and the parallelization audit below — not worth the orchestration complexity at 2-week scope).
+- **SUMMARIZE stage** (background baselines + day-aggregates as a named pipeline stage).
 
 ### Prompt-level limitations (queued for v5)
 
