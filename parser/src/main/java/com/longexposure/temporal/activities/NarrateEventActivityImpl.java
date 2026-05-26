@@ -58,6 +58,18 @@ public final class NarrateEventActivityImpl implements NarrateEventActivity {
                 return 0;
             }
 
+            // Content-addressed skip. event_hash = SHA256(scorer_id + breakdown +
+            // prompt versions); if a verified narrative already exists for these
+            // exact inputs, reuse it and skip the 2 LLM calls. Makes re-scoring /
+            // backfill cheap — only genuinely new or changed events hit the LLM.
+            // (Storage upsert is unchanged; this just avoids the compute.)
+            byte[] eventHash = pipeline.eventHash(in);
+            if (verifiedExists(conn, "narratives", "event_hash", eventHash)) {
+                LOG.info("narrate skip (cached)  selected_id={} scorer={} symbol={}",
+                        selectedId, in.scorerId(), in.symbol());
+                return 1;
+            }
+
             actx.heartbeat("extract:" + selectedId);
             NarrationPipeline.Result result = pipeline.narrate(in);
             actx.heartbeat("upsert:" + selectedId);
@@ -157,6 +169,22 @@ public final class NarrateEventActivityImpl implements NarrateEventActivity {
             st.setString(13, verifierNotes);
             st.setString(14, result.rendered().toJson(json).toString());
             st.executeUpdate();
+        }
+    }
+
+    /**
+     * Content-addressed freshness check: does a {@code verifier_passed} row with
+     * this hash already exist? {@code table} / {@code hashCol} are code
+     * constants (never user input) — no injection surface.
+     */
+    static boolean verifiedExists(final Connection conn, final String table,
+                                  final String hashCol, final byte[] hash) throws Exception {
+        String sql = "SELECT 1 FROM " + table + " WHERE " + hashCol + " = ? AND verifier_passed = true LIMIT 1";
+        try (PreparedStatement st = conn.prepareStatement(sql)) {
+            st.setBytes(1, hash);
+            try (ResultSet rs = st.executeQuery()) {
+                return rs.next();
+            }
         }
     }
 

@@ -144,6 +144,18 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
             ObjectNode preJson  = pre.toJson(json);
             ObjectNode postJson = post.toJson(json);
 
+            // Content-addressed skip (same pattern as NarrateEventActivity). The
+            // window queries above are cheap SQL; the LLM call below is the
+            // expensive part. interpretation_hash folds in breakdown + window
+            // summaries + prompt version, so if a verified interpretation exists
+            // for these exact inputs we reuse it and skip the LLM.
+            byte[] hash = computeHash(row.scorerId, row.breakdown, preJson, postJson);
+            if (NarrateEventActivityImpl.verifiedExists(conn, "interpretations", "interpretation_hash", hash)) {
+                LOG.info("interpret skip (cached)  selected_id={} scorer={} symbol={}",
+                        selectedId, row.scorerId, row.symbol);
+                return 1;
+            }
+
             actx.heartbeat("llm:" + selectedId);
 
             String userPrompt = buildUserPrompt(row, catalog, pre, post);
@@ -154,8 +166,6 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
             InterpretationVerifier verifier = new InterpretationVerifier();
             InterpretationVerifier.Result verify = verifier.verify(
                     interpretation, row.breakdown, preJson, postJson, row.symbol);
-
-            byte[] hash = computeHash(row.scorerId, row.breakdown, preJson, postJson);
 
             actx.heartbeat("upsert:" + selectedId);
             upsert(conn, row, interpretation, preJson, postJson, hash, verify, json);
