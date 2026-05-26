@@ -228,10 +228,12 @@ comparison." `PROMPT_VERSION = "aggregate-month-v1-…"`.
 
 ### 3.4 Cadence
 
-Weekly cron (Sun) already planned for AGGREGATE-weekly; add a **monthly cron**
-(1st of month, after the prior month's last weekly aggregate exists), paused by
-default like the others. Or ad-hoc:
-`temporal workflow start --type AggregateMonthWorkflow --input '[2026,5,1]'`.
+**Superseded by §4.3's recompute model** — read that for the final word. In
+short: rather than a once-weekly / once-monthly cron, each rollup is recomputed
+at its **sub-period cadence** ("week-so-far" recomputed daily, "month-so-far"
+recomputed weekly), upserting by `week_start` / `month_start` so each run
+replaces the in-progress row and the period-end run is the finalized one. Plus
+ad-hoc: `temporal workflow start --type AggregateMonthWorkflow --input '[2026,5,1]'`.
 
 ### 3.5 Frontend
 
@@ -246,21 +248,31 @@ page.
 
 The question this section answers: **how far back does each level reach, at what
 resolution, and how does that context get assembled and handed to the scorer /
-narrative driver?** The governing principle (decided 2026-05-26):
+narrative driver?** The governing principle (decided 2026-05-26, refined after
+the "a Monday wouldn't have last Friday's data" latency point):
 
-> **Numbers carry the long memory; prose stays mostly period-local.** The
-> multi-resolution history (recent weeks at daily granularity + the year at
-> monthly granularity) lives in the **numeric** baselines that feed the
-> detectors. The **prose** rollups stay anchored to their own period, with at
-> most a light prior-period "continuity" nudge. So "this is 4.7× its 11-month
-> norm" is surfaced as a *scorer number narrated per event*, not as the weekly
-> LLM re-summarizing a year of prose.
+> **Two kinds of trend history, two mechanisms.** *Quantitative* magnitude
+> history ("4.7× its 11-month volume norm") is carried by the **numeric**
+> baselines that feed the detectors — per symbol, per metric, exact-recent +
+> coarse-long. *Qualitative / semantic* trend history ("activity shifted from
+> halts to layering," "these names keep recurring") is carried by the **prose**
+> rollups — and prose carries it **two complementary ways**: (a) **climbing the
+> tiers** (the month summarizes its weeks; the quarter its months), and (b) a
+> **prior-period window** at each tier — each rollup reads a *meaningful* span of
+> prior same-tier periods so trends are visible **at that tier's own cadence**,
+> not only retrospectively when the tier above eventually runs.
 
-Why: a number compares cleanly and grounds trivially (the scorer puts both
-figures in the breakdown). Prose that reaches back a year would bloat the prompt
-and multiply the grounding surface (every prior-period claim is another
-fabrication-check target — cf. the TSEM catch in the weekly verifier). Reach is
-cheap and verifiable on the numeric side; expensive and fuzzy on the prose side.
+Why both (a) and (b): climbing the tiers alone has a **latency gap** — if the
+weekly rollup only sees its own week, nothing notices a week-over-week trend
+until the *monthly* runs (weeks later). The prior-period window closes that:
+a weekly rollup that reads the prior ~3–4 weeks can say "the third straight week
+of rising halts" *this week*. It's affordable because rollups read prior
+**paragraphs** (~700 chars each), not raw data, and they're 1 LLM call — so we
+also **recompute them at their sub-period cadence** (the weekly rollup
+recomputed *daily* as "week-so-far"; the monthly *weekly* as "month-so-far") to
+keep the live view current. The numeric side still carries the per-symbol
+magnitude reach (cheap, exact, groundable); the prose side carries the semantic
+arcs, timely at every tier.
 
 ### 4.1 Reach + resolution matrix
 
@@ -270,15 +282,20 @@ cheap and verifiable on the numeric side; expensive and fuzzy on the prose side.
 | Inter-day scorer — *recent tier* | ~2–4 weeks | **daily** (exact median) | `daily_volume_by_symbol` | "vs its 4-week norm" |
 | Inter-day scorer — *long tier* | ~12 months | **monthly** (mean / sketch) | `monthly_volume_by_symbol` | "vs its 11-month norm" |
 | Daily SYNTHESIZE | **0** — today's events | — | `narratives` + `interpretations` | the day's themes |
-| Weekly AGGREGATE | this week **+ light: prior 1–2 weeks** | weekly prose | `daily_synthesis` (+ recent `weekly_aggregate`) | week themes + continuity |
-| Monthly AGGREGATE | this month **+ light: prior 1–2 months** | monthly prose | `weekly_aggregate` (+ recent `monthly_aggregate`) | month themes + continuity |
+| Weekly AGGREGATE | this week-so-far **+ prior ~3–4 weeks** | weekly prose | `daily_synthesis` (this week) + prior `weekly_aggregate`s | week themes + week-over-week trend |
+| Monthly AGGREGATE | this month-so-far **+ prior ~3–6 months** | monthly prose | `weekly_aggregate` (this month) + prior `monthly_aggregate`s | month themes + month-over-month trend |
 
-Mapping your "week + 3–4 weeks prior + 11–12 months prior" intuition: that
-multi-resolution shape is **exactly right for the numeric baseline** (recent
-weeks at daily resolution + the year at monthly resolution). For the **prose**
-weekly rollup, the same depth would be heavy — so we let the *numbers* carry the
-3-to-12-month reach and keep the weekly prose to its own week plus a 1–2-week
-continuity glance.
+Mapping your "week + 3–4 weeks prior + 11–12 months prior" intuition: the
+multi-resolution *magnitude* shape (recent weeks at daily resolution + the year
+at monthly resolution) is the **numeric baseline** (§4.2). The *semantic* shape
+is the prose window above — each rollup reads a real span of prior same-tier
+periods (so the weekly genuinely analyzes week-over-week trends, not just its own
+week). The one place we *don't* go a flat year deep is the **weekly** prose
+prompt: instead of stuffing 11–12 months of weekly paragraphs into the weekly
+call, that longer arc is the **monthly** tier's job (it reads the months) plus
+the numeric long-tier — so each tier reads a *bounded* prior window and the
+deeper reach comes from the tier above. Net: timely trend awareness at every
+level without any single prompt carrying a year of prose.
 
 ### 4.2 Numeric side — the multi-resolution baseline window (detail + wiring)
 
@@ -317,29 +334,44 @@ ratio (recent tier thin → fall back to / cross-check against the monthly norm)
 and a symbol with a genuine multi-month regime shift surfaces against the long
 tier even when the last 4 weeks look "normal."
 
-### 4.3 Prose side — period-local + light continuity (detail + wiring)
+### 4.3 Prose side — own period + a real prior-period window (detail + wiring)
 
-Each prose rollup's **substance** is its own period's tier-below outputs
-(unchanged from §3): the weekly AGGREGATE reads *this week's* daily syntheses;
-the monthly reads *this month's* weekly aggregates. The **only** cross-period
-addition is a small **continuity block** — the prior **1–2** same-tier rollups,
-included so the LLM can say "the third straight week of rising halts" instead of
-narrating each week in a vacuum.
+Each prose rollup reads two things: its **substance** = its own period's
+tier-below outputs (the weekly reads *this week's* daily syntheses), **plus** a
+**prior-period window** = the prior ~3–4 same-tier rollups, so it can actually
+*analyze* week-over-week (or month-over-month) trends rather than describe its
+own period in a vacuum. This is the part that closes the latency gap.
 
-Wiring of the continuity block:
-- `AggregateWeekActivity` additionally loads the prior 1–2 `weekly_aggregate`
-  rows and passes them under a clearly-labelled `PRIOR WEEKS (context only)`
-  prompt heading, with the instruction: *use only to establish continuity; do
-  not introduce their tickers/numbers as this week's facts.*
-- **Grounding implication (load-bearing):** those prior-period paragraphs must be
-  added to the verifier's allowed-ticker universe + number haystack — otherwise a
-  legitimate "vs last week" reference is flagged as fabrication (exactly the
-  TSEM-class catch). So continuity context is *opt-in per claim*: the verifier
-  accepts tickers/numbers that trace to **either** this period's inputs **or**
-  the continuity block.
-- Keep it to 1–2 priors. Each added prior period is another grounding surface and
-  more prompt; the marginal narrative value tapers fast, and the real long-range
-  signal is already carried numerically (§4.2) and surfaced per-event.
+**Recompute cadence (this is the bit that answers "would a Monday have last
+Friday's data?").** The daily SYNTHESIZE is day-local — Monday's synthesis sees
+only Monday. But the **weekly rollup is recomputed *daily* as "week-so-far"**:
+the Monday run reads this week's days so far (just Monday) **+ the prior ~3–4
+finalized weekly rollups** (which contain last week, i.e. last Friday's themes).
+So the cross-day / cross-week trend *does* reach Monday — it lives in the
+**weekly-so-far** rollup, not the daily one. Same one tier up: the monthly is
+recomputed weekly as "month-so-far." Cheap, because each recompute is **one** LLM
+call over short paragraphs, not a re-narration.
+
+Wiring:
+- `AggregateWeekActivity` loads this week's `daily_synthesis` rows (substance) +
+  the prior ~3–4 `weekly_aggregate` rows, passing the latter under a labelled
+  `PRIOR WEEKS (trend context)` heading: *use to analyze week-over-week trends;
+  do not present their tickers/numbers as this week's facts.*
+- The "week-so-far" recompute is just `AggregateWeekWorkflow` run on each day of
+  the open week (it already resolves the ISO week and reads days-so-far). Upsert
+  by `week_start` means each daily run **replaces** the in-progress row; the
+  Friday run is the finalized week. Archive keeps finalized weeks; the live page
+  shows "this week so far."
+- **Grounding (load-bearing):** the prior-window paragraphs must enter the
+  verifier's allowed-ticker universe + number haystack, else a legitimate "vs
+  last week" reference trips the fabrication check (the TSEM-class catch). So the
+  window is *opt-in per claim*: a ticker/number is accepted if it traces to **this
+  period's inputs OR the prior-period window.**
+- **Where we cap it:** the *weekly* prompt reads ~3–4 prior weeks, **not** a flat
+  11–12 months of weekly paragraphs. The longer arc is the **monthly** tier's job
+  (it reads the months) plus the numeric long-tier. So each tier carries a
+  *bounded* prior window; deeper reach comes from climbing one tier up, keeping
+  any single prompt small and its grounding surface contained.
 
 ### 4.4 How the two windows compose end-to-end
 
@@ -347,21 +379,26 @@ Wiring of the continuity block:
 day D scoring run
   ├─ intraday scorers      → today's wire only
   └─ inter-day scorers     → recent tier (≤4 wk, daily, exact)
-                             + long tier (≤12 mo, monthly, approx)   ⟵ numbers carry the year
+                             + long tier (≤12 mo, monthly, approx)   ⟵ MAGNITUDE history (numbers)
         ↓ both norms baked into each event's breakdown
    DESCRIBE / INTERPRET     → render the pre-computed norms (no lookback in the LLM)
         ↓
-   daily SYNTHESIZE         → today's narrations only
+   daily SYNTHESIZE         → today's narrations only (day-local)
         ↓
-   weekly AGGREGATE         → this week's syntheses  + [prior 1–2 weekly aggregates] (continuity)
+   weekly AGGREGATE         → this week-so-far  + prior ~3–4 weekly rollups   ⟵ SEMANTIC trend, recomputed DAILY
+   (recomputed each day)      (so Monday already carries last week / last Friday)
         ↓
-   monthly AGGREGATE        → this month's weeklies  + [prior 1–2 monthly aggregates] (continuity)
+   monthly AGGREGATE        → this month-so-far + prior ~3–6 monthly rollups  ⟵ recomputed WEEKLY
+   (recomputed each week)
+        ↓
+   [quarterly / yearly]     → deeper arcs come from climbing one tier further
 ```
 
-The long memory enters **once**, as numbers, at scoring time; everything above it
-either renders those numbers (per-event prose) or summarizes its own period with
-a light backward glance (rollups). No level re-derives a year of history in an
-LLM prompt.
+Two histories, both timely: **magnitude** enters once as numbers at scoring time
+(rendered per-event); **semantic** trend is carried by the prose rollups, each
+reading a *bounded* prior window of its own tier (so trends surface at that
+tier's cadence, recomputed live) with the truly long arc handled by the tier
+above. No single LLM prompt ever carries a year of prose.
 
 ---
 
