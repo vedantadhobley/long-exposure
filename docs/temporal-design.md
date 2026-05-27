@@ -9,7 +9,7 @@ responsible for. Reflects what's actually running in `parser/src/main/java/com/l
 
 ## Workflows
 
-Twelve workflows registered on task queue `long-exposure-daily-pipeline`. The orchestrator (`DailyPipelineWorkflow`) only calls child workflows + metadata bookkeeping activities — every phase is its own child workflow.
+Thirteen workflows registered on task queue `long-exposure-daily-pipeline`. The orchestrator (`DailyPipelineWorkflow`) only calls child workflows + metadata bookkeeping activities — every phase is its own child workflow.
 
 | Workflow | Trigger | What it does |
 |---|---|---|
@@ -18,15 +18,16 @@ Twelve workflows registered on task queue `long-exposure-daily-pipeline`. The or
 | `ParseWorkflow` | child of DailyPipeline + ad-hoc | Parses the DPLS feed into 13 hypertables via JDBC COPY. Idempotent (pre-cleans by trading_date). |
 | `ValidateWorkflow` | child of DailyPipeline + ad-hoc | Runs the 3 validators in parallel and upserts `validation_runs`. Returns the per-leg result for the parent to record. |
 | `MaterializeWorkflow` | ad-hoc only | Builds the `order_lifecycle` table for a date whose DPLS data is already in Postgres. (DailyPipeline invokes the materialize step via `ScoreWorkflow`, not this workflow, but this exists for ad-hoc backfilling.) |
-| `ScoreWorkflow` | child of DailyPipeline + ad-hoc | Materialize lifecycle → run scoring → select top-N. |
+| `ScoreWorkflow` | child of DailyPipeline + ad-hoc | Refresh baselines cagg → materialize lifecycle → run scoring (8 scorers) → enrich co-occurrence → select top-N. |
 | `SelectWorkflow` | ad-hoc only | Just SelectTopEvents — pulls top-N from existing `scored_events` to `selected_events`. For iterating on per-scorer caps without re-scoring. |
 | `NarrateWorkflow` | child of DailyPipeline + ad-hoc | DESCRIBE stage. Two-pass extract → render → verify against the LLM. Writes `narratives`. **LLM-bearing.** |
 | `InterpretWorkflow` | child of DailyPipeline + ad-hoc | INTERPRET stage. Per-event LLM call with surrounding ±60-sec wire-data window. Writes `interpretations`. **LLM-bearing.** |
 | `SynthesizeDayWorkflow` | child of DailyPipeline + ad-hoc | SYNTHESIZE stage. Single LLM call per day reading all per-event INTERPRET outputs. Writes `daily_synthesis`. **LLM-bearing.** |
-| `CleanupWorkflow` | child of DailyPipeline + ad-hoc | Deletes the day's `.pcap.gz` files (only on success) + drops Postgres chunks older than the retention window. |
+| `AggregateWeekWorkflow` | child of DailyPipeline + ad-hoc | AGGREGATE stage. Recompute-daily "week-so-far" rollup: one LLM call reading this week's daily syntheses + the prior ~8 weekly rollups (trend context). Content-addressed (`weekly_aggregate.content_hash`) so the daily recompute is incremental. Writes `weekly_aggregate`. **LLM-bearing.** |
+| `CleanupWorkflow` | child of DailyPipeline + ad-hoc | Deletes the day's `.pcap.gz` files (only on success) + runs the week-aligned 2-week retention sweep. |
 | `RefreshSymbolsWorkflow` | weekly cron (Sun 02:00 ET, paused) + ad-hoc | Refreshes the `symbols` reference table from NASDAQ public listings + SEC EDGAR canonical names + IEX SecurityDirectory. |
 
-**Operational rule (load-bearing):** only one LLM-bearing workflow (`NarrateWorkflow`, `InterpretWorkflow`, `SynthesizeDayWorkflow`) runs at a time. All three dispatch on the same `NARRATION_TASK_QUEUE` and share the JVM-wide `Semaphore(2, fair)` inside `LlamaClient`, so running two simultaneously would have them compete for the same 2 LLM slots — both technically "running" but only one making progress, plus wasted Temporal scheduling cycles. See `docs/operations.md`.
+**Operational rule (load-bearing):** only one LLM-bearing workflow (`NarrateWorkflow`, `InterpretWorkflow`, `SynthesizeDayWorkflow`, `AggregateWeekWorkflow`) runs at a time. All four dispatch on the same `NARRATION_TASK_QUEUE` and share the JVM-wide `Semaphore(2, fair)` inside `LlamaClient`, so running two simultaneously would have them compete for the same 2 LLM slots — both technically "running" but only one making progress, plus wasted Temporal scheduling cycles. See `docs/operations.md`.
 
 **Composition model.**
 
@@ -53,7 +54,7 @@ DailyPipelineWorkflowInput(
     LocalDate targetDate,           // trading date (1970-01-01 = "yesterday-ET" placeholder for cron)
     boolean   pollUntilReady,       // true: long-poll on FilesNotReady (15-min, 3-hr budget). false: fail fast.
     boolean   forceReingest,        // true: pre-clean + re-parse even if status='ok' row exists.
-    boolean   runRetentionSweep)    // true: drop chunks older than 30 days at end. Also gates CleanupFiles.
+    boolean   runRetentionSweep)    // true: run the week-aligned 2-week retention sweep at end. Also gates CleanupFiles.
 ```
 
 Helpers: `cron(date)` → `(date, true, false, true)`. `adHoc(date)` → `(date, false, false, false)`.
@@ -111,13 +112,15 @@ flowchart TD
 
     CompleteRun --> ScoreGate{parseError == null?}
     ScoreGate -->|no| Skip[skip scoring +<br/>cleanup]
-    ScoreGate -->|yes| Materialize[MaterializeOrderLifecycle<br/>orders_add ⨝ orders_delete<br/>once → order_lifecycle]
-    Materialize --> Score[ScoreEvents<br/>7 scorers → scored_events<br/>PostCancel + Layering read order_lifecycle]
-    Score --> Select[SelectTopEvents<br/>per-scorer top-N → selected_events]
-    Select --> Narrate[NarrateEvents<br/>two-pass extract+render+verify<br/>→ narratives]
-    Narrate --> Interpret[InterpretEvents<br/>per-event surrounding-context LLM<br/>→ interpretations]
-    Interpret --> Synthesize[SynthesizeDay<br/>one LLM call across day's events<br/>→ daily_synthesis]
-    Synthesize --> Compress[CompressChunks<br/>compress today's chunks now<br/>~13 GB on disk per day vs ~230 GB uncompressed]
+    ScoreGate -->|yes| Refresh[RefreshBaselines<br/>refresh daily_volume cagg<br/>for the trading day]
+    Refresh --> Materialize[MaterializeOrderLifecycle<br/>orders_add ⨝ orders_delete<br/>once → order_lifecycle]
+    Materialize --> Score[ScoreEvents<br/>8 scorers → scored_events<br/>PostCancel + Layering read order_lifecycle]
+    Score --> Select[SelectTopEvents<br/>percentile-rank → selected_events]
+    Select --> Narrate[NarrateEvents — DESCRIBE<br/>two-pass extract+render+verify, retry×3<br/>→ narratives]
+    Narrate --> Interpret[InterpretEvents — INTERPRET<br/>per-event surrounding-context LLM, retry×3<br/>→ interpretations]
+    Interpret --> Synthesize[SynthesizeDay — SYNTHESIZE<br/>one LLM call across day's events<br/>→ daily_synthesis]
+    Synthesize --> Aggregate[AggregateWeek — AGGREGATE<br/>recompute this week's rollup<br/>→ weekly_aggregate]
+    Aggregate --> Compress[CompressChunks<br/>compress today's chunks now<br/>~13 GB on disk per day vs ~230 GB uncompressed]
     Compress --> CleanupGate
 
     CleanupGate{runRetentionSweep<br/>AND status=ok?}
@@ -128,7 +131,7 @@ flowchart TD
     KeepFiles --> SweepGate
 
     SweepGate{runRetentionSweep?}
-    SweepGate -->|yes| Sweep[RetentionSweep<br/>drop_chunks older<br/>than 30 days]
+    SweepGate -->|yes| Sweep[RetentionSweep<br/>week-aligned<br/>2-week sweep]
     SweepGate -->|no| EndC
     Sweep --> EndC([end])
 ```
@@ -227,7 +230,7 @@ docker exec long-exposure-dev-temporal temporal workflow start \
 
 ## Activities
 
-Nineteen activity classes total, split across two task queues:
+Twenty-two activity classes total, split across two task queues:
 
 - **Main queue** (`long-exposure-daily-pipeline`): every non-LLM activity. Default Temporal concurrency (200 slots) since none of these saturate a shared bottleneck.
 - **Narration queue** (`NARRATION_TASK_QUEUE`): the three LLM-bound activities (`NarrateEventActivity`, `InterpretEventActivity`, `SynthesizeDayActivity`). Worker configured with `setMaxConcurrentActivityExecutionSize(2)` to cap LLM-call concurrency at the GPU's safe parallelism on `llama-large.joi`. The JVM-wide `Semaphore(2, fair)` inside `LlamaClient` is the second-line defense.
@@ -448,10 +451,17 @@ peak ~75 GB on order_lifecycle) compresses in ~26 min single-threaded.
 
 ### `RetentionSweepActivity`
 
-**What.** Drops chunks older than `cutoffDate - retainDays` (30 days) from
-DPLS-only hypertables via TimescaleDB's `drop_chunks()`. For tables shared
-with TOPS, per-row `DELETE WHERE feed_source='DPLS' AND ts < cutoff` so the
-TOPS validation oracle survives.
+**What.** Week-aligned rolling 2-full-weeks retention. The drop boundary is
+`weekBoundary(cutoffDate, RETENTION_WEEKS=2)` = `Monday(cutoffDate) − 2 weeks`
+(pure + unit-tested), so we keep the current partial week + the 2 most-recent
+completed weeks and never dip below 2 full weeks. Drops DPLS-only hypertables
+(incl. derived `order_lifecycle`) via `drop_chunks()`; for tables shared with
+TOPS, per-row `DELETE WHERE feed_source='DPLS' AND ts < boundary` so the TOPS
+validation oracle survives; `scored_events`/`selected_events` DELETE by
+`trading_date`. **Never touches** `daily_volume_by_symbol` (the baseline cagg
+outlives wire retention by design) or the narrative-layer tables
+(`narratives`/`interpretations`/`daily_synthesis`/`weekly_aggregate`, kept
+indefinitely). See `decisions.md` 2026-05-25.
 
 **When called.** Only when `input.runRetentionSweep=true` (cron mode).
 Failure logged but does NOT fail the workflow (already-completed
@@ -603,6 +613,7 @@ pre-cleans normally before re-writing.
 | `DplsTopsValidate` | 30min | — | transient × 2 |
 | `DeepTopsValidate` | 30min | — | transient × 2 |
 | `RecordValidation` | 2min | — | transient × 3 |
+| `RefreshBaselines` | 15min | — | transient × 2 |
 | `MaterializeOrderLifecycle` | 60min | 15min | transient × 2 |
 | `ScoreEvents` | 90min | 15min | transient × 2 |
 | `SelectTopEvents` | 5min | — | transient × 2 |
@@ -610,6 +621,7 @@ pre-cleans normally before re-writing.
 | `NarrateEvent` (LLM) | 5min | 1min | transient × 2 |
 | `InterpretEvent` (LLM) | 5min | 1min | transient × 2 |
 | `SynthesizeDay` (LLM) | 5min | 1min | transient × 2 |
+| `AggregateWeek` (LLM) | 5min | 1min | transient × 2 |
 | `CleanupFiles` | 5min | — | none (best-effort) |
 | `CompressChunks` | 60min | 10min | transient × 2 |
 | `RetentionSweep` | 15min | — | transient × 3 |
@@ -629,7 +641,7 @@ short-circuits the workflow regardless of which leg threw it.
 | `parser/src/main/java/com/longexposure/temporal/workflows/{Download,Parse,Validate,Materialize,Score,Select,Narrate,Cleanup}Workflow{,Impl}.java` | Phase workflows — each owns one phase. Called as child workflows from `DailyPipelineWorkflow` and as standalone entry points for ad-hoc developer invocation. |
 | `parser/src/main/java/com/longexposure/temporal/workflows/{DownloadResult,DailyPipelineWorkflowInput,DownloadWorkflow.Input,ParseWorkflow.Input,CleanupWorkflow.Input}.java` | Records used as phase-workflow inputs/outputs |
 | `parser/src/main/java/com/longexposure/temporal/workflows/RefreshSymbolsWorkflow{,Impl}.java` | Weekly symbols-refresh workflow (separate cron) |
-| `parser/src/main/java/com/longexposure/temporal/activities/*.java` | 14 activity interfaces + impls |
+| `parser/src/main/java/com/longexposure/temporal/activities/*.java` | 22 activity interfaces + impls |
 | `parser/src/main/resources/schema.sql` | `pipeline_runs` + `validation_runs` table DDL |
 | `docs/temporal-design.md` (this file) | What's running and why |
 
@@ -647,14 +659,15 @@ README/arch list to what was actually built:
 | `DecompressActivity` | ✗ Skipped — `PcapReader` streams `.pcap.gz` directly via `GZIPInputStream` |
 | `ParseTopsActivity` | ✓ Built as `ParseAndWriteDplsActivity` (DPLS, not TOPS — pivoted 2026-05-11) |
 | `ValidateDailyTotalsActivity` | ✗ Replaced — triangle validation via 3 leg activities + `RecordValidationActivity` is a stronger correctness check |
-| `RefreshBaselinesActivity` | ✗ Sprint 4+ — `daily_volume_by_symbol` cagg refreshes via policy already |
-| `ScoreEventsActivity` | ✗ Sprint 4+ — lives in `DailyNarrationWorkflow` (not built) |
-| `SelectTopEventsActivity` | ✗ Sprint 4+ — same |
-| `NarrateEventsActivity` | ✗ Sprint 4+ — decomposed per `scoring-and-narration.md` two-pass model |
-| `StoreNarrativesActivity` | ✗ Sprint 4+ — same |
-| `InvalidateCacheActivity` | ✗ Sprint 4+ — companion to narration |
+| `RefreshBaselinesActivity` | ✓ Built (2026-05-26) — explicit `refresh_continuous_aggregate` as the first `ScoreWorkflow` step, ahead of the inter-day scorer |
+| `ScoreEventsActivity` | ✓ Built — runs the 8-scorer registry inside `ScoreWorkflow` |
+| `SelectTopEventsActivity` | ✓ Built — within-scorer percentile-rank selection |
+| `NarrateEventsActivity` | ✓ Built as `NarrateEventActivity` — decomposed into the two-pass `NarrationPipeline` (extract → render → verify) per `scoring-and-narration.md`, with verifier-driven retry |
+| `StoreNarrativesActivity` | ✓ Folded into `NarrateEventActivity` (upsert by `event_hash` is the store step) |
+| `InvalidateCacheActivity` | ✗ Not needed — content-addressing handles it by construction: `event_hash` includes breakdown + prompt versions, so a changed input is simply a new key (no explicit invalidation) |
 | `CleanupFilesActivity` | ✓ Built |
-| `RetentionSweepActivity` | ✓ Built |
+| `RetentionSweepActivity` | ✓ Built (week-aligned 2-week) |
+| `MaterializeOrderLifecycleActivity` / `EnrichWithCoOccurrenceActivity` / `InterpretEventActivity` / `SynthesizeDayActivity` / `AggregateWeekActivity` / `CompressChunksActivity` / `ListSelectedEventsActivity` | ✓ Built — added beyond the original README/arch list (lifecycle materialization, co-occurrence enrichment, INTERPRET, SYNTHESIZE, AGGREGATE, in-place compression, the narrate/interpret fan-out helper) |
 
 **Doc drift to clean up later:**
 
