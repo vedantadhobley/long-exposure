@@ -19,6 +19,23 @@ Distilled from the project-positioning + design discussion (captured 2026-05-11)
 
 ---
 
+## LLM context contract — exactly what each stage's call receives
+
+The discipline is "each tier reads only the structured digest of the tier below, never the raw firehose." This is the precise, **as-built** input to every LLM call (verified against the activity code 2026-05-27). Adding a stat to a `breakdown` flows into DESCRIBE/INTERPRET automatically; the rollup tiers read prose + aggregates, not breakdowns.
+
+| Stage | LLM calls | Exact context passed in | Source in code |
+|---|---|---|---|
+| **DESCRIBE** (per selected event) | 2 (extract → render) | **Pass 1 (extract):** the event's `breakdown` JSON (the curated narration-set fields) → emits a blueprint. **Pass 2 (render):** *only* the blueprint (not the raw breakdown) → emits the 3 prose slots. `company_name` is copied breakdown→blueprint deterministically (code, not LLM). | `NarrationPipeline` (`BlueprintExtractor`, `ProseRenderer`) |
+| **INTERPRET** (per selected event) | 1 | the scorer's **catalog entry** (`mechanism` + `canonical_interpretation`) + the event's full `breakdown` + the **±60 s PRE/POST `TradeWindow`** summaries (`toPromptLine()`). Nothing from other events or days. | `InterpretEventActivityImpl.buildUserPrompt` |
+| **SYNTHESIZE** (per day) | 1 | **per-event list** = each selected event's INTERPRET prose (latest per `selected_id`; falls back to DESCRIBE if no interp) — INTERP-only to fit joi's `n_ctx=32768`; + **day aggregates** = `total_events`, `by_scorer`, `by_session_phase`, `top_symbols_by_event_count`. No raw breakdowns. Day-local (reads only that day). | `SynthesizeDayActivityImpl` (`loadEvents` DISTINCT-ON + `dayAggregates`) |
+| **AGGREGATE-week** (per ISO week, recompute-daily) | 1 | **week metadata** = `rollUp`: week start/end, days_considered, `total_events_week`, `by_scorer_week`, `top_symbols_week` (12), `per_day` counts; + **this week's per-day theme paragraphs** (the daily syntheses, fresh); + **prior ~8 (→13) weekly rollups** (`aggregate_text`) as week-over-week trend context. No per-event detail. | `AggregateWeekActivityImpl.buildUserPrompt` + `rollUp` + `loadPriorWeeks` |
+| **AGGREGATE-quarter** (planned, §`tiered-baselines` §8) | 1 | that quarter's ≤13 **weekly rollups** + prior ~4 **quarterly rollups**. | (not built) |
+| **AGGREGATE-year** (planned) | 1 | that year's 4 **quarterly rollups** + prior **years**. | (not built) |
+
+**Reading the table top-to-bottom = the context cascade:** breakdown → (DESCRIBE prose, INTERPRET prose) → daily-synthesis prose → weekly-rollup prose → quarterly → yearly. Each call's verifier haystack is exactly its passed-in context, which is why grounding stays checkable at every tier. The **prior-window** entries (weekly+) are the only place cross-period context enters — and therefore the only place the historical-change cascade ripples horizontally (see `tiered-baselines-design.md` §8).
+
+---
+
 ## The scorers in plain English
 
 > The 7 **intraday** scorers below are the original detection vocabulary. An 8th, **inter-day** scorer — `volume_deviation` (today's per-symbol volume vs the trailing-window median, via `BaselineProvider`) — shipped 2026-05-25; see "Connecting intraday and interday" + the scoring-architecture section. `TimeInBookDriftScorer` is the next inter-day one (not built).

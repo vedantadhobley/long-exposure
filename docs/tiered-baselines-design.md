@@ -634,3 +634,29 @@ All of items 2–5 are the AggregateWeek pattern repeated; the only genuinely ne
 code is the `CascadeAggregate` driver, and even that is a loop over existing
 content-addressed activities. Effort: each tier ~half a day; the cascade driver
 ~half a day; the prior-window widening minutes.
+
+### 8.6 Open exploration — *where* the prior-window (and thus the horizontal cascade) lives
+
+The current design puts a prior-window (trend context) at **every** tier from weekly up, so
+the "+following periods" horizontal cascade fires at every tier. An alternative worth
+exploring post-launch (raised 2026-05-27): keep the **lower tiers purely local** — a week
+just rolls up its days, a quarter just rolls up its weeks, with **no prior-window** — so a
+change propagates only *vertically* (day → its week → its quarter → its year, one clean
+chain), and the prior-window "+the rest" begins only at the **top** tier (the year, or
+wherever we decide the trend voice should live).
+
+A genuine trade-off, not a clear win either way:
+
+| | Prior-window at every tier (current) | Prior-window only at the top (the exploration) |
+|---|---|---|
+| **Trend voice** | every tier says "vs prior periods" ("third straight week of …") | only the top tier carries cross-period trend; weeks/quarters characterize their own period |
+| **Cascade cost** | horizontal ripple at every tier — a historical change re-derives many downstream periods | cheap, near-linear: one vertical chain up + horizontal only at the top |
+| **Where the story concentrates** | distributed across tiers | concentrated in the quarterly/yearly retrospective |
+
+The deciding question is **editorial, not technical**: do we want a weekly column that reads
+"the 3rd straight week of X," or a weekly column that just characterizes its own week with
+the longitudinal story reserved for the quarter/year? Both are cheap to *build* (it's simply
+which tiers get a `loadPriorWeeks`-style call); only the cascade cost and the prose character
+differ. **Not for launch** — but it directly shapes which tiers receive a prior-window in the
+LLM context contract (`scoring-and-narration.md` → "LLM context contract"), so settle it
+*before* building the quarter/year tiers, not after.

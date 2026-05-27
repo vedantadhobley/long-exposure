@@ -190,7 +190,11 @@ The analytics make the shape *precise*; the catalog's no-intent rule makes the p
 
 1. **Shared `analytics/` layer** — pure functions (OFI, robust-z, Fano, slippage, …) the
    scorers/enrichment call. Unit-tested in isolation (these are deterministic math — easy
-   to test, unlike prose).
+   to test, unlike prose). **Migrate the existing inline stats here too** (`orders_per_level`,
+   `size_cv`, `basis_points`, `deviation_x`, `notional_per_level`, …) so there's *one* home for
+   every computation, not "new ones in the package, old ones scattered in scorers." Done right
+   this is a **byte-identical refactor** (same values out → same `breakdown` bytes → same
+   `event_hash` → **no re-run**); do it alongside the new stats, not as a separate churn.
 2. **Compute lazily for selected events** — enrich only the ~90–170 narrated events
    (a step after `SelectTopEvents`, or in-scorer for selected rows), not all 660 K.
 3. **Per-scorer narration sets** (§3 option B) into the breakdown; full set into
