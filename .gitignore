@@ -32,6 +32,10 @@ frontend/.vite/
 # accumulates per-session; not portable across machines/users)
 .claude/
 
+# Operational run logs (backfill / re-run driver output in scripts/, etc.)
+# The driver *.sh scripts are tracked; their *.log output is per-run scratch.
+*.log
+
 # Local data
 data/
 hist/
