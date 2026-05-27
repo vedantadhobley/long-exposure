@@ -85,7 +85,7 @@ This is the pragmatic choice over a pure time-series DB:
 - **Familiar mental model.** Debugging time stays in the project, not in learning a new query engine.
 - **Future flexibility.** If Long Exposure grows orthogonal features (user accounts, saved searches, full-text search on narratives), Postgres absorbs them without adding a second database.
 
-What we give up vs a purpose-built TSDB: ~10–20% raw scan throughput on time-range queries, and roughly 2–5× slower bulk ingest. Both are completely irrelevant at our data scale (~7–9 GB compressed per day for TOPS, ingested once nightly, served to a personal-site-scale read load — a few hundred GB of parsed events across the 30-day rolling window, well within Postgres' comfort zone).
+What we give up vs a purpose-built TSDB: ~10–20% raw scan throughput on time-range queries, and roughly 2–5× slower bulk ingest. Both are completely irrelevant at our data scale (~7–9 GB compressed per day for TOPS, ingested once nightly, served to a personal-site-scale read load — ~130 GB of parsed events across the week-aligned 2-week rolling window, well within Postgres' comfort zone).
 
 The full alternatives analysis is in [Alternatives considered (database)](#alternatives-considered-database) below so the rationale survives future "why not X" questions.
 
@@ -363,7 +363,7 @@ Verifier failures don't abort the pipeline — the prose is still produced and s
 
 ### Caching
 
-Each narration is keyed by `event_hash` = SHA256 of `scorer_id + breakdown + extract_prompt_version + render_prompt_version`. Re-running on identical input is a cache hit; bumping either prompt version invalidates the cache and forces re-narration.
+Each narration is keyed by `event_hash` = SHA256 of `scorer_id + breakdown + extract_prompt_version + render_prompt_version`. Before the LLM call, the activity checks for an existing `verifier_passed` row with that hash — a hit **skips the two LLM calls entirely** (genuine compute-skip, not just storage idempotency). So re-scoring or backfilling a day only re-narrates the events whose breakdown or prompt version actually changed; bumping either prompt version invalidates the cache and forces re-narration. INTERPRET and AGGREGATE are content-addressed the same way (`interpretation_hash`, `weekly_aggregate.content_hash`). This is what makes the uniform re-run incremental rather than a from-scratch 12-hour pass.
 
 ### Concurrency
 
@@ -389,12 +389,17 @@ DailyPipelineWorkflow
   ├── ParseWorkflow         (DPLS → 13 hypertables via JDBC COPY)
   ├── ValidateWorkflow      (runs in parallel with Parse; 3 cross-check legs:
   │                          DPLS↔DEEP price-level, DPLS→TOPS BBO, DEEP→TOPS BBO)
-  ├── ScoreWorkflow         (MaterializeOrderLifecycle → 7 scorers → EnrichWithCoOccurrence → SelectTopEvents)
-  ├── NarrateWorkflow       (per-event fan-out, sliding-window 2-concurrent, 3 passes per event)
-  └── CleanupWorkflow       (delete .pcap.gz + drop_chunks older than 30 days)
+  ├── ScoreWorkflow         (RefreshBaselines → MaterializeOrderLifecycle → 8 scorers
+  │                          → EnrichWithCoOccurrence → SelectTopEvents)
+  ├── NarrateWorkflow       (DESCRIBE — per-event fan-out, 2-concurrent, verifier-retry ×3)
+  ├── InterpretWorkflow     (INTERPRET — per-event surrounding-context LLM, verifier-retry ×3)
+  ├── SynthesizeDayWorkflow (SYNTHESIZE — one LLM call across the day's events)
+  ├── AggregateWeekWorkflow (AGGREGATE — recompute-daily "week-so-far" rollup)
+  ├── CompressChunksActivity(compress today's chunks → ~13 GB/day on disk)
+  └── CleanupWorkflow       (delete .pcap.gz + week-aligned 2-week retention sweep)
 ```
 
-Each phase is its own child workflow, independently invokable for replay or backfill. Per-activity retries, heartbeats, and start-to-close timeouts. Full layout including all 14 activities + their retry policies in [`docs/temporal-design.md`](docs/temporal-design.md).
+Each phase is its own child workflow, independently invokable for replay or backfill. The four LLM-bearing phases (DESCRIBE / INTERPRET / SYNTHESIZE / AGGREGATE) are strictly sequential — they share `llama-large.joi`'s 2 GPU slots, so only one LLM workflow runs at a time. Per-activity retries, heartbeats, and start-to-close timeouts. Full layout including all 22 activities + their retry policies in [`docs/temporal-design.md`](docs/temporal-design.md).
 
 Ancillary workflows on the same task queue:
 
@@ -456,27 +461,39 @@ Frontend is not part of this repo; see [Frontend integration](#frontend-integrat
 
 ## Build status
 
-The original 22-day plan compressed substantially. Current state (2026-05-21):
+The original 22-day plan compressed substantially. Current state (2026-05-27):
 
 ✅ **Foundation + parser** (2026-05-11). Pure-Java pcap-ng reader, IEX-TP transport decoder, 7 shared admin message decoders, 5 TOPS trading decoders + `TopsMessageRouter`, 7 DPLS trading decoders + `DplsMessageRouter`, DEEP price-level update decoder + `DeepMessageRouter`. Order-book + price-level-book state machines. Full unit test suite (~80 tests).
 
 ✅ **Cross-validation triangle** (2026-05-11/12). Three independent validators — DPLS↔DEEP price-level (the TOPS-independent leg, 100.0000% on two trading days), DPLS→TOPS derived BBO (99.4184%), DEEP→TOPS derived BBO (identical to DPLS leg). Full residual analysis in [`docs/validation-results.md`](docs/validation-results.md).
 
-✅ **Storage** (2026-05-12). 13 wire-format hypertables, `order_lifecycle` derived hypertable for sub-second PostCancel/Layering scans, 5 standard tables. End-to-end: 364 M rows ingested in 35:07 (~174 K rows/sec) via JDBC `COPY`.
+✅ **Storage** (2026-05-12). 13 wire-format hypertables, `order_lifecycle` derived hypertable for sub-second PostCancel/Layering scans, 7 standard tables, `daily_volume_by_symbol` continuous aggregate. End-to-end: 364 M rows ingested in 35:07 (~174 K rows/sec) via JDBC `COPY`.
 
-✅ **Temporal scaffolding** (2026-05-13). 10 workflows on the daily-pipeline task queue, 14 activities. Per-activity retry policies, heartbeats, start-to-close timeouts. Idempotent on pipeline_run with pre-clean by trading_date.
+✅ **Temporal pipeline** (2026-05-13, extended through 2026-05-27). 13 workflows on the daily-pipeline task queue, 22 activities. Per-activity retry policies, heartbeats, start-to-close timeouts. Idempotent on pipeline_run with pre-clean by trading_date.
 
-✅ **Scoring + selection** (2026-05-16). 7 intraday scorers (halt, large_trade, sweep, post_cancel_cluster, layering, iceberg, liquidity_withdrawal) implementing push-model `EventScorer`. Selection via within-scorer percentile rank → 90–164 narratable events per trading day.
+✅ **Scoring + selection** (2026-05-16). 8 scorers — 7 intraday (halt, large_trade, sweep, post_cancel_cluster, layering, iceberg, liquidity_withdrawal) + 1 inter-day (`volume_deviation`, 2026-05-25) — implementing push-model `EventScorer`. Selection via within-scorer percentile rank → ~90–170 narratable events per trading day.
 
 ✅ **Symbol enrichment** (2026-05-18, expanded 2026-05-21). `RefreshSymbolsWorkflow` pulls from three sources: NASDAQ public listings, SEC EDGAR (canonical company names), and the local IEX SecurityDirectory. `CompanyNameNormalizer` handles the long tail.
 
 ✅ **Co-occurrence enrichment** (2026-05-20). Long sec-scale parent events (liquidity_withdrawal) absorb nested ms-scale children (post_cancel_cluster, layering) into a `co_occurring` block on the parent's breakdown. Children marked `subsumed_by_event_id` and skipped at selection.
 
-✅ **Two-pass narration with structured output + 4-layer verifier** (2026-05-21). `BlueprintExtractor` → `ProseRenderer` (JSON-schema-enforced three-slot output) → `GroundingVerifier`. Running against `Qwen3.5-122B-A10B` on `joi`. 164/164 verifier-passed on the 2026-05-08 dataset.
+✅ **Two-pass narration (DESCRIBE) with structured output + 4-layer verifier** (2026-05-21). `BlueprintExtractor` → `ProseRenderer` (JSON-schema-enforced three-slot output) → pure-code `GroundingVerifier`. Running against `Qwen3.5-122B-A10B` on `joi`. 164/164 verifier-passed on the 2026-05-08 dataset.
 
-🛠 **Public launch prep** (in progress). Frontend integration into `vedanta-systems` portal + 30-day backfill archive + whitepaper.
+✅ **Per-event interpretation (INTERPRET)** (2026-05-22). `InterpretEventActivity` reads the breakdown + a ±60-sec pre/post trade window and adds sequential/causal context DESCRIBE can't ("the block was followed by another 47 sec later"). `InterpretationVerifier` grounds every number against breakdown ∪ windows.
 
-📋 **Queued post-launch.** Layer-3 daily synthesis (one LLM call per day producing themes across all narrations), per-event Layer-0 expansion (interpretive second pass), inter-day scorers (`VolumeDeviationScorer`, `TimeInBookDriftScorer`) which need a 30-day baseline.
+✅ **Daily synthesis (SYNTHESIZE)** (2026-05-22). One LLM call per day across all per-event interpretations → a cross-event "today's themes" paragraph. `SynthesisVerifier` (ticker-fabrication + magnitude-tolerant number grounding).
+
+✅ **Weekly rollup (AGGREGATE)** (2026-05-26). Recompute-daily "week-so-far" — reads this week's daily syntheses + the prior ~8 weekly rollups for week-over-week trend, content-addressed so the daily recompute is incremental. Wired into the daily pipeline after SYNTHESIZE.
+
+✅ **Durable inter-day baselines** (2026-05-26). `daily_volume_by_symbol` cagg refresh window extended to 400 days — a continuous aggregate outlives the 2-week wire retention, so per-symbol baselines persist ~1 year. `BaselineProvider` decouples scorers from the cagg SQL; `RefreshBaselinesActivity` keeps it current before scoring.
+
+✅ **Verifier-driven retry + grounding polish** (2026-05-27). All four LLM stages re-roll a verifier-rejected call up to 3× (sampling variance clears transient number-glitches) → ~100% verifier-passed without weakening the verifier. Notional values pre-formatted as `$X,XXX.XX`; per-event content-addressed skip makes re-scores/backfills incremental.
+
+✅ **Retention + 2-week dataset** (2026-05-25/27). Week-aligned rolling 2-full-weeks retention (the narrative archive is kept indefinitely; only the heavy wire substrate ages out). Two full weeks loaded (05-11→15, 05-18→22) + 05-08, re-run uniform on the current formatting/retry.
+
+🛠 **Public launch prep** (in progress). Frontend integration into the `vedanta-systems` portal + whitepaper.
+
+📋 **Queued post-launch.** `TimeInBookDriftScorer` (second inter-day scorer, reuses `BaselineProvider`); monthly numeric + prose rollup tiers (need months of history); the Layer-N → function-name doc vocabulary migration.
 
 See [`docs/plan.md`](docs/plan.md) for sprint-by-sprint history and [`docs/todo.md`](docs/todo.md) for the active work list.
 
