@@ -92,16 +92,69 @@ docker compose -f docker-compose.dev.yml up -d
 
 ## Replay a single trading day
 
-Once the Temporal workflow is wired up, kick a one-off run via the Temporal UI or:
+Every phase is an independently-invokable workflow. Replay the whole day or one
+phase via the Temporal UI or `temporal workflow start` (input is a `[Y,M,D]`
+array for the phase workflows; the daily orchestrator takes an input object):
 
 ```bash
-docker compose -f docker-compose.yml exec worker \
-  java -cp /app/lib/'*' com.longexposure.cli.ReplayDay --date 2026-05-09
+# whole day (re-download/parse only if not already loaded)
+docker exec long-exposure-dev-temporal temporal workflow start \
+  --task-queue long-exposure-daily-pipeline --type DailyPipelineWorkflow \
+  --workflow-id daily-20260508 \
+  --input '{"targetDate":[2026,5,8],"pollUntilReady":false,"forceReingest":false,"runRetentionSweep":false}'
+
+# a single phase against already-loaded data (no re-download/parse):
+docker exec long-exposure-dev-temporal temporal workflow start \
+  --task-queue long-exposure-daily-pipeline --type ScoreWorkflow \
+  --workflow-id score-20260508 --input '[2026,5,8]'
+# … likewise NarrateWorkflow / InterpretWorkflow / SynthesizeDayWorkflow / AggregateWeekWorkflow
 ```
 
-(CLI entrypoint TBI — currently doesn't exist.)
+The pipeline is idempotent: parse pre-cleans by `trading_date`; DESCRIBE /
+INTERPRET / AGGREGATE are **content-addressed** (`event_hash` /
+`interpretation_hash` / `content_hash`), so re-running skips the LLM call for any
+event/week whose inputs are unchanged and only re-does what actually changed.
 
-The pipeline is idempotent on event-hash, so re-running won't duplicate parsed events or re-narrate cached events.
+## Re-run / rebuild the dataset across days
+
+To re-apply accumulated breakdown/prompt changes uniformly across the loaded
+days (without re-downloading/parsing the wire data), use the driver:
+
+```bash
+bash scripts/rerun-dataset.sh        # logs to scripts/rerun-dataset.log
+tail -f scripts/rerun-dataset.log
+```
+
+Per day it runs `ScoreWorkflow → NarrateWorkflow → InterpretWorkflow →
+SynthesizeDayWorkflow`, then `AggregateWeekWorkflow` per ISO week at the end
+(chronological, so each week reads the prior). It waits for each workflow to
+reach a terminal state before starting the next — this enforces the
+one-LLM-workflow-at-a-time rule (see below). The content-addressed skip + the
+verifier-retry make it incremental and self-healing: only changed events hit the
+LLM, and transient verifier failures clear on a re-roll. Heavy: each day's
+narrate stage is ~30–40 min when most events changed (e.g. a formatting
+cache-bust touches every notional event), so a full ~2-week re-run is several
+hours — run it overnight.
+
+## Prune stale narration rows (after a re-run)
+
+Re-runs insert a new `narratives` / `interpretations` / `weekly_aggregate` row
+per changed content hash and leave the superseded ones behind. The public API
+dedupes by content-key (latest `verifier_passed` reachable from
+`selected_events`), so orphans never reach the UI — but to keep the tables lean,
+run the prune after a re-run:
+
+```bash
+# DRY RUN first — review the keep/delete counts:
+docker exec -i long-exposure-dev-postgres psql -U leuser -d longexposure \
+  < docs/sql/prune-stale-narrations.sql
+# then uncomment the DELETE block (wrapped in BEGIN/COMMIT) and re-run it.
+```
+
+It keeps, per content-key still reachable from `selected_events`, the latest
+`verifier_passed` row (or latest overall if none passed) and deletes the rest.
+Idempotent. The narrative-layer tables are otherwise kept indefinitely (only the
+heavy wire substrate ages out on the 2-week retention sweep).
 
 ## Tail logs
 
