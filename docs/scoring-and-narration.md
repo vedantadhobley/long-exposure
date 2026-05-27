@@ -4,20 +4,24 @@ Distilled from the project-positioning + design discussion (captured 2026-05-11)
 
 > **Naming note (2026-05-22).** This doc was written when the pipeline stages were named "Layer 1" (scoring), "Layer 2" (per-event narration), "Layer 3" (daily synthesis), etc. The canonical names are now **DETECT / DESCRIBE / SYNTHESIZE / AGGREGATE** and the new per-event interpretation pass is **INTERPRET**. See [`pipeline-architecture.md`](pipeline-architecture.md) for the canonical pipeline-stage vocabulary. The "Layer N" references below are preserved as the doc was originally written; treat them as Layer 1 = DETECT, Layer 2 = DESCRIBE, Layer 3 = SYNTHESIZE, Layer 4 = AGGREGATE.
 
-> **Status (2026-05-22):**
-> - **DETECT (scoring + selection)** ✅ shipped. 7 intraday scorers + `SelectTopEventsActivity`. Producing 164 narratable events per trading day on 2026-05-08. Derived-field enrichment landed 2026-05-22 — every analytical ratio the LLM might want is pre-computed in the breakdown, eliminating the arithmetic-error failure mode by construction.
-> - **Symbol enrichment** ✅ shipped. `symbols` reference table populated weekly from NASDAQ public listings + SEC EDGAR canonical names + IEX SecurityDirectory. `SymbolFields.apply()` (renamed from `Enrich.symbol()` on 2026-05-22) joins company name, exchange, ETF flag, round lot, prev close into every breakdown.
-> - **DESCRIBE (two-pass narration)** ✅ shipped. `BlueprintExtractor` → `ProseRenderer` → pure-code `GroundingVerifier` chain. **99.39%** verifier-passed (163/164 on 2026-05-08).
-> - **INTERPRET (per-event interpretation)** ✅ shipped 2026-05-22. `InterpretEventActivity` + `InterpretWorkflow` + `InterpretationVerifier` + `TradeWindow` helper + `interpretations` table. Per-event LLM call with ±60-sec pre/post wire-data window. **98.78%** verifier-passed (162/164 on 2026-05-08). Full design in [`interpretation-design.md`](interpretation-design.md).
-> - **SYNTHESIZE (daily themes)** ✅ shipped 2026-05-22. `SynthesizeDayActivity` + `SynthesizeDayWorkflow` + `SynthesisVerifier` + `daily_synthesis` table + `SamplingParams.SYNTHESIZE` (Qwen reasoning preset). Single LLM call per day across all per-event INTERPRET outputs. End-to-end published paragraph on 2026-05-08; ticker check clean.
+> **Status (2026-05-27):**
+> - **DETECT (scoring + selection)** ✅ shipped. **8 scorers** — 7 intraday + 1 inter-day (`volume_deviation`) — + `SelectTopEventsActivity`. ~90–170 narratable events per trading day. Derived-field enrichment (2026-05-22) pre-computes every analytical ratio in the breakdown, eliminating the arithmetic-error failure mode by construction.
+> - **Symbol enrichment** ✅ shipped. `symbols` reference table populated weekly from NASDAQ public listings + SEC EDGAR canonical names + IEX SecurityDirectory. `SymbolFields.apply()` joins company name, exchange, ETF flag, round lot, prev close into every breakdown.
+> - **DESCRIBE (two-pass narration)** ✅ shipped. `BlueprintExtractor` → `ProseRenderer` → pure-code `GroundingVerifier` chain, **verifier-driven retry ×3** (2026-05-27). ~100% verifier-passed on the uniform 2-week dataset (was 99.39% pre-retry).
+> - **INTERPRET (per-event interpretation)** ✅ shipped 2026-05-22. `InterpretEventActivity` + `InterpretWorkflow` + `InterpretationVerifier` + `TradeWindow` helper + `interpretations` table. Per-event LLM call with ±60-sec pre/post wire-data window. ~100% verifier-passed post-retry. Full design in [`interpretation-design.md`](interpretation-design.md).
+> - **SYNTHESIZE (daily themes)** ✅ shipped 2026-05-22. `SynthesizeDayActivity` + `SynthesizeDayWorkflow` + `SynthesisVerifier` + `daily_synthesis` table + `SamplingParams.SYNTHESIZE` (Qwen reasoning preset). Single LLM call per day across all per-event INTERPRET outputs.
+> - **AGGREGATE (weekly themes)** ✅ shipped 2026-05-26. `AggregateWeekActivity` + `AggregateWeekWorkflow` + `weekly_aggregate` table. Recompute-daily "week-so-far" over this week's daily syntheses + the prior ~8 weekly rollups (week-over-week trend); content-addressed; wired into the daily pipeline after SYNTHESIZE.
+> - **Inter-day baselines** ✅ shipped 2026-05-26. `daily_volume_by_symbol` cagg (400-day refresh window, outlives the 2-week wire retention) + `BaselineProvider`/`CaggBaselineProvider` + `RefreshBaselinesActivity`. `VolumeDeviationScorer` reads "Nx the trailing median" through it.
 > - **Cross-event linking** ✅ shipped 2026-05-20 (`EnrichWithCoOccurrenceActivity` — sec-scale parents absorb ms-scale children into a `co_occurring` block).
 > - **Threshold-based selection** ✅ shipped 2026-05-19 (within-scorer percentile rank, replaces hardcoded top-N caps).
-> - **Small-batch backfill (3-5 trading days)** 🛠 next — validates cross-day robustness before frontend work.
-> - **30-day backfill + inter-day scorers + SUMMARIZE stage** 📋 post-launch.
+> - **2-week dataset** ✅ loaded + uniform (05-08 + two full weeks). Week-aligned 2-week retention.
+> - **`TimeInBookDriftScorer` + monthly tiers + SUMMARIZE stage** 📋 post-launch.
 
 ---
 
-## The 7 scorers in plain English
+## The scorers in plain English
+
+> The 7 **intraday** scorers below are the original detection vocabulary. An 8th, **inter-day** scorer — `volume_deviation` (today's per-symbol volume vs the trailing-window median, via `BaselineProvider`) — shipped 2026-05-25; see "Connecting intraday and interday" + the scoring-architecture section. `TimeInBookDriftScorer` is the next inter-day one (not built).
 
 The detection vocabulary of the whole project. Every narrated event falls into one of these seven buckets. High-scoring events may get *enriched* at scoring time with deterministic summary stats about co-occurring same-symbol events of OTHER types whose intervals fall inside the parent's window — this is the "nested signals inside signals" mechanism (a liquidity_withdrawal absorbing the post_cancel/layering events that nested within its duration). See `## Scoring architecture` below.
 
@@ -252,14 +256,15 @@ status_events, etc.              │                          │               
         │                        │                          │                          │
         │     ┌───────────────┐  │   ┌──────────────────┐   │   ┌───────────────────┐  │
         ├────▶│ ScoreEvents   │──┴──▶│ EnrichWith        │───┴──▶│ SelectTopEvents   │──┘
-        │     │ (7 scorers,   │      │ CoOccurrence      │       │ (percentile rank, │
-        │     │  intraday)    │      │ (nested-sigs)     │       │  floor+ceiling)   │
+        │     │ (7 intraday   │      │ CoOccurrence      │       │ (percentile rank, │
+        │     │  scorers)     │      │ (nested-sigs)     │       │  floor+ceiling)   │
         │     └───────────────┘      └──────────────────┘       └───────────────────┘
         │              ▲
         │              │
-        │     ┌───────────────┐
-        └────▶│ Interday      │   (queued; needs BaselineProvider + 30-day backfill)
-              │  scorer       │
+   cagg │     ┌───────────────┐
+   ─────┴────▶│ VolumeDevia-  │   (✅ shipped 2026-05-25; reads the daily_volume_by_symbol
+   daily_     │  tionScorer   │    cagg via BaselineProvider; RefreshBaselinesActivity keeps
+   volume     │  (inter-day)  │    it current. TimeInBookDriftScorer is the next, not built.)
               └───────────────┘
 ```
 
