@@ -214,7 +214,6 @@ public final class EnrichWithCoOccurrenceActivityImpl implements EnrichWithCoOcc
         // Build the co_occurring JSON
         ObjectNode coOccurring = json.createObjectNode();
         ObjectNode duringEvent = coOccurring.putObject("during_event");
-        int totalChildren = 0;
         for (Map.Entry<String, ScorerAggregate> e : aggregates.entrySet()) {
             String scorerId = e.getKey();
             ScorerAggregate agg = e.getValue();
@@ -235,9 +234,12 @@ public final class EnrichWithCoOccurrenceActivityImpl implements EnrichWithCoOcc
                     per.put("sum_" + field, com.longexposure.scoring.BreakdownFmt.round(sum, 2));
                 }
             }
-            totalChildren += agg.count;
         }
-        coOccurring.put("total_children", com.longexposure.scoring.BreakdownFmt.formatCount(totalChildren));
+        // NOTE: deliberately NOT emitting a "total_children" field. It was
+        // redundant with the per-scorer counts and the model narrated it as
+        // "3 total children events" — leaking the internal data-model
+        // vocabulary into the prose. The per-scorer entries ("1 liquidity
+        // withdrawal", "2 post-cancel clusters") read naturally on their own.
 
         // Update parent: merge the co_occurring block into the breakdown.
         try (PreparedStatement st = conn.prepareStatement(
@@ -310,7 +312,7 @@ public final class EnrichWithCoOccurrenceActivityImpl implements EnrichWithCoOcc
      */
     private static boolean isIntegerCountField(final String field) {
         return switch (field) {
-            case "total_shares", "orders", "distinct_levels" -> true;
+            case "total_shares", "orders", "distinct_levels", "deletes" -> true;
             default -> false;
         };
     }
