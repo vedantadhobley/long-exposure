@@ -238,6 +238,43 @@ because it reads like an analyst who can *see the order book*, not a model guess
 - **Frontend renders the full set generically** + tolerant of absent fields — the drill-down *is* the "show all" surface.
 - **Still genuinely open:** the exact per-scorer field lists above are a *first draft* to react to (which to headline, which to cut); and the **prose-density knob** — how dense a paragraph we want (terse-journalist lead vs a richer "by the numbers" line) — is a prompt decision separate from how much we compute.
 
+### 3.6 The narration-set — per-scorer DESCRIBE headline guidance (2026-05-27)
+
+> **Status: reasoned FIRST DRAFT, validated by the before/after single-day rerun.** The split
+> below is a judgment, not gospel — the "drill-down-only" column is the softest and may move once
+> we read real prose. Implemented as `BlueprintExtractor` prompt `extract-v2-narration-set`.
+
+The DESCRIBE extractor is a *universal* prompt that picks "the 3–6 most salient facts." Left to its
+own judgment it ignored the new analytics (chose `price_range_basis_points` over `slippage_bps`). So
+the narration-set is **per-scorer headline guidance** added to that prompt: which breakdown fields to
+*lead* with, which to *weave in*, which stay *drill-down-only* (present in the data + UI, not narrated).
+The reasoning is the zoom ladder (§3.1: DESCRIBE = the event's own defining facts) + "what is the one
+stat that defines this event type" (§3.3 wow column).
+
+| Scorer | **Lead with** (headline) | Weave in (supporting) | Drill-down only |
+|---|---|---|---|
+| `sweep` | notional_dollars · distinct_levels · **slippage_bps** | shares, duration | exec count, start/end |
+| `large_trade` | notional_dollars · **pct_of_baseline_volume** | price vs prev-close | size in shares |
+| `volume_deviation` | deviation_x · **percentile_rank** | robust_z *(as "far above typical range")* | trade-count median |
+| `liquidity_withdrawal` | deletes · rate_per_sec · **withdrawal_side_class** | — | bid/ask raw counts |
+| `post_cancel_cluster` | orders · median_lifetime_ms · **burstiness_fano** | shares, side | orders/sec |
+| `layering` | orders × distinct_levels · price_range_bps · **burstiness_fano** | median lifetime, orders/level | shares/level |
+| `iceberg` | fills · total_shares · **refill_cadence_cv** + size-uniformity | price | notional/fill |
+| `halt` | duration · reason · company | session phase | *(book-replay adds pre-event signature)* |
+
+**Two framing rules** (wording, not grounding — both prevent "sounds wrong"):
+1. **`robust_z` is NEVER rendered as "σ" / "standard deviations".** Values run 15–66 (volume is
+   heavy-tailed), which reads as hyperbole; frame as "far above its typical range" and let
+   `percentile_rank` ("the busiest day in the trailing two weeks") carry the intuition.
+2. **`withdrawal_side_class` / `slippage_direction` are categorical** — render "two_sided" as
+   "two-sided", "bid_side"/"ask_side" as "concentrated on the bid/ask side"; pair `slippage_direction`
+   with `slippage_bps`. No intent claims. (Categorical fields ride in `key_numbers` as string values;
+   the verifier only checks numeric tokens, so a word like "two-sided" passes cleanly.)
+
+The INTERPRET narration-set (reversion / OFI / surrounding-VWAP, the neighborhood/inference stats) is
+separate and lands with those stats (not built yet — §3.1). SYNTHESIZE/AGGREGATE get period-level
+metrics (concentration / breadth), never per-event detail.
+
 ## 4. Prioritization — what's actually worth implementing (value × effort)
 
 Opinionated. **Don't build all 40** — several are finance-canonical but fragile or
