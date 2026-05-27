@@ -62,6 +62,9 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
     /** Prior weekly rollups passed as week-over-week trend context (§4.3). Tunable. */
     private static final int PRIOR_WEEKS = 8;
 
+    /** Max LLM attempts per week — re-roll on verifier failure (temp 1.0 gives variance). */
+    private static final int MAX_LLM_ATTEMPTS = 3;
+
     private static final String SYSTEM_PROMPT = """
             You are a financial-data journalist writing one paragraph identifying
             the recurring themes of a single US-equity trading WEEK on IEX. Your
@@ -181,14 +184,28 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             actx.heartbeat("prompt");
             String userPrompt = buildUserPrompt(weekStart, weekEnd, weekAggregates, days, priors);
 
-            actx.heartbeat("llm");
-            long llmT0 = System.nanoTime();
-            String aggregate = llama.chat(SYSTEM_PROMPT, userPrompt, SamplingParams.AGGREGATE).trim();
-            long llmElapsedMs = (System.nanoTime() - llmT0) / 1_000_000L;
-
-            actx.heartbeat("verify");
             SynthesisVerifier verifier = new SynthesisVerifier();
-            SynthesisVerifier.Result verify = verifier.verify(aggregate, weekTickers, haystack.toString());
+
+            // Verifier-driven retry: re-roll on a rejected rollup (a derived /
+            // cross-week-summed number, a mis-tokenized ticker) — AGGREGATE
+            // runs at temp 1.0, so a re-roll usually grounds. Keep first
+            // passing, else last.
+            actx.heartbeat("llm");
+            String aggregate = null;
+            SynthesisVerifier.Result verify = null;
+            long llmElapsedMs = 0;
+            for (int attempt = 1; attempt <= MAX_LLM_ATTEMPTS; attempt++) {
+                long llmT0 = System.nanoTime();
+                aggregate = llama.chat(SYSTEM_PROMPT, userPrompt, SamplingParams.AGGREGATE).trim();
+                llmElapsedMs = (System.nanoTime() - llmT0) / 1_000_000L;
+                verify = verifier.verify(aggregate, weekTickers, haystack.toString());
+                if (verify.passed()) {
+                    if (attempt > 1) LOG.info("aggregate verifier passed on retry  week_start={} attempt={}", weekStart, attempt);
+                    break;
+                }
+                LOG.warn("aggregate verifier failed  week_start={} attempt={}/{} mismatches={}",
+                        weekStart, attempt, MAX_LLM_ATTEMPTS, verify.mismatches());
+            }
 
             actx.heartbeat("upsert");
             upsert(conn, weekStart, weekEnd, aggregate, weekAggregates, days.size(),

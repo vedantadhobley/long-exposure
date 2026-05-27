@@ -53,6 +53,9 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
     /** Bumped when prompt changes. */
     private static final String PROMPT_VERSION = "synthesize-v5-holistic-revert-v4-example";
 
+    /** Max LLM attempts per day — re-roll on verifier failure (temp 1.0 gives variance). */
+    private static final int MAX_LLM_ATTEMPTS = 3;
+
     private static final String SYSTEM_PROMPT = """
             You are a financial-data journalist writing one paragraph identifying
             the recurring themes of a single US-equity trading day on IEX. Your
@@ -123,15 +126,29 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
             actx.heartbeat("prompt");
             String userPrompt = buildUserPrompt(tradingDate, dayAggregates, events);
 
-            actx.heartbeat("llm");
-            long llmT0 = System.nanoTime();
-            String synthesis = llama.chat(SYSTEM_PROMPT, userPrompt, SamplingParams.SYNTHESIZE).trim();
-            long llmElapsedMs = (System.nanoTime() - llmT0) / 1_000_000L;
-
-            actx.heartbeat("verify");
             String numberHaystack = buildNumberHaystack(events, dayAggregates);
             SynthesisVerifier verifier = new SynthesisVerifier();
-            SynthesisVerifier.Result verify = verifier.verify(synthesis, daySymbols, numberHaystack);
+
+            // Verifier-driven retry: re-roll on a rejected synthesis (a derived
+            // or slightly-off number, a mis-tokenized ticker) — SYNTHESIZE runs
+            // at temp 1.0, so a re-roll usually grounds. Keep first passing,
+            // else last.
+            actx.heartbeat("llm");
+            String synthesis = null;
+            SynthesisVerifier.Result verify = null;
+            long llmElapsedMs = 0;
+            for (int attempt = 1; attempt <= MAX_LLM_ATTEMPTS; attempt++) {
+                long llmT0 = System.nanoTime();
+                synthesis = llama.chat(SYSTEM_PROMPT, userPrompt, SamplingParams.SYNTHESIZE).trim();
+                llmElapsedMs = (System.nanoTime() - llmT0) / 1_000_000L;
+                verify = verifier.verify(synthesis, daySymbols, numberHaystack);
+                if (verify.passed()) {
+                    if (attempt > 1) LOG.info("synthesis verifier passed on retry  date={} attempt={}", tradingDate, attempt);
+                    break;
+                }
+                LOG.warn("synthesis verifier failed  date={} attempt={}/{} mismatches={}",
+                        tradingDate, attempt, MAX_LLM_ATTEMPTS, verify.mismatches());
+            }
 
             actx.heartbeat("upsert");
             upsert(conn, tradingDate, synthesis, dayAggregates, events.size(),

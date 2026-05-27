@@ -30,6 +30,14 @@ public final class NarrationPipeline {
 
     private static final Logger LOG = LoggerFactory.getLogger(NarrationPipeline.class);
 
+    /**
+     * Max render attempts per event. The render pass re-rolls when the
+     * verifier rejects its prose (a transient number glitch); 3 attempts at
+     * temp 0.7 clears virtually all of them. Only failures pay the extra
+     * calls — a clean event passes on attempt 1.
+     */
+    private static final int MAX_RENDER_ATTEMPTS = 3;
+
     private final BlueprintExtractor extractor;
     private final ProseRenderer      renderer;
     private final GroundingVerifier  verifier;
@@ -56,20 +64,36 @@ public final class NarrationPipeline {
             throw new RuntimeException("extract failed for selected_id=" + input.selectedId(), e);
         }
 
-        // Pass 2: render structured prose (lead + facts + co_occurring slots)
-        RenderResult rendered;
-        try {
-            rendered = renderer.render(blueprint);
-        } catch (Exception e) {
-            throw new RuntimeException("render failed for selected_id=" + input.selectedId(), e);
-        }
-        String prose = rendered.stitched();
-
-        // Pass 3 (pure code): verify the stitched prose against the blueprint
-        GroundingVerifier.Result verify = verifier.verify(prose, blueprint, input.breakdown());
-        if (!verify.passed()) {
-            LOG.warn("verifier failed  selected_id={} scorer={} symbol={} mismatches={}",
-                    input.selectedId(), input.scorerId(), input.symbol(), verify.mismatches());
+        // Pass 2 + 3, with verifier-driven retry. The blueprint is fixed
+        // (extract runs at temp 0.1, ~deterministic); the dominant failure
+        // mode is a render-side prose-number glitch (a figure rendered
+        // slightly off from a grounded value). RENDER runs at temp 0.7, so
+        // re-rolling the render pass produces different prose that usually
+        // grounds cleanly — this hides a transient failure behind a passing
+        // retry. We keep the first passing render; if every attempt fails we
+        // keep the last (stored with verifier_passed=false, still available
+        // for the workflow-level retry on a future run).
+        RenderResult rendered = null;
+        String prose = null;
+        GroundingVerifier.Result verify = null;
+        for (int attempt = 1; attempt <= MAX_RENDER_ATTEMPTS; attempt++) {
+            try {
+                rendered = renderer.render(blueprint);
+            } catch (Exception e) {
+                throw new RuntimeException("render failed for selected_id=" + input.selectedId(), e);
+            }
+            prose = rendered.stitched();
+            verify = verifier.verify(prose, blueprint, input.breakdown());
+            if (verify.passed()) {
+                if (attempt > 1) {
+                    LOG.info("verifier passed on retry  selected_id={} scorer={} symbol={} attempt={}",
+                            input.selectedId(), input.scorerId(), input.symbol(), attempt);
+                }
+                break;
+            }
+            LOG.warn("verifier failed  selected_id={} scorer={} symbol={} attempt={}/{} mismatches={}",
+                    input.selectedId(), input.scorerId(), input.symbol(),
+                    attempt, MAX_RENDER_ATTEMPTS, verify.mismatches());
         }
 
         long elapsedMs = (System.nanoTime() - t0) / 1_000_000L;

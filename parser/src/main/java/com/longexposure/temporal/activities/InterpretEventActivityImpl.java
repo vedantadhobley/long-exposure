@@ -52,6 +52,9 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
     /** Half-window for the surrounding trade context. */
     private static final long WINDOW_SECONDS = 60L;
 
+    /** Max LLM attempts per event — re-roll on verifier failure (temp 0.7 gives variance). */
+    private static final int MAX_LLM_ATTEMPTS = 3;
+
     private static final String SYSTEM_PROMPT = """
             You are a financial-data journalist writing one observation about what
             was happening on the IEX exchange around a single detected event. The
@@ -159,13 +162,30 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
             actx.heartbeat("llm:" + selectedId);
 
             String userPrompt = buildUserPrompt(row, catalog, pre, post);
-            long llmT0 = System.nanoTime();
-            String interpretation = llama.chat(SYSTEM_PROMPT, userPrompt, SamplingParams.RENDER).trim();
-            long llmElapsedMs = (System.nanoTime() - llmT0) / 1_000_000L;
-
             InterpretationVerifier verifier = new InterpretationVerifier();
-            InterpretationVerifier.Result verify = verifier.verify(
-                    interpretation, row.breakdown, preJson, postJson, row.symbol);
+
+            // Verifier-driven retry: RENDER runs at temp 0.7, so re-rolling a
+            // rejected interpretation (typically a number rendered slightly off
+            // from a grounded value) usually grounds on a later attempt. Keep
+            // the first passing result; if all attempts fail, keep the last.
+            String interpretation = null;
+            InterpretationVerifier.Result verify = null;
+            long llmElapsedMs = 0;
+            for (int attempt = 1; attempt <= MAX_LLM_ATTEMPTS; attempt++) {
+                long llmT0 = System.nanoTime();
+                interpretation = llama.chat(SYSTEM_PROMPT, userPrompt, SamplingParams.RENDER).trim();
+                llmElapsedMs = (System.nanoTime() - llmT0) / 1_000_000L;
+                verify = verifier.verify(interpretation, row.breakdown, preJson, postJson, row.symbol);
+                if (verify.passed()) {
+                    if (attempt > 1) {
+                        LOG.info("interpret verifier passed on retry  selected_id={} symbol={} attempt={}",
+                                selectedId, row.symbol, attempt);
+                    }
+                    break;
+                }
+                LOG.warn("interpret verifier failed  selected_id={} symbol={} attempt={}/{} mismatches={}",
+                        selectedId, row.symbol, attempt, MAX_LLM_ATTEMPTS, verify.mismatches());
+            }
 
             actx.heartbeat("upsert:" + selectedId);
             upsert(conn, row, interpretation, preJson, postJson, hash, verify, json);
