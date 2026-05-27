@@ -411,7 +411,7 @@ The frontend `long-exposure-browser.tsx` is intentionally minimal v1 — it prov
 
 - IEX is 1 of 16 US exchanges, ~2-5% of US equity volume. We see only IEX's slice. Halts are market-wide; trades / orders / quotes are IEX-only.
 - We consume the **DEEP+** feed — order-by-order, ~360M atomic events per trading day.
-- Pipeline: parse → 7 scorers → top-N selection → 2-pass LLM narration with pure-code grounding verifier.
-- Currently 100% intra-day; inter-day designed but requires 30-day backfill to enable.
-- Top open improvements: cross-event linking, symbol enrichment, daily synthesis pass, per-event Layer-0 expansion.
+- Pipeline: parse → 8 scorers (7 intraday + 1 inter-day) → percentile-rank selection → DESCRIBE → INTERPRET → SYNTHESIZE → AGGREGATE (all LLM, pure-code grounding verifier on each, with retry).
+- Mostly intra-day; the first inter-day scorer (`volume_deviation`, "Nx the trailing median") shipped against durable 400-day-cagg baselines that outlive the 2-week wire retention. `TimeInBookDriftScorer` is the next inter-day one (not built).
+- The big improvements (cross-event linking, symbol enrichment, daily synthesis, per-event interpretation, weekly rollup) are now **built** — this doc's "NOT YET BUILT" / "30-day backfill" notes below predate that; see `AGENTS.md` Active state for current status.
 - The breakdown JSON is the LLM's only context — every claim in the prose must trace to a field in it. Symbol enrichment is the cheapest lift in narration quality because it directly improves what's in the breakdown.

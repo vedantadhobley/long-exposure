@@ -4,11 +4,15 @@ The schedule for going from "scaffolded repo" to "live narrated public daily-mar
 
 Status legend: `[ ]` not started, `[~]` in progress, `[x]` complete.
 
-This plan is the agent-editable source of truth. The README has a condensed prose version; if they conflict, this file wins.
+This file is now primarily the **sprint-by-sprint history** of the build. For current state, the canonical sources are `AGENTS.md` (Active state), `docs/launch-sprint.md` (the backend-completion + launch plan), and `docs/todo.md` (live work list); for architectural decisions, `docs/decisions.md`.
 
 ---
 
-## ⏯ Where we are right now (2026-05-11 late session)
+## ⏯ Current state (2026-05-27)
+
+Full LLM pipeline complete end-to-end including the weekly rollup: `parse → validate → materialize → refresh-baselines → score (8 scorers) → select → DESCRIBE → INTERPRET → SYNTHESIZE → AGGREGATE`, with content-addressed compute-skip + verifier-driven retry, durable 400-day cagg baselines, and week-aligned 2-week retention. Two full weeks loaded + uniform (05-08 + 05-11→15 + 05-18→22). Next: frontend integration in `vedanta-systems`, then prod bring-up. See `docs/launch-sprint.md` for the day-by-day plan; the dated sections below are preserved as build history.
+
+## ⏯ Where we were (2026-05-11 late session — historical)
 
 **Pivot recorded 2026-05-11 (morning)**: v1 is DEEP+/DPLS, not TOPS. TOPS code repurposed as validation oracle. Full rationale in `docs/decisions.md`.
 
