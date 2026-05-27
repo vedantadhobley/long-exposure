@@ -1,4 +1,8 @@
-# Tiered Baselines + Monthly Rollups — design (post-launch)
+# Tiered Baselines + Rollup Hierarchy — design (post-launch)
+
+> The prose rollup hierarchy is **day → week → quarter → year** (§8, decided
+> 2026-05-27); the earlier "weekly-top, monthly-dropped" framing in §3 is
+> superseded. Numeric baselines are §2.
 
 Status: **design, not built.** Captured 2026-05-26. Builds on what shipped in the
 2026-05-25/26 work: `VolumeDeviationScorer` (first inter-day scorer), the
@@ -174,6 +178,15 @@ public interface BaselineProvider {
 
 ## 3. Prose theme stack (human output)
 
+> **SUPERSEDED 2026-05-27 by §8.** This 2026-05-26 decision capped the prose
+> stack at the weekly tier and dropped the *monthly* rollup. The current
+> direction (§8) instead extends the prose stack into a calendar fractal
+> **day → week → quarter → year** (skipping monthly; a quarter = 13 weeks).
+> The weekly prior-window widens 8 → 13 (one quarter). Read §8 for the live
+> plan; the rest of this §3 (the mirror-AggregateWeek build pattern, the
+> recompute-on-child-finalize cadence) still applies to the quarter/year tiers.
+> The original 2026-05-26 reasoning is preserved below for the record.
+>
 > **DECIDED 2026-05-26 — the prose stack tops out at the WEEKLY tier; the monthly
 > *prose* rollup is dropped (deferred).** Final shape:
 > - **Daily SYNTHESIZE** — day-local: "what happened today," reads only that day's
@@ -474,9 +487,13 @@ Items 1–3 are each a few hours; 4 is a new scorer + cagg; 5 is optional.
   toward mean unless a scorer genuinely needs robust long-horizon quantiles.
 - **Daily cagg horizon:** 1 year vs forever. 1 year ≈ 2.2 M rows (trivial);
   forever is also fine. Pick when setting the retention policy.
-- **Calendar month vs 4-week month** for AGGREGATE-monthly. Calendar month is
-  more legible ("May 2026"); 4-week aligns with the week-aligned retention. Lean
-  calendar month for the human-facing prose.
+- **Quarter/year period definition** (replaces the old "calendar month vs
+  4-week" question — there's no monthly prose tier; see §8). Use **ISO-week
+  multiples**: quarter = 13 ISO weeks, year = 4 quarters (52 weeks), all aligned
+  to the week-aligned boundary the retention sweep already uses — consistent and
+  drift-free, at the cost of "Q2 2026" not landing exactly on the calendar
+  quarter. Decide ISO-13-week vs calendar-quarter at build (lean ISO for
+  alignment with the rest of the system).
 - **`volume_deviation` direction:** still surges-only (v1). Volume *droughts*
   (today ≪ baseline) are a separate, less-narratable signal; revisit with the
   monthly tier (a drought vs monthly-norm may be more meaningful than vs 2-week).
@@ -484,3 +501,136 @@ Items 1–3 are each a few hours; 4 is a new scorer + cagg; 5 is optional.
   currently skips cleanly — see todo.md). Inter-day INTERPRET needs a different
   "context window" than the intraday ±60 s (e.g., the trailing baseline days),
   which is its own design.
+
+---
+
+## 8. The calendar rollup hierarchy (day → week → quarter → year) + the cascade
+
+> **Decided 2026-05-27 (direction; build post-launch).** Supersedes §3's
+> "weekly is the top tier, monthly dropped" framing and the §7 "calendar month
+> vs 4-week month" question. The prose stack becomes a **calendar fractal**:
+> `daily SYNTHESIZE → weekly AGGREGATE → quarterly rollup → yearly rollup`. A
+> quarter = **13 ISO weeks** (52/4); a year = **4 quarters**. The yearly tier is
+> the capstone — a "year in IEX microstructure" retrospective, which is the
+> long-exposure idea at maximum exposure time, for ~1 LLM call/year.
+
+### 8.1 The fractal — every tier is the same shape
+
+Each tier produces one prose paragraph per period by reading **(a)** its own
+period's children *fresh* + **(b)** a prior-window of same-tier siblings for
+trend context, content-addressed so the recompute is incremental. This is
+exactly today's `AggregateWeek` generalized one axis:
+
+| Tier | Period | Reads (children, fresh) | Prior-window (trend) | Recompute cadence | Finalizes |
+|---|---|---|---|---|---|
+| SYNTHESIZE | day | that day's per-event INTERPRETs | — (day-local) | per pipeline run | end of day |
+| AGGREGATE-week | ISO week | that week's daily syntheses | prior **13 weeks** (a quarter) | every day the week is open ("week-so-far") | week close |
+| AGGREGATE-quarter | quarter (13 wk) | that quarter's weekly rollups | prior **4 quarters** (a year) | every time a constituent **week finalizes** ("quarter-so-far") | quarter close (its last week) |
+| AGGREGATE-year | year (4 q) | that year's quarterly rollups | prior years (optional) | every time a constituent **quarter finalizes** | year close |
+
+The unifying rule: **a tier recomputes whenever one of its children finalizes**
+(the lowest tier, weekly, recomputes daily because its child is the day). So
+each period is a live "period-so-far" while open and frozen once closed —
+generalizing your "partial recomputes, completed is final" intuition up the
+whole stack. The prior-window widening (`PRIOR_WEEKS` 8 → 13) makes the weekly
+trend horizon exactly one quarter, which is why the quarter reads cleanly as
+"the trend the weeks were already tracking."
+
+### 8.2 The cascade — detection is built, the trigger is not
+
+Every tier's `content_hash` already covers **its children + its prior-window**
+(built for weekly; the quarter/year tiers mirror it). So staleness is
+*detected* automatically: change a historical week and the downstream weeks
+that cite it (prior-window), the quarter that contains it, and that quarter's
+year all get a different hash. **What's missing is the *trigger*** — nothing
+re-runs them. Forward (nightly) operation only touches the *current* period at
+each tier, so this gap is invisible day-to-day; it only bites on a **historical
+backfill / re-synthesis / cross-history prompt bump** (extending the archive
+backward, or post-launch reprocessing).
+
+The cascade is **two-dimensional**:
+
+- **Vertical (up-tier):** changed day → its week → that week's quarter → that
+  quarter's year.
+- **Horizontal (same-tier prior-window):** changed week → the next 13 weeks that
+  cited it → *their* quarters → … (and a changed week's new output can shift the
+  week after it, rippling forward through the prior-window chain).
+
+**The elegant trigger — coarse re-run, hash-pruned.** We do **not** need a
+fine-grained dependency graph. A `CascadeAggregate(fromDate)` driver re-runs,
+**bottom-up by tier**, *every* period from `fromDate` to now at each tier
+(weeks, then quarters, then year), and the **content-hash skip prunes it to the
+actual work**: a period whose inputs are byte-identical is a no-op, and — key —
+when a recompute produces *identical* prose (the change didn't actually move the
+trend), the downstream hash is unchanged and **the ripple terminates on its
+own.** So the driver is dumb and safe; the hashes make it cheap and
+self-limiting. Invoke it as the tail of any historical backfill.
+
+Pseudo-shape:
+
+```
+CascadeAggregate(fromDate):
+  for each ISO week W from week(fromDate) .. current:   AggregateWeek(W)     # hash-skips unchanged
+  for each quarter Q from quarter(fromDate) .. current: AggregateQuarter(Q)  # hash-skips unchanged
+  for each year Y from year(fromDate) .. current:       AggregateYear(Y)     # hash-skips unchanged
+```
+
+Bottom-up ordering matters: weeks must settle before the quarters that read
+them, quarters before the year. Within a tier, chronological (a week's
+prior-window needs the earlier weeks finalized first — same constraint
+`rerun-dataset.sh` already honors).
+
+### 8.3 Numeric side cascades differently (and for free)
+
+The numeric baseline stack (the caggs, §2) does **not** need this driver: a
+backfill into a historical day is picked up by re-running
+`refresh_continuous_aggregate` over the affected range (TimescaleDB
+recomputes the materialized buckets). So the cascade driver is a **prose-stack**
+concern only; the numeric tier's "cascade" is a range refresh.
+
+### 8.4 Retention reframe — "track a quarter" is mostly free; don't conflate it with wire retention
+
+"Maintain a quarter" splits into two very different costs:
+
+- **The rollup/narrative product** (daily synthesis + weekly/quarterly/yearly
+  rollups + per-event narratives/interpretations) is **kept indefinitely
+  already** and is kilobytes/period. "Tracking a quarter" — or a year, or
+  forever — for *rollup* purposes is **free**; it's just widening prior-windows
+  + adding the two tiers.
+- **The wire substrate** (13 wire hypertables + `order_lifecycle` +
+  scored/selected) is the only heavy thing, and it's needed *only to re-score*.
+  A full quarter of wire ≈ 13 wk × 5 d × ~13 GB ≈ **~850 GB**. **Don't pay that
+  to "track a quarter"** — the quarter's *value* (the prose + the baselines)
+  doesn't need it. Keep wire retention short (the current week-aligned window,
+  sized to how far back we'd want to re-score), and let the rollups + the
+  ~1-year cagg carry the long horizon. `RETENTION_WEEKS` (wire) and the
+  rollup/prior-window horizons are **independent knobs**; the quarter/year model
+  changes the latter, not necessarily the former.
+
+So the only real disk decision is the *wire re-score window*, unchanged by this
+design. (This supersedes the framing that "retention = 2 weeks" bounds the
+rollups — it bounds only the wire substrate.)
+
+### 8.5 Build phasing (post-launch)
+
+1. **Widen the weekly prior-window** `PRIOR_WEEKS` 8 → 13 (one constant; the
+   weekly trend horizon becomes a quarter). Cheap.
+2. **`AggregateQuarterActivity` + `AggregateQuarterWorkflow`** — a near-verbatim
+   mirror of `AggregateWeek`: reads the quarter's ≤13 weekly rollups + prior 4
+   quarters, content-addressed (`quarterly_aggregate.content_hash`), recompute
+   on week-finalize. New `quarterly_aggregate` table.
+3. **`AggregateYearActivity` + `AggregateYearWorkflow`** — same mirror, reads 4
+   quarters; recompute on quarter-finalize. New `yearly_aggregate` table.
+4. **`CascadeAggregate(fromDate)`** driver (§8.2) — wired as the tail of the
+   backfill path (`rerun-dataset.sh` / a backfill workflow), not the nightly
+   path. The nightly path keeps touching only the current period at each tier.
+5. **Wire the quarter/year child calls into `DailyPipelineWorkflow`** the same
+   way AGGREGATE-week is: after the weekly rollup, conditionally fire the
+   quarter rollup when the just-finalized day closes a week, and the year rollup
+   when it closes a quarter. (Or keep them in the cascade driver + a lightweight
+   "did a period just close?" check — decide at build.)
+
+All of items 2–5 are the AggregateWeek pattern repeated; the only genuinely new
+code is the `CascadeAggregate` driver, and even that is a loop over existing
+content-addressed activities. Effort: each tier ~half a day; the cascade driver
+~half a day; the prior-window widening minutes.

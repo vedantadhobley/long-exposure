@@ -45,14 +45,12 @@ The seven scorers — halt, large_trade, sweep, post_cancel_cluster, layering, i
 8. ✅ **SYNTHESIZE production wiring** (done 2026-05-22) — `SynthesizeDayActivity` + `SynthesizeDayWorkflow` + `SynthesisVerifier` + `daily_synthesis` table + `SamplingParams.SYNTHESIZE` (Qwen reasoning preset). End-to-end on 2026-05-08: paragraph published, ticker check clean, 1 magnitude-approximation warning.
 9. ✅ **Small-batch backfill (week 05-18→05-22)** — done 2026-05-23/24. Cross-day robustness confirmed: DESCRIBE 98-100%, INTERPRET 97-100%, zero integrity gaps, 5 syntheses. Audit in conversation; failure-class understanding corrected (see Post-backfill polish below).
 10. ✅ **Week-aligned 2-week retention** — done 2026-05-25. `RetentionSweepActivity.weekBoundary()` + unit test; closed the `order_lifecycle`/`scored_events`/`selected_events` gaps. See `decisions.md` 2026-05-25.
-11. 🔄 **2-week backfill: prior week (05-11→05-15)** — running 2026-05-25 (serial, ~12 h) to reach the 2-full-week target. Replaces the 30-day backfill (see `decisions.md` 2026-05-25).
+11. ✅ **2-week backfill** — both weeks loaded (05-11→15, 05-18→22) + 05-08; re-run uniform on the current formatting/retry (2026-05-27).
 
-### Inter-day work — the current focus (Days 5-6, enabled by the 2-week data)
+### Inter-day work — ✅ DONE (Phase 2 + 3, 2026-05-26/27)
 
-The retention reframe split "inter-day" into two tracks with different data needs (1 week is enough for the LLM rollup; baselines want 2+):
-
-12. **AGGREGATE — weekly themes / editorial column** (list item #6). One LLM call reading the week's daily syntheses → a "week of …" rollup. Fully supported on 1 week already (5 syntheses in hand). Tiny prompt (~1.2K tokens). New `SynthesizeWeekActivity`/`Workflow` + `AggregateVerifier`. **Fix dotted-ticker tokenization here AND in `SynthesisVerifier` together** (see Post-backfill polish — the BRK.B false-positive; AGGREGATE's verifier will mirror the same ticker check, so share the fix).
-13. **Inter-day scorer plumbing** (`VolumeDeviationScorer`) — build + validate the mechanism against the 2-week trailing baseline (the `daily_volume_by_symbol` cagg + a `BaselineProvider`). "Nx the 2-week median." Robust-enough on 2 weeks; deepens if retention later extends to 4.
+12. ✅ **AGGREGATE — weekly rollup** — done 2026-05-26 (`b06da2b`). `AggregateWeekActivity`/`Workflow` + `weekly_aggregate` table; recompute-daily "week-so-far" + prior-8-week trend window + content-addressed skip; wired into `DailyPipelineWorkflow` after SYNTHESIZE. Dotted-ticker fix shared via `SynthesisVerifier.extractTickers` (`b64d26f`). Prompt v4 (anti-cross-sum + no-priors guard).
+13. ✅ **Inter-day scorer `VolumeDeviationScorer`** — done 2026-05-26 (`6282090`/`f34bd17` + `e531d26`). Reads the `daily_volume_by_symbol` cagg (400-day window) via `BaselineProvider`/`CaggBaselineProvider`; `RefreshBaselinesActivity` keeps the cagg current before scoring. "Nx the trailing median." Validated: MEHA 22.2×, IMRX 14.5×.
 
 ### Frontend — the launch critical path (Days 7-8, NOT started)
 
@@ -62,13 +60,25 @@ The retention reframe split "inter-day" into two tracks with different data need
 
 ### Post-launch
 
-> **Tiered baselines + monthly rollups — full design in [`tiered-baselines-design.md`](tiered-baselines-design.md)** (2026-05-26). Items 17–20 below are the headline tasks from it; the doc has the detailed implementation (cagg-on-cagg DDL, `BaselineProvider` interface, AGGREGATE-monthly activity/workflow mirror, retention table, build phasing, median-decomposability gotcha). Key insight: the daily `daily_volume_by_symbol` cagg is tiny (~2.2 M rows/yr) and already *outlives* the 2-week wire TTL (caggs decouple from source once materialized) — so keeping it ~1 yr gives exact baselines for free; the monthly *numeric* tier is optional, while the monthly *prose* tier (AGGREGATE-monthly) is the real new build.
+> **Tiered baselines + rollup hierarchy — full design in [`tiered-baselines-design.md`](tiered-baselines-design.md).** Items 17–19 SHIPPED in Phase 2/3 (2026-05-26/27); the live post-launch work is the **calendar rollup hierarchy + cascade** (§8, decided 2026-05-27) and the drift-prevention items.
 
-17. **Extend daily cagg retention/refresh window** (`30 days` → `~400 days`) + confirm `RetentionSweepActivity` never drops it → exact 1-year baselines, no new objects. Smallest, highest-leverage item (design §6.1).
-18. **`BaselineProvider` + refactor `VolumeDeviationScorer`** onto it (design §2.5) — decouples scoring from inline SQL, opens the monthly tier + `TimeInBookDriftScorer` reuse. The multi-resolution window (recent weeks daily + ~12 months monthly) + the per-stage reach/resolution matrix + the period-local-prose-with-light-continuity decision are now in **design §4 (tiered context windows)**.
-19. **Weekly rollup → recompute-daily + ~8-week prior window** (the active prose-trend work; **decided 2026-05-26**, design §3 + §4.3). Make `AggregateWeek` read this-week-so-far + the prior ~8 `weekly_aggregate` rows under a `PRIOR WEEKS (trend context)` heading; extend the verifier haystack to the prior window (or "vs last week" trips the TSEM-class catch); run it daily on the open week (upsert-by-`week_start`, last run finalizes). Daily synthesis stays day-local. **Monthly *prose* rollup is DROPPED/deferred** — a long-reach compression feature for when quarterly/yearly columns are wanted; ~8 weekly paragraphs cover the near-term trend horizon and the long *magnitude* reach lives in the numeric monthly cagg.
-20. **`TimeInBookDriftScorer` + its lifetime cagg** (design §2.6); **monthly numeric tier** (`monthly_volume_by_symbol` cagg-on-cagg, design §2.4) only if multi-year *magnitude* reach is wanted — decide mean-fallback vs toolkit percentile sketch then.
-- **Extend retention to 4 weeks** if deeper baselines wanted (one-line `RETENTION_WEEKS` change) — and only *then* revisit the cross-node stage-pipelined backfill (considered + deferred 2026-05-25; see `decisions.md` and the parallelization audit below — not worth the orchestration complexity at 2-week scope).
+17. ✅ **Daily cagg retention/refresh window 30 d → 400 d** — done 2026-05-26 (`afd9b25`). Exact ~1-year baselines that outlive the 2-week wire retention; `RetentionSweepActivity` provably never drops it.
+18. ✅ **`BaselineProvider`/`CaggBaselineProvider` + `VolumeDeviationScorer` refactor** — done 2026-05-26 (`e531d26`). Decoupled scoring from cagg SQL; behavior-preserving (42-symbol set reproduced exactly). + `RefreshBaselinesActivity` (first Score-phase step).
+19. ✅ **Weekly rollup recompute-daily + prior-week window** — done 2026-05-26 (`b06da2b`). Now extends to the full hierarchy ↓.
+
+**Live post-launch work (calendar rollup hierarchy + cascade — design §8, decided 2026-05-27):**
+
+20. **Widen weekly prior-window 8 → 13** (one constant) so the weekly trend horizon = one quarter.
+21. **`AggregateQuarterActivity`/`Workflow` + `quarterly_aggregate` table** — mirror of `AggregateWeek`; reads the quarter's ≤13 weekly rollups + prior 4 quarters; recompute-on-week-finalize; content-addressed. (~half day.)
+22. **`AggregateYearActivity`/`Workflow` + `yearly_aggregate` table** — the capstone "year in IEX microstructure" retrospective; reads 4 quarters; recompute-on-quarter-finalize. Needs a year of data. (~half day.)
+23. **`CascadeAggregate(fromDate)` driver** — the load-bearing new mechanism (design §8.2): after a historical backfill/re-synthesis, re-run every period from `fromDate` forward, bottom-up by tier (weeks → quarters → year), pruned by `content_hash`. Wired into the backfill path, NOT the nightly path. (~half day.) **Applies to weekly too** — a historical change does NOT auto-propagate downstream today.
+24. **`TimeInBookDriftScorer` + its lifetime cagg** (design §2.6); **monthly numeric tier** (cagg-on-cagg, §2.4) only if multi-year *magnitude* reach is wanted.
+
+**Drift-prevention (the systemic fix — see the 2026-05-27 doc audit):**
+
+25. **De-number the docs + `scripts/docs-check.sh`** — hardcoded counts ("8 scorers", "13 workflows", "22 activities", "9 tables") rot on every code change and are error-prone to re-verify by hand (the 2026-05-27 audit caught a stale table-count AND a miscount *in the verification itself*). Replace counts with code pointers where possible; for the few we keep, a `docs-check.sh` greps the code (`EventScorerRegistry` size, `WorkerMain` registrations, `create_hypertable` calls) and diffs against the docs so a stale number fails loudly. Aligns with the global CLAUDE.md anti-pattern "static counts in docs."
+
+- **Extend wire retention to 4 weeks** if deeper *re-scoreability* wanted (one-line `RETENTION_WEEKS`; independent of the rollup horizon — see design §8.4) — and only *then* revisit the cross-node stage-pipelined backfill (deferred 2026-05-25).
 - **SUMMARIZE stage** (background baselines + day-aggregates as a named pipeline stage).
 
 ### Prompt-level limitations (queued for v5)

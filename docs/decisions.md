@@ -6,6 +6,20 @@ Append-only record of architectural and operational decisions, ordered by date. 
 
 ---
 
+## 2026-05-27 — Prose rollups become a calendar fractal (day → week → quarter → year) + a generic cascade (direction; build post-launch)
+
+**Supersedes** the 2026-05-26 "prose stack tops out at WEEKLY, monthly dropped" decision and clarifies that the 2-week retention (2026-05-25) bounds the **wire substrate only**, not the rollups.
+
+**Decided (direction).** The prose stack extends into a calendar fractal: `daily SYNTHESIZE → weekly AGGREGATE → quarterly rollup → yearly rollup` (skipping monthly; quarter = 13 ISO weeks, year = 4 quarters). The yearly tier is the capstone retrospective ("a year in IEX microstructure" — the long-exposure idea at max exposure time, ~1 LLM call/year). Every tier is the same shape as today's `AggregateWeek`: read children fresh + a prior-window of same-tier siblings, content-addressed, **recompute when a child finalizes** ("period-so-far" while open, frozen when closed). Weekly prior-window widens 8 → 13 (one quarter).
+
+**The cascade (the load-bearing new mechanism).** Each tier's `content_hash` already *detects* staleness (it includes children + prior-window). What's missing is the *trigger*: forward/nightly operation only touches the current period per tier, so a **historical backfill / re-synthesis / cross-history prompt bump** leaves downstream rollups stale — both vertically (day→week→quarter→year) and horizontally (a changed week ripples through the next 13 weeks' prior-windows). The fix is a `CascadeAggregate(fromDate)` driver that re-runs every period from `fromDate` forward, bottom-up by tier, and **relies on the content-hash to prune** — unchanged periods are no-ops, and the ripple self-terminates when a recompute yields identical prose. No fine-grained dependency graph; the driver is dumb, the hashes make it cheap + safe. Applies at every tier (quarter and year need it too).
+
+**Retention clarification.** "Track a quarter/year" is *free* for the rollups (kept indefinitely, kilobytes) — it's just wider prior-windows + two more tiers. Only the **wire substrate** is heavy (a quarter ≈ ~850 GB), and it's needed only for re-scoring — so wire retention stays a separate, short knob; don't conflate it with the rollup horizon.
+
+**Numeric side** cascades for free via TimescaleDB cagg range-refresh; the driver is a prose-stack concern only.
+
+Full spec + build phasing in `tiered-baselines-design.md` §8. Not built — post-launch.
+
 ## 2026-05-27 — Phase 4: uniform dataset re-run — notional $-formatting, verifier-driven retry, co_occurring fixes
 
 **Context.** Heading into launch the loaded 2-week dataset was a *mix* of states — different prompt versions across days, vol_deviation present on some days and not others, raw vs formatted numbers, several pre-retry synthesis failures. A uniform, all-passing rebuild was wanted, and an audit surfaced a few residual quality bugs worth fixing before a (one-time, expensive) full re-narration baked them in.
