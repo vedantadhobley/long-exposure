@@ -6,6 +6,42 @@ Append-only record of architectural and operational decisions, ordered by date. 
 
 ---
 
+## 2026-05-27 — Phase 4: uniform dataset re-run — notional $-formatting, verifier-driven retry, co_occurring fixes
+
+**Context.** Heading into launch the loaded 2-week dataset was a *mix* of states — different prompt versions across days, vol_deviation present on some days and not others, raw vs formatted numbers, several pre-retry synthesis failures. A uniform, all-passing rebuild was wanted, and an audit surfaced a few residual quality bugs worth fixing before a (one-time, expensive) full re-narration baked them in.
+
+**Decided + shipped.**
+
+- **Notional `$X,XXX.XX` formatting** — `BreakdownFmt.formatDollars(v)`, routed through the 6 notional fields (`notional_dollars`, `notional_per_fill`, `notional_per_level`). Counts/shares were already comma-formatted via `formatCount`; notional was a raw rounded double, so the model rendered "notional value of 1047129.4 dollars". Prices left numeric (their sub-penny precision shouldn't be flattened to 2 decimals).
+- **Verifier-driven retry on all four LLM stages** (DESCRIBE / INTERPRET / SYNTHESIZE / AGGREGATE) — re-roll a verifier-rejected call up to 3× (the render/synth passes run at temp 0.7–1.0, so a fresh attempt produces different number-rendering that usually grounds), keep the first passing result, else the last (still stored `verifier_passed=false`). Drove every stage to ~100% pass (was 98–99%). DESCRIBE retries only the *render* pass — extract is temp 0.1, ~deterministic, and the failures are render-side.
+- **co_occurring fixes** — integer `sum_deletes` (was `57.0`; added "deletes" to `isIntegerCountField`); dropped `total_children` (was narrated as "3 total children events", leaking the data-model vocabulary).
+- **Uniform re-run** via `scripts/rerun-dataset.sh` (per day score→narrate→interpret→synthesize; per week aggregate). The per-event content-addressed skip + the retry make it incremental + self-healing — each day re-narrates only changed events and auto-recovers transient failures. Followed by the orphan prune (`docs/sql/prune-stale-narrations.sql`).
+
+**Why retry rather than more prompt-engineering.** The residual failures are inherent to LLM rendering (the model occasionally derives or rounds a number slightly off a grounded value). Chasing each failure mode with a prompt rule is a treadmill; a re-roll against the *same unchanged* deterministic verifier is general, cheap (only failures pay extra calls), and doesn't weaken the grounding guarantee — the verifier stays the correctness mechanism, the retry just gives it more chances to land a clean draft.
+
+## 2026-05-26 — Phase 3: durable inter-day baselines — 400-day cagg (decoupled from wire retention) + BaselineProvider + explicit refresh
+
+**Context.** `VolumeDeviationScorer` (the first inter-day scorer) needs per-symbol trailing-volume baselines, but the wire data is dropped at 2 weeks. How do baselines survive when their source rows don't?
+
+**Decided.**
+
+- **Extend the `daily_volume_by_symbol` cagg refresh window 30d → 400d.** A continuous aggregate is its own materialized hypertable that *decouples from its source once materialized* — the hourly refresh persists each day's per-symbol volume row well before RetentionSweep drops the underlying `trades` chunks. So the cagg accumulates a rolling ~1 year of *exact* daily baselines (~2.2M tiny rows) even though raw wire data lives only 2 weeks. **Invariant (load-bearing):** the refresh window must never be shorter than wire retention, and RetentionSweep must never drop the cagg's materialization (pinned in both schema.sql and `RetentionSweepActivityImpl`).
+- **`BaselineProvider` / `CaggBaselineProvider`** — moves all cagg SQL out of the scorer. Exposes *bulk* per-symbol maps (volume deviation is a set-scan "which symbols surged?", not per-symbol point lookups). Built once per scoring run, on `ScoringContext`. The reuse seam for future inter-day scorers (TimeInBookDrift) + the monthly numeric tier.
+- **`RefreshBaselinesActivity`** as the first Score-phase step — an explicit `refresh_continuous_aggregate` for the trading day's bucket *before* the scorer reads it. Closes a real gap: a nightly run scored minutes after parse, before the hourly policy materialized today's trades, so the scorer would have read a cagg with no row for today. **No orchestration change** — it's a Score-phase activity, peer to materialize/score/enrich/select, so `DailyPipelineWorkflow` is untouched (it would only need surgery if this were miscategorized as a child *workflow* rather than an activity *step*).
+
+## 2026-05-26 — Phase 2: AGGREGATE weekly rollup wired into the pipeline (recompute-daily, prior-week window, content-addressed)
+
+**Context.** AGGREGATE (weekly themes) existed only as a manual, own-week-only activity. To be the top prose *trend* tier it had to be timely and grounded in week-over-week context.
+
+**Decided.**
+
+- **Recompute-daily "week-so-far"** — `AggregateWeek` runs every day on the open week (upsert by `week_start`; the last run of the week finalizes it). It reads *this week's daily syntheses fresh* (a **stateless rebuild** — deliberately NOT its own prior `aggregate_text`, which would compound LLM drift across the daily recompute) plus the **prior ~8 finalized weekly rollups** as week-over-week trend context (verifier haystack + ticker universe extended to them, so a grounded "third straight week of …" passes).
+- **Content-addressed skip** — `weekly_aggregate.content_hash` over (prompt+model version + this week's day paragraphs + the prior weeks' paragraphs). The daily recompute does real LLM work only when a day is added/re-synthesized, a prior week changes, or the prompt bumps.
+- **Wired into `DailyPipelineWorkflow`** after SYNTHESIZE (before compress); LLM-bound, shares the one-LLM-workflow-at-a-time rule.
+- **Monthly *prose* rollup dropped (deferred)** — ~8 weekly paragraphs cover the near-term trend horizon; long-range *magnitude* reach lives in the (optional) numeric monthly cagg, a better home for quantitative long-horizon signal than prose. Full design in `tiered-baselines-design.md`.
+
+---
+
 ## 2026-05-25 — Retention: rolling 2 full weeks, week-aligned (supersedes 30-day); backfill scoped to 2 weeks
 
 **Context.** The original plan called for a 30-(trading-)day backfill + a flat 30-calendar-day `drop_chunks` retention. Two realizations changed this:
