@@ -74,6 +74,14 @@ The seven scorers — halt, large_trade, sweep, post_cancel_cluster, layering, i
 23. **`CascadeAggregate(fromDate)` driver** — the load-bearing new mechanism (design §8.2): after a historical backfill/re-synthesis, re-run every period from `fromDate` forward, bottom-up by tier (weeks → quarters → year), pruned by `content_hash`. Wired into the backfill path, NOT the nightly path. (~half day.) **Applies to weekly too** — a historical change does NOT auto-propagate downstream today.
 24. **`TimeInBookDriftScorer` + its lifetime cagg** (design §2.6); **monthly numeric tier** (cagg-on-cagg, §2.4) only if multi-year *magnitude* reach is wanted.
 
+**Analytics wave — richer microstructure/statistical computations for the breakdown (full menu in [`analytics-catalog.md`](analytics-catalog.md), 2026-05-27):**
+
+26. **Shared `com.longexposure.analytics.*` layer + Tier-1 metrics** — pure, unit-tested functions feeding the breakdown: order-to-trade ratio, OFI, sweep slippage + post-event reversion, time-in-book drift, robust z-score + percentile rank, realized vol, one-sidedness, participation rate. Computed **lazily for the ~90–170 selected events** (not all 660 K). Turns prose from "what happened" → "what it cost / what it implies." Catalog §2 + §4 (Tier 1).
+27. **Decide the per-scorer "narration set"** — which curated subset of computed analytics enters the LLM-facing breakdown vs stays in `scored_events` for drill-down (catalog §3, option B + light headline/detail). This is a quality/cost choice, not correctness — needs a design pass. DESCRIBE gets the event's defining metrics; SYNTHESIZE/AGGREGATE get day/period-level ones (HHI/breadth/entropy), not per-event detail.
+28. **Tier-2/3 analytics** (burstiness, periodicity, effective spread, depth imbalance, HHI, cancel-after-opposite-move, iceberg reserve; defer VPIN/Kyle's λ/Hawkes/jumps as slice-fragile) — catalog §4.
+
+> Deploying the analytics wave is a deliberate **full re-run** (incremental via the `event_hash` skip) — the reason the 2-week scope is being held. Frontend drill-down ("every figure traces to IEX data") is the natural home for the *un*-narrated analytics.
+
 **Drift-prevention (the systemic fix — see the 2026-05-27 doc audit):**
 
 25. **De-number the docs + `scripts/docs-check.sh`** — hardcoded counts ("8 scorers", "13 workflows", "22 activities", "9 tables") rot on every code change and are error-prone to re-verify by hand (the 2026-05-27 audit caught a stale table-count AND a miscount *in the verification itself*). Replace counts with code pointers where possible; for the few we keep, a `docs-check.sh` greps the code (`EventScorerRegistry` size, `WorkerMain` registrations, `create_hypertable` calls) and diffs against the docs so a stale number fails loudly. Aligns with the global CLAUDE.md anti-pattern "static counts in docs."

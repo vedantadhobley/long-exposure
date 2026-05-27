@@ -36,6 +36,7 @@ No HTTP API in this repo. The public `/api/long-exposure/*` routes are served by
 - @docs/todo.md — active checklist; **paste-ready start-of-session block at the top**
 - @docs/decisions.md — append-only log of architectural decisions
 - @docs/scoring-and-narration.md — design reference for the EventScorer + LLM prompt engineering (DEEP+ pattern catalog, narration grounding rules, output structure)
+- @docs/analytics-catalog.md — the menu of microstructure/statistical computations the code layer can compute and feed the LLM (OFI, order-to-trade ratio, time-in-book drift, slippage, …), grouped + effort-tiered, plus the "what data do we actually pass to the LLM" rationing discussion. Post-launch implementation wave.
 - @docs/temporal-design.md — workflow + activity layout (Mermaid diagrams, retry policies)
 - @docs/protocol-notes.md — IEX-TP + TOPS + DEEP+ spec notes, parser gotchas
 - @docs/operations.md — runbook (bring-up, restart, schema refresh, replay a day)
