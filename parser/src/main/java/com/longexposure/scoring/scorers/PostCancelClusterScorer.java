@@ -220,6 +220,13 @@ public final class PostCancelClusterScorer implements EventScorer {
             breakdown.put("median_lifetime_pct_of_duration",
                           BreakdownFmt.round(medianLifetimeMs * 1_000_000.0 / durationNanos * 100.0, 1));
         }
+        // Burstiness (Fano factor) of the add-arrival times: ≫1 = clustered,
+        // machine-paced bursts (the post-cancel signature); ≈1 = Poisson-random.
+        long[] addNanos = new long[cluster.size()];
+        for (int i = 0; i < cluster.size(); i++) addNanos[i] = cluster.get(i).addNanos;
+        double fano = com.longexposure.analytics.Analytics.fanoFactor(
+                addNanos, Math.max(2, Math.min(50, cluster.size() / 5)));
+        if (!Double.isNaN(fano)) breakdown.put("burstiness_fano", BreakdownFmt.round(fano, 2));
         breakdown.put("event_session_phase",  BreakdownFmt.sessionPhase(first.addTs));
         breakdown.put("event_phase_label",    BreakdownFmt.sessionPhaseLabel(first.addTs));
 

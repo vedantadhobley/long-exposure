@@ -220,6 +220,13 @@ public final class LayeringScorer implements EventScorer {
         if (durationSec > 0) {
             breakdown.put("orders_per_second", BreakdownFmt.round(cluster.size() / durationSec, 1));
         }
+        // Burstiness (Fano factor) of the add-arrival times: ≫1 = the orders
+        // arrived in clustered bursts rather than spread evenly across levels.
+        long[] addNanos = new long[cluster.size()];
+        for (int i = 0; i < cluster.size(); i++) addNanos[i] = cluster.get(i).addNanos;
+        double fano = com.longexposure.analytics.Analytics.fanoFactor(
+                addNanos, Math.max(2, Math.min(50, cluster.size() / 5)));
+        if (!Double.isNaN(fano)) breakdown.put("burstiness_fano", BreakdownFmt.round(fano, 2));
         breakdown.put("density_class",
                 ordersPerLevel < 2.0 ? "sparse" :
                 ordersPerLevel < 5.0 ? "moderate" : "stacked");

@@ -3,6 +3,7 @@ package com.longexposure.scoring.scorers;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.longexposure.scoring.BaselineProvider;
 import com.longexposure.scoring.EventScorer;
 import com.longexposure.scoring.BreakdownFmt;
 import com.longexposure.scoring.ScoredEvent;
@@ -15,6 +16,7 @@ import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Map;
 import java.util.function.Consumer;
 
 /**
@@ -54,6 +56,9 @@ public final class LargeTradeScorer implements EventScorer {
     /** Threshold for the SQL filter, in price_raw units (notional × 10_000). */
     private static final long NOTIONAL_CUTOFF_RAW = NOTIONAL_CUTOFF_DOLLARS * 10_000L;
 
+    /** Trailing window for the per-symbol baseline (median daily volume). Matches VolumeDeviationScorer. */
+    private static final int BASELINE_WINDOW_DAYS = 14;
+
     @Override
     public String id() { return "large_trade"; }
 
@@ -74,6 +79,13 @@ public final class LargeTradeScorer implements EventScorer {
         Timestamp from = Timestamp.from(ctx.tradingDate().atStartOfDay().toInstant(ZoneOffset.UTC));
         Timestamp to   = Timestamp.from(ctx.tradingDate().plusDays(1).atStartOfDay().toInstant(ZoneOffset.UTC));
 
+        // Per-symbol trailing baseline (median daily IEX volume), loaded once —
+        // lets each block report its size as a % of the symbol's typical day
+        // ("a fifth of the day in one print"). Empty map degrades gracefully
+        // (the pct field is simply omitted) when no baseline exists yet.
+        Map<String, BaselineProvider.TrailingVolume> baselines =
+                ctx.baselines().trailingVolumeBaselines(ctx.tradingDate(), BASELINE_WINDOW_DAYS);
+
         long emitted = 0;
         try (PreparedStatement st = ctx.conn().prepareStatement(sql)) {
             st.setTimestamp(1, from);
@@ -81,7 +93,7 @@ public final class LargeTradeScorer implements EventScorer {
             st.setLong(3, NOTIONAL_CUTOFF_RAW);
             try (ResultSet rs = st.executeQuery()) {
                 while (rs.next()) {
-                    emit.accept(buildEvent(ctx, rs));
+                    emit.accept(buildEvent(ctx, rs, baselines));
                     emitted++;
                 }
             }
@@ -93,7 +105,8 @@ public final class LargeTradeScorer implements EventScorer {
                 ctx.tradingDate(), NOTIONAL_CUTOFF_DOLLARS, emitted);
     }
 
-    private static ScoredEvent buildEvent(final ScoringContext ctx, final ResultSet rs) throws Exception {
+    private static ScoredEvent buildEvent(final ScoringContext ctx, final ResultSet rs,
+                                          final Map<String, BaselineProvider.TrailingVolume> baselines) throws Exception {
         Instant ts        = rs.getTimestamp("ts").toInstant();
         long    tsNanos   = rs.getLong("ts_nanos");
         String  symbol    = rs.getString("symbol");
@@ -110,6 +123,14 @@ public final class LargeTradeScorer implements EventScorer {
         breakdown.put("size_shares",          BreakdownFmt.formatCount(size));
         breakdown.put("price_dollars",        priceDollars);
         breakdown.put("notional_dollars",     BreakdownFmt.formatDollars(notionalDollars));
+
+        // % of the symbol's median daily IEX volume — "a fifth of the day in one
+        // print". Omitted when there's no baseline for the symbol (NaN guard).
+        BaselineProvider.TrailingVolume base = baselines.get(symbol);
+        if (base != null) {
+            double pct = com.longexposure.analytics.Analytics.pctOfBaseline(size, base.medianVolume());
+            if (!Double.isNaN(pct)) breakdown.put("pct_of_baseline_volume", BreakdownFmt.round(pct, 1));
+        }
         // trade_id and sale_condition_flags are intentionally NOT in the
         // breakdown — they're wire-format metadata that leaked into prose
         // as "trade ID 173670060632532234" / "flags 0". Still preserved in

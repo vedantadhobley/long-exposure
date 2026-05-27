@@ -36,6 +36,15 @@ public interface BaselineProvider {
      */
     Map<String, TrailingVolume> trailingVolumeBaselines(LocalDate day, int windowDays);
 
+    /**
+     * Raw per-symbol daily volumes over {@code [day - windowDays, day)} — the
+     * values the inter-day deviation stats are derived from (median, MAD,
+     * percentile rank), computed in Java via {@code Analytics} rather than in
+     * SQL. Each array is the symbol's daily total volumes within the window
+     * (length = how many of those days the symbol traded).
+     */
+    Map<String, double[]> trailingVolumeWindows(LocalDate day, int windowDays);
+
     /** A symbol's volume + trade count on one day. */
     record DayVolume(long volume, long tradeCount) {}
 

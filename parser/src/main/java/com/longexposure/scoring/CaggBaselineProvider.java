@@ -6,7 +6,9 @@ import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -79,6 +81,41 @@ public final class CaggBaselineProvider implements BaselineProvider {
             }
         } catch (Exception e) {
             throw new RuntimeException("trailingVolumeBaselines query failed for day=" + day, e);
+        }
+        return out;
+    }
+
+    @Override
+    public Map<String, double[]> trailingVolumeWindows(final LocalDate day, final int windowDays) {
+        // Raw per-symbol daily volumes over [day - windowDays, day) — the caller
+        // (VolumeDeviationScorer) derives median / MAD / percentile-rank from
+        // these via the tested Analytics functions, rather than computing each
+        // statistic in SQL (MAD has no Postgres builtin, and one array keeps the
+        // stats consistent). Cheap: the cagg is one tiny row per symbol per day.
+        String sql = """
+                SELECT symbol, total_volume
+                FROM daily_volume_by_symbol
+                WHERE day >= ? AND day < ?
+                ORDER BY symbol
+                """;
+        Map<String, List<Double>> acc = new HashMap<>(16_384);
+        try (PreparedStatement st = conn.prepareStatement(sql)) {
+            st.setTimestamp(1, utcMidnight(day.minusDays(windowDays)));
+            st.setTimestamp(2, utcMidnight(day));
+            try (ResultSet rs = st.executeQuery()) {
+                while (rs.next()) {
+                    acc.computeIfAbsent(rs.getString("symbol"), k -> new ArrayList<>())
+                       .add((double) rs.getLong("total_volume"));
+                }
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("trailingVolumeWindows query failed for day=" + day, e);
+        }
+        Map<String, double[]> out = new HashMap<>(acc.size() * 2);
+        for (Map.Entry<String, List<Double>> e : acc.entrySet()) {
+            double[] arr = new double[e.getValue().size()];
+            for (int i = 0; i < arr.length; i++) arr[i] = e.getValue().get(i);
+            out.put(e.getKey(), arr);
         }
         return out;
     }

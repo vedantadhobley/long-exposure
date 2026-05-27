@@ -215,6 +215,11 @@ public final class SweepScorer implements EventScorer {
         if (durationMs > 0) {
             breakdown.put("executions_per_ms", BreakdownFmt.round(cluster.size() / durationMs, 2));
         }
+        // Slippage: how far the price walked from the first fill to the last —
+        // the cost the aggressor paid chewing through the offer/bid ladder.
+        double slippageBps = com.longexposure.analytics.Analytics.slippageBps(first.priceRaw, last.priceRaw);
+        breakdown.put("slippage_bps",          BreakdownFmt.round(Math.abs(slippageBps), 1));
+        breakdown.put("slippage_direction",    slippageBps > 0 ? "up" : slippageBps < 0 ? "down" : "flat");
         breakdown.put("event_session_phase",  BreakdownFmt.sessionPhase(first.ts));
         breakdown.put("event_phase_label",    BreakdownFmt.sessionPhaseLabel(first.ts));
 

@@ -78,4 +78,50 @@ class AnalyticsTest {
         assertEquals(0.0, Analytics.percentileRank(1, window), EPS);    // none strictly below
         assertTrue(Double.isNaN(Analytics.percentileRank(5, new double[]{})));
     }
+
+    @Test
+    void coefficientOfVariation_dispersionAndGuards() {
+        assertEquals(0.0, Analytics.coefficientOfVariation(new double[]{2, 2, 2}), EPS); // uniform
+        // {1,2,3,4,5}: mean 3, sample sd sqrt(2.5)=1.58114, CV=0.527046
+        assertEquals(0.5270463, Analytics.coefficientOfVariation(new double[]{1, 2, 3, 4, 5}), 1e-6);
+        assertTrue(Double.isNaN(Analytics.coefficientOfVariation(new double[]{5})));      // n<2
+        assertTrue(Double.isNaN(Analytics.coefficientOfVariation(new double[]{-1, 1})));  // mean 0
+    }
+
+    @Test
+    void fanoFactor_burstyVsUniform() {
+        // 10 events, 2 per bin across 5 bins -> counts all equal -> variance 0
+        assertEquals(0.0, Analytics.fanoFactor(
+                new long[]{5, 15, 25, 35, 45, 55, 65, 75, 85, 95}, 5), EPS);
+        // 5 events crammed at the start + 1 far out -> clustered -> Fano > 1
+        assertTrue(Analytics.fanoFactor(new long[]{0, 1, 2, 3, 4, 100}, 5) > 1.0);
+        assertTrue(Double.isNaN(Analytics.fanoFactor(new long[]{5}, 5)));         // <2 events
+        assertTrue(Double.isNaN(Analytics.fanoFactor(new long[]{5, 5, 5}, 5)));   // zero span
+        assertTrue(Double.isNaN(Analytics.fanoFactor(new long[]{1, 2, 3}, 1)));   // bins<2
+    }
+
+    @Test
+    void reversionFraction_transientPermanentOvershoot() {
+        // moved 100 -> 110 (impact +10); came back to 102 -> 80% reverted
+        assertEquals(0.8, Analytics.reversionFraction(100, 110, 102), EPS);
+        assertEquals(0.0, Analytics.reversionFraction(100, 110, 110), EPS);  // no reversion (permanent)
+        assertEquals(1.0, Analytics.reversionFraction(100, 110, 100), EPS);  // fully reverted (transient)
+        assertEquals(-0.5, Analytics.reversionFraction(100, 110, 115), EPS); // continued in impact dir
+        assertTrue(Double.isNaN(Analytics.reversionFraction(100, 100, 100))); // zero impact
+    }
+
+    @Test
+    void effectiveSpreadBps_roundTripAndGuard() {
+        // 5c off a $100 mid = 2 * 0.05/100 * 1e4 = 10 bps, both sides
+        assertEquals(10.0, Analytics.effectiveSpreadBps(100.05, 100.00), 1e-6);
+        assertEquals(10.0, Analytics.effectiveSpreadBps(99.95, 100.00), 1e-6);
+        assertTrue(Double.isNaN(Analytics.effectiveSpreadBps(100.0, 0.0)));
+    }
+
+    @Test
+    void orderToTradeRatio_spoofShapeAndGuards() {
+        assertTrue(Double.isInfinite(Analytics.orderToTradeRatio(131, 0))); // posted, none filled
+        assertEquals(25.0, Analytics.orderToTradeRatio(100, 4), EPS);
+        assertTrue(Double.isNaN(Analytics.orderToTradeRatio(0, 5)));        // no orders
+    }
 }

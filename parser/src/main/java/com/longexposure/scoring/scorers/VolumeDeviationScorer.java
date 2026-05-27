@@ -102,6 +102,11 @@ public final class VolumeDeviationScorer implements EventScorer {
                 baselines.dayVolumes(ctx.tradingDate());
         Map<String, BaselineProvider.TrailingVolume> baseline =
                 baselines.trailingVolumeBaselines(ctx.tradingDate(), BASELINE_WINDOW_DAYS);
+        // Raw window values per symbol → robust z-score (MAD-scaled) + percentile
+        // rank, computed in Java via Analytics. "6σ above its fortnight norm, the
+        // busiest day in the window" — *how* anomalous, not just the bare ratio.
+        Map<String, double[]> windows =
+                baselines.trailingVolumeWindows(ctx.tradingDate(), BASELINE_WINDOW_DAYS);
 
         // Collect the qualifying surges, then emit in ratio-descending order
         // (preserves the prior SQL's ORDER BY (today_vol / med_vol) DESC).
@@ -122,7 +127,8 @@ public final class VolumeDeviationScorer implements EventScorer {
             if (deviationX     <  MIN_DEVIATION)       continue;
 
             hits.add(new Hit(symbol, t.volume(), t.tradeCount(),
-                    b.medianVolume(), b.medianTradeCount(), b.dayCount(), deviationX));
+                    b.medianVolume(), b.medianTradeCount(), b.dayCount(), deviationX,
+                    windows.get(symbol)));
         }
         hits.sort(Comparator.comparingDouble((Hit h) -> h.deviationX).reversed());
 
@@ -139,7 +145,8 @@ public final class VolumeDeviationScorer implements EventScorer {
 
     /** One qualifying surge — the joined today+baseline figures for a symbol. */
     private record Hit(String symbol, long todayVol, long todayTc,
-                       double medVol, double medTc, int days, double deviationX) {}
+                       double medVol, double medTc, int days, double deviationX,
+                       double[] window) {}
 
     private static ScoredEvent buildEvent(final ScoringContext ctx, final Hit h,
                                           final Instant dayStart) {
@@ -159,6 +166,18 @@ public final class VolumeDeviationScorer implements EventScorer {
         breakdown.put("deviation_x",                   BreakdownFmt.round(deviationX, 1));
         breakdown.put("todays_trade_count",            BreakdownFmt.formatCount(todayTc));
         breakdown.put("baseline_median_trade_count",   BreakdownFmt.formatCount(Math.round(medTc)));
+
+        // Robust deviation: how many MAD-scaled σ today sits above the window
+        // median, + its percentile rank within the window. "6σ above its norm,
+        // the busiest in the fortnight" — distributional, not a bare multiple.
+        double[] window = h.window();
+        if (window != null && window.length >= MIN_BASELINE_DAYS) {
+            double mad = com.longexposure.analytics.Analytics.mad(window);
+            double z   = com.longexposure.analytics.Analytics.robustZ(todayVol, medVol, mad);
+            double pct = com.longexposure.analytics.Analytics.percentileRank(todayVol, window);
+            if (mad > 0) breakdown.put("robust_z", BreakdownFmt.round(z, 1));
+            if (!Double.isNaN(pct)) breakdown.put("percentile_rank", BreakdownFmt.round(pct, 0));
+        }
 
         ArrayNode sourceRefs = json.createArrayNode();
         ObjectNode ref = json.createObjectNode();

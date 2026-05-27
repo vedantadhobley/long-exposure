@@ -112,4 +112,93 @@ public final class Analytics {
         for (double v : values) if (v < value) below++;
         return below / (double) values.length * 100.0;
     }
+
+    // ─── shape / flow / timing metrics ────────────────────────────────────────
+
+    /**
+     * Coefficient of variation (sample stddev / mean) — a unitless dispersion
+     * measure. Small = highly uniform (machine-regular inter-fill gaps, or
+     * equal-size iceberg fills); large = irregular. Uses the sample stddev
+     * (n−1). Returns NaN if fewer than 2 values or the mean is non-positive
+     * (CV is undefined there).
+     */
+    public static double coefficientOfVariation(final double[] values) {
+        if (values == null || values.length < 2) return Double.NaN;
+        double mean = 0.0;
+        for (double v : values) mean += v;
+        mean /= values.length;
+        if (mean <= 0) return Double.NaN;
+        double ss = 0.0;
+        for (double v : values) { double d = v - mean; ss += d * d; }
+        return Math.sqrt(ss / (values.length - 1)) / mean;
+    }
+
+    /**
+     * Fano factor (burstiness) of event arrival times: variance/mean of the
+     * per-bin event counts when the [min, max] timestamp span is split into
+     * {@code bins} equal sub-intervals. ≈1 = Poisson (random arrivals); ≫1 =
+     * bursty / clustered (the machine-paced post-cancel signature); &lt;1 =
+     * more regular than random. Returns NaN if fewer than 2 events, a
+     * non-positive span, or {@code bins < 2}.
+     */
+    public static double fanoFactor(final long[] tsNanos, final int bins) {
+        if (tsNanos == null || tsNanos.length < 2 || bins < 2) return Double.NaN;
+        long min = Long.MAX_VALUE, max = Long.MIN_VALUE;
+        for (long t : tsNanos) { if (t < min) min = t; if (t > max) max = t; }
+        long span = max - min;
+        if (span <= 0) return Double.NaN;
+        int[] counts = new int[bins];
+        for (long t : tsNanos) {
+            int b = (int) ((double) (t - min) / span * bins);
+            if (b >= bins) b = bins - 1;          // the max timestamp lands in the last bin
+            counts[b]++;
+        }
+        double mean = 0.0;
+        for (int c : counts) mean += c;
+        mean /= bins;
+        if (mean <= 0) return Double.NaN;
+        double ss = 0.0;
+        for (int c : counts) { double d = c - mean; ss += d * d; }
+        return (ss / bins) / mean;                // population variance of bin counts / mean
+    }
+
+    /**
+     * Post-event price reversion as a fraction of the event's own impact:
+     * {@code (impactPrice − postPrice) / (impactPrice − preImpactPrice)}.
+     * 1.0 = price fully returned to where it started (transient impact — the
+     * aggressor overpaid into thin liquidity); 0.0 = no reversion (permanent
+     * impact, consistent with informed flow); negative = price continued in
+     * the impact direction. Returns NaN if the impact (denominator) is zero.
+     */
+    public static double reversionFraction(final double preImpactPrice,
+                                           final double impactPrice,
+                                           final double postPrice) {
+        double impact = impactPrice - preImpactPrice;
+        if (impact == 0.0) return Double.NaN;
+        return (impactPrice - postPrice) / impact;
+    }
+
+    /**
+     * Effective spread in basis points: {@code 2 × |exec − mid| / mid × 10⁴} —
+     * the round-trip cost paid relative to the prevailing book mid at
+     * execution. Inputs are decoded dollar prices. Returns NaN if mid is
+     * non-positive.
+     */
+    public static double effectiveSpreadBps(final double execPrice, final double midPrice) {
+        if (midPrice <= 0) return Double.NaN;
+        return 2.0 * Math.abs(execPrice - midPrice) / midPrice * 10_000.0;
+    }
+
+    /**
+     * Order-to-trade ratio: orders posted per resulting trade — the regulator's
+     * manipulation-shape metric, and the quantified spoof shape ("131 orders, 0
+     * fills"). Returns {@link Double#POSITIVE_INFINITY} when there were no
+     * trades (all posted, none filled — the caller should narrate "0 fills"
+     * rather than "∞"), and NaN if there were no orders.
+     */
+    public static double orderToTradeRatio(final long orders, final long trades) {
+        if (orders <= 0) return Double.NaN;
+        if (trades <= 0) return Double.POSITIVE_INFINITY;
+        return orders / (double) trades;
+    }
 }

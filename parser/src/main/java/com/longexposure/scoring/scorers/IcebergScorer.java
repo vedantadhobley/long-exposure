@@ -201,6 +201,15 @@ public final class IcebergScorer implements EventScorer {
         breakdown.put("notional_dollars",       BreakdownFmt.formatDollars(notionalDollars));
         breakdown.put("notional_per_fill",      BreakdownFmt.formatDollars(notionalDollars / run.size()));
         breakdown.put("inter_fill_seconds_avg", BreakdownFmt.round(durationSec / run.size(), 2));
+        // Refill-cadence regularity: CV of the inter-fill gaps. Low = metronomic
+        // refills (a machine-worked reserve); high = irregular. Distinct from
+        // size_cv (dispersion of fill *sizes*, not their timing).
+        if (run.size() >= 3) {
+            double[] gaps = new double[run.size() - 1];
+            for (int i = 1; i < run.size(); i++) gaps[i - 1] = run.get(i).tsNanos - run.get(i - 1).tsNanos;
+            double cadenceCv = com.longexposure.analytics.Analytics.coefficientOfVariation(gaps);
+            if (!Double.isNaN(cadenceCv)) breakdown.put("refill_cadence_cv", BreakdownFmt.round(cadenceCv, 3));
+        }
         breakdown.put("fill_size_uniformity",
                 cv < 0.05 ? "very_uniform" :
                 cv < 0.20 ? "uniform" : "mixed");
