@@ -76,9 +76,13 @@ The orchestrator is **pure orchestration** — it calls child workflows for each
 | 1 | Download | `DownloadWorkflow` | Resolve 3 IEX HIST URLs + download 3 `.pcap.gz` files to `/storage/raw/` | 6 activities in parallel inside the child |
 | 2 | Parse | `ParseWorkflow` | DPLS .pcap.gz → 13 hypertables via JDBC COPY | sequential within child |
 | 2′ | Validate | `ValidateWorkflow` | Triangle cross-validation: DPLS book ↔ DEEP price levels (100 %); DPLS/DEEP derived BBO vs TOPS Quote Updates (99.4 %). Upserts `validation_runs`. | 3 validator legs in parallel inside the child; **runs in parallel with Parse from the orchestrator's POV** (validators read raw files, not DB) |
-| 3 | Score | `ScoreWorkflow` | Materialize `order_lifecycle` (one JOIN once per day) → run 7 scorers → select top-N | sequential |
-| 4 | Narrate | `NarrateWorkflow` | Two-pass LLM (`BlueprintExtractor` extract → `ProseRenderer` render with JSON-schema-enforced structured output) + pure-code `GroundingVerifier` (numbers + symbol + parenthetical-company agreement) against `llama-large.joi`; cache by `event_hash`; write `narratives` (prose + `render_structured` JSONB) | per-event fan-out with sliding-window 2-concurrent guard + dedicated narration task queue |
-| 5 | Cleanup | `CleanupWorkflow` | Delete the 3 `.pcap.gz` files (only on success) + `drop_chunks` older than 30 days | sequential |
+| 3 | Score | `ScoreWorkflow` | Refresh the `daily_volume_by_symbol` cagg for the day → materialize `order_lifecycle` (one JOIN once per day) → run 8 scorers (7 intraday + `volume_deviation`) → enrich co-occurrence → select top-N | sequential |
+| 4 | DESCRIBE | `NarrateWorkflow` | Two-pass LLM (`BlueprintExtractor` extract → `ProseRenderer` render with JSON-schema-enforced structured output) + pure-code `GroundingVerifier` (numbers + symbol + parenthetical-company agreement) against `llama-large.joi`, **verifier-driven retry ×3**; compute-skip by `event_hash`; write `narratives` (prose + `render_structured` JSONB) | per-event fan-out with sliding-window 2-concurrent guard + dedicated narration task queue |
+| 5 | INTERPRET | `InterpretWorkflow` | Per-event LLM call reading the breakdown + a ±60-sec pre/post trade window; adds sequential/causal context; `InterpretationVerifier` + retry ×3; write `interpretations` | per-event fan-out, same 2-concurrent guard |
+| 6 | SYNTHESIZE | `SynthesizeDayWorkflow` | One LLM call across the day's per-event interpretations → cross-event themes paragraph; `SynthesisVerifier`; write `daily_synthesis` | single call |
+| 7 | AGGREGATE | `AggregateWeekWorkflow` | Recompute-daily "week-so-far" rollup: one LLM call over this week's daily syntheses + prior ~8 weekly rollups; content-addressed; write `weekly_aggregate` | single call |
+| 8 | Compress | `CompressChunksActivity` | Compress the day's chunks in place (~13 GB/day vs ~230 GB uncompressed) | sequential |
+| 9 | Cleanup | `CleanupWorkflow` | Delete the 3 `.pcap.gz` files (only on success) + week-aligned 2-week retention sweep | sequential |
 
 The orchestrator itself only retains direct activity calls for **cross-cutting metadata** — `PipelineRunRecorderActivity` for the idempotency short-circuit, run-start, and run-completion bookkeeping. These aren't a coherent phase; they thread through the orchestration and stay as direct activity calls.
 
@@ -106,15 +110,19 @@ The schema (committed in `parser/src/main/resources/schema.sql`, applied idempot
 
 **Derived hypertable** — `order_lifecycle` (one row per order: paired `Add` + terminal `Delete`/`Execute` event with lifetime), built once per day by `MaterializeOrderLifecycleActivity` between Parse and Score. Partial index on `lifetime_ns < 100 ms` so `PostCancelClusterScorer` and `LayeringScorer` hit a sub-second sequential range scan instead of a 13 GB hash JOIN.
 
-**Standard tables (5)**:
+**Standard tables (7)**:
 - `scored_events` — per-scorer raw output (~660 K rows/day under current thresholds). Has `subsumed_by_event_id` for children absorbed via co-occurrence enrichment.
-- `selected_events` — top-N per scorer, the narration input set (90–164 rows/day).
-- `narratives` — keyed by `event_hash` (which incorporates breakdown + prompt versions, so prompt changes invalidate the cache). Stores both stitched `narrative TEXT` and `render_structured JSONB` (the three-slot `{lead, facts, co_occurring}` form).
+- `selected_events` — top-N per scorer, the narration input set (~90–170 rows/day).
+- `narratives` — keyed by `event_hash` (which incorporates breakdown + prompt versions, so prompt changes invalidate the cache; the activity skips the LLM call when a `verifier_passed` row with that hash exists). Stores both stitched `narrative TEXT` and `render_structured JSONB` (the three-slot `{lead, facts, co_occurring}` form).
+- `interpretations` — per-event INTERPRET output, keyed by `interpretation_hash` (breakdown + windows + prompt version).
+- `daily_synthesis` — one SYNTHESIZE paragraph per trading day (PK = trading_date) + day-level aggregates.
+- `weekly_aggregate` — one AGGREGATE rollup per ISO week (PK = week_start) + `content_hash` for the recompute-daily skip.
 - `symbols` — per-ticker reference (company name, listing exchange, ETF flag, round lot, prev close, LULD tier).
-- `pipeline_runs` — Temporal workflow lifecycle bookkeeping with status (`ok`, `unverified`, `parse_failed`, `skipped_already_ingested`, `skipped_no_data`).
-- `validation_runs` — triangle cross-validation results per trading day (DPLS↔DEEP price-level match rate, DPLS→TOPS BBO match rate, DEEP→TOPS BBO match rate).
+- `pipeline_runs` / `validation_runs` — Temporal lifecycle bookkeeping (status: `ok` / `unverified` / `parse_failed` / `skipped_*`) and per-day triangle cross-validation results.
 
-**Continuous aggregate** — `daily_volume_by_symbol` for the rolling per-symbol baselines that future inter-day scorers will use. Populated incrementally as wire-format hypertables receive new data.
+  Retention: the narrative-layer tables (`narratives` / `interpretations` / `daily_synthesis` / `weekly_aggregate`) are kept **indefinitely** — the product. The heavy re-score substrate (`scored_events` / `selected_events` + the wire hypertables + `order_lifecycle`) ages out on the week-aligned 2-week sweep.
+
+**Continuous aggregate** — `daily_volume_by_symbol`, the rolling per-symbol daily-volume baseline read by `VolumeDeviationScorer` (via `BaselineProvider`). Refresh window is **400 days** so it accumulates ~1 year of exact baselines and *outlives the 2-week wire retention* (a cagg decouples from its source once materialized). Refreshed incrementally by its hourly policy + explicitly per-day by `RefreshBaselinesActivity` before scoring.
 
 ## Frontend integration
 
