@@ -115,7 +115,8 @@ computation or a second pass) · 🔴 research-grade (estimation, fragile on the
 > **no intent claims from wire data alone** — patterns have many legitimate drivers.
 > These are inputs that make the *shape* precise, not a verdict.
 
-- **One-sidedness asymmetry** · |buy−sell| order/volume share within the cluster · orders · "entirely one-sided — 100% sell-side layering" · — · 🟢
+- **One-sidedness asymmetry** · |buy−sell| order/volume share within the cluster · orders · "the withdrawal was 95% bid-side — makers pulled only their buy quotes" · — · 🟡
+  > ⚠️ **Degenerate for `layering` / `post_cancel_cluster`** (confirmed 2026-05-27). Both scorers cluster by `(symbol, side)` — every order in an emitted event is the *same* side by construction, so one-sidedness ≡ 1.0, a constant artifact of the clustering key, not a signal. The side-imbalance idea's real home is **`liquidity_withdrawal`** (clusters by symbol only, so a withdrawal can be bid-side / ask-side / two-sided) — but `orders_delete` rows don't carry side, so it needs an `order_lifecycle` side-join. That's the genuinely valuable version ("makers pulled only the bid 200 ms before the halt"); logged as a post-launch fast-follow (todo). The original "100% sell-side layering" example was wrong — it was reading the clustering key back out.
 - **Depth-weighted distance from touch** · mean price distance of the cluster's orders from BBO, size-weighted · orders + BBO · "the layered depth sat 8–40 bps off the touch" (near=aggressive, far=decorative) · — · 🟡
 - **Cancel-after-opposite-move** · fraction of a side's orders cancelled within Δt of an opposite-side trade/price move · orders + trades · "92% of the bids were pulled within 20 ms of an offer-side print" · the spoof *shape*, not the claim · 🟡
 - **Quote-stuffing rate** · message rate vs baseline message rate · all messages · "message rate spiked 30× — quote-stuffing-shaped" · — · 🟢
@@ -128,9 +129,9 @@ computation or a second pass) · 🔴 research-grade (estimation, fragile on the
 | `large_trade` | % of the symbol's ADV; price vs session VWAP (block premium/discount); aggressor side; post-print reversion |
 | `sweep` | **slippage** (last fill vs first), levels consumed, $ liquidity removed, effective spread paid, post-sweep reversion (transient vs permanent) |
 | `iceberg` | implied **reserve size** (extrapolated from refill cadence), display ratio, refill-cadence regularity |
-| `layering` | one-sidedness, depth-weighted distance from touch, order-to-trade ratio, cancel latency |
-| `post_cancel_cluster` | burstiness/Fano, cancel-after-opposite-move, periodicity |
-| `liquidity_withdrawal` | % of displayed book removed, two-sidedness, **recovery time** (depth restoration) |
+| `layering` | depth-weighted distance from touch, order-to-trade ratio, cancel latency, **burstiness/Fano** (one-sidedness is degenerate here — clustered by side) |
+| `post_cancel_cluster` | **burstiness/Fano**, cancel-after-opposite-move, periodicity (one-sidedness is degenerate here — clustered by side) |
+| `liquidity_withdrawal` | % of displayed book removed, **two-sidedness** (the real home for the one-sidedness metric — needs an `order_lifecycle` side-join), **recovery time** (depth restoration) |
 | `volume_deviation` | robust z + percentile rank (not just the ratio); intraday *timing* of the surge (open/midday/close); accompanying spread/OFI behavior |
 
 ## 3. What data goes to which LLM call, and why
@@ -185,11 +186,27 @@ For each scorer: the financial meaning → what DESCRIBE *states* → what INTER
 (the contextual analytic is the fuel) → what bubbles to SYNTHESIZE/AGGREGATE → the **wow
 metric** (the one that reveals structure a human couldn't see in the raw feed). Bold = net-new analytics.
 
+> **Wiring status (2026-05-27).** This section is the *full design*; only a thin
+> **cheap-now tranche** is wired pre-launch (pure arithmetic over data the scorer already
+> holds, or one bulk baseline read — no new computation infrastructure):
+> - ✅ `large_trade` → `pct_of_baseline_volume` (% of trailing-median IEX volume)
+> - ✅ `sweep` → `slippage_bps` + `slippage_direction`
+> - ✅ `volume_deviation` → `robust_z` + `percentile_rank`
+> - (✅ `post_cancel` / `layering` already carry `median_lifetime_ms`; `iceberg` already carries size-CV)
+>
+> Everything else here — OFI, post-event reversion, depth-weighted distance from touch,
+> implied reserve, the `liquidity_withdrawal` side-split + %-of-book + recovery, the halt
+> pre-event signature — needs **new compute** (book-state replay, post-event price/depth
+> windows, side-joins, tier baselines) and is the **post-launch analytics wave** (§6, todo
+> #26–28). The genuinely-cheap next extensions are **burstiness (Fano)** on post_cancel +
+> layering and **inter-fill cadence CV** on iceberg (both pure math over timestamps already
+> in the cluster).
+
 - **halt** — *trading suspended; market-wide, the one thing we see fully.* DESCRIBE: company, duration, reason (T1/LULD/MCB), session phase. INTERPRET infers regime from the **pre-halt OFI + spread behavior** ("spreads had already tripled and OFI gone one-sided in the minute before — the book was bracing") and **time-to-resume vs the LULD-tier norm** ("resumed unusually fast for a tier-2 name"). Up: halt *count* + reason mix per day/week. **Wow:** the pre-halt microstructure signature — the book reacting *before* the suspension.
 - **large_trade** — *a block changed hands.* DESCRIBE: company, notional, size, price. INTERPRET infers significance from **% of the symbol's ADV** ("a single print = 18% of its typical *daily* IEX volume") + **price vs VWAP** (premium/discount) + **post-print reversion** ("price held — informed, not liquidity-driven"). Up: block count, $ concentration. **Wow:** % of ADV — turns "10,582 shares" into "a fifth of the day in one trade."
 - **sweep** — *one aggressive order walked the book.* DESCRIBE: company, notional swept, levels, shares. INTERPRET infers the *cost + nature* from **slippage** ("paid 11 bps walking 8 levels") + **post-sweep reversion** ("80% reverted in 30 s — transient impact, the aggressor overpaid into thin liquidity, not informed flow") + **effective spread**. Up: aggressive-flow share of the day. **Wow:** slippage + reversion — the *cost of impatience* and whether it was *informed*, neither visible raw.
-- **post_cancel_cluster** — *a burst of orders posted and yanked in ms.* DESCRIBE: company, orders, total shares, median lifetime. INTERPRET infers shape from the **order-to-trade ratio** ("131 orders, 0 fills") + **one-sidedness** + **burstiness** + **cancel-after-opposite-move** ("84% pulled within 20 ms of an offer-side print"), framed against the catalog's *multiple drivers* (market-making, SOR probing, risk, …). Up: cluster frequency, symbols. **Wow:** order-to-trade ∞ + cancel-after-opposite-move — the spoof *shape* made undeniable, without the intent claim.
-- **layering** — *post_cancel across many price levels.* DESCRIBE: company, orders × distinct levels, price range (bps). INTERPRET adds **depth-weighted distance from touch** ("the fake depth sat 8–40 bps off — decorative, not competing") + **one-sidedness** + order-to-trade. Up: layering frequency, sided-ness trend. **Wow:** depth-weighted distance — *where* the manufactured depth sat tells you what it was for.
+- **post_cancel_cluster** — *a burst of orders posted and yanked in ms.* DESCRIBE: company, orders, total shares, median lifetime (already wired). INTERPRET infers shape from the **order-to-trade ratio** ("131 orders, 0 fills") + **burstiness** (Fano — cheap, all add-timestamps in hand) + **cancel-after-opposite-move** ("84% pulled within 20 ms of an offer-side print"), framed against the catalog's *multiple drivers* (market-making, SOR probing, risk, …). Up: cluster frequency, symbols. **Wow:** order-to-trade ∞ + cancel-after-opposite-move — the spoof *shape* made undeniable, without the intent claim. *(one-sidedness is degenerate here — clustered by side, see §2.8.)*
+- **layering** — *post_cancel across many price levels.* DESCRIBE: company, orders × distinct levels, price range (bps), median lifetime (already wired). INTERPRET adds **depth-weighted distance from touch** ("the fake depth sat 8–40 bps off — decorative, not competing") + **burstiness** + order-to-trade. Up: layering frequency. **Wow:** depth-weighted distance — *where* the manufactured depth sat tells you what it was for. *(one-sidedness is degenerate here — clustered by side, see §2.8.)*
 - **iceberg** — *a hidden order revealing itself in equal fills.* DESCRIBE: company, fills, total shares, price. INTERPRET infers the *hidden* size from the **implied reserve estimate** ("the displayed 200-share tip implies a ~50k-share reserve worked over 8 min") + **refill-cadence regularity** (machine vs human). Up: iceberg presence by symbol. **Wow:** implied reserve — *seeing the part of the order that's designed to be invisible.*
 - **liquidity_withdrawal** — *a cancel storm; market-makers pulling quotes.* DESCRIBE: company, deletes, duration, rate/sec. INTERPRET infers from **% of the displayed book removed** ("pulled 70% of top-5 depth in 11 s") + **two-sidedness** (both sides = de-risking ahead of news/vol; one side = directional) + **recovery time** ("depth restored within 4 s — a flicker, not a flight"). Up: withdrawal clustering across correlated names. **Wow:** % of book removed + recovery — the *severity and persistence* of the liquidity vacuum.
 - **volume_deviation** — *today is unusual for this symbol* (inter-day). DESCRIBE: company, deviation ×, today vs baseline volume. INTERPRET adds **robust z + percentile rank** ("6σ above its fortnight norm — the busiest in the window") + **intraday timing** ("the surge was all in the final 20 min") + accompanying **spread/OFI**. Up: how many names broke their norm (breadth). **Wow:** robust-z + timing — *how* anomalous and *when*, not just a bare multiple.
@@ -226,7 +243,7 @@ because it reads like an analyst who can *see the order book*, not a model guess
 Opinionated. **Don't build all 40** — several are finance-canonical but fragile or
 marginal on a 2–5% volume slice.
 
-- **Tier 1 — do first (high signal, 🟢/🟡, computable cleanly):** order-to-trade ratio · OFI · sweep slippage + post-event reversion · time-in-book distribution drift (`TimeInBookDriftScorer`) · robust z-score + percentile rank (generalizes `volume_deviation`) · realized volatility · one-sidedness · participation rate (% of baseline). These are the ones that turn "what happened" into "what it cost / what it implies."
+- **Tier 1 — do first (high signal, 🟢/🟡, computable cleanly):** order-to-trade ratio · OFI · sweep slippage [✅ wired 2026-05-27] + post-event reversion · time-in-book distribution drift (`TimeInBookDriftScorer`) · robust z-score + percentile rank [✅ wired on `volume_deviation`] · realized volatility · participation rate (% of baseline) [✅ wired as `pct_of_baseline_volume` on `large_trade`] · one-sidedness [⚠️ degenerate on the cluster scorers — re-home to `liquidity_withdrawal`, see §2.8]. These are the ones that turn "what happened" into "what it cost / what it implies." **Wired pre-launch = slippage + robust-z/percentile + pct-of-baseline; the rest is the post-launch wave** (needs book replay / post-event windows / side-joins).
 - **Tier 2 — strong, slightly more work:** burstiness (Fano) · periodicity/cadence · effective/realized spread · depth & depth-imbalance · concentration (HHI) · cancel-after-opposite-move · iceberg reserve estimation.
 - **Tier 3 — defer or skip (🔴, research-grade or slice-fragile):** VPIN, Kyle's λ, Hawkes, jump detection, change-point. Worth *knowing* we considered them; each needs careful estimation and is noisy on the IEX slice. Revisit only if a specific narration demands it.
 
