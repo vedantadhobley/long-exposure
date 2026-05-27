@@ -27,7 +27,7 @@ import java.util.Map;
 public final class BlueprintExtractor {
 
     /** Bump this string when the prompt or output shape changes. Used in the event_hash. */
-    public static final String PROMPT_VERSION = "extract-v1";
+    public static final String PROMPT_VERSION = "extract-v2-narration-set";
 
     private static final String SYSTEM_PROMPT = """
             You are an extraction system. Given a market microstructure event with structured facts,
@@ -49,6 +49,35 @@ public final class BlueprintExtractor {
             }
 
             Include between 3 and 6 entries in key_numbers — pick the most salient facts for a 2-3 sentence narration.
+
+            HEADLINE FIELDS BY EVENT TYPE — lead key_numbers with the DEFINING fields for the event
+            type below (include them FIRST when present in the breakdown, then add supporting facts):
+            - sweep:                notional_dollars, distinct_levels, slippage_bps
+            - large_trade:          notional_dollars, pct_of_baseline_volume
+            - volume_deviation:     deviation_x, percentile_rank
+            - liquidity_withdrawal: deletes, rate_per_sec, withdrawal_side_class
+            - post_cancel_cluster:  orders, median_lifetime_ms, burstiness_fano
+            - layering:             orders, distinct_levels, price_range_basis_points, burstiness_fano
+            - iceberg:              fills, total_shares, refill_cadence_cv
+            - halt:                 the halt duration and reason (default salience)
+
+            The `what_happened` phrase NAMES THE EVENT TYPE (from "Event type:") and is INDEPENDENT
+            of which number leads — never let a leading notional value relabel a sweep as a "block
+            trade". Use: sweep → "multi-level execution sweep"; large_trade → "large block trade";
+            layering → "layering event"; post_cancel_cluster → "post-cancel cluster"; iceberg →
+            "iceberg execution"; liquidity_withdrawal → "liquidity withdrawal"; halt → "trading
+            halt"; volume_deviation → "volume surge".
+
+            FRAMING RULES (apply in the `value` text; these change wording, not grounding):
+            - robust_z, burstiness_fano, refill_cadence_cv, withdrawal_sidedness_ratio are
+              DIMENSIONLESS. NEVER call robust_z "sigma" / "standard deviations" — its values run
+              high because volume is heavy-tailed; render it as "far above its typical range" and let
+              percentile_rank ("the busiest day in the trailing two weeks") carry the intuition.
+            - withdrawal_side_class is CATEGORICAL: render "two_sided" as "two-sided" (both bid and
+              ask pulled), "bid_side"/"ask_side" as "concentrated on the bid/ask side". Do not assert
+              intent. (Categorical key_numbers carry the label text as their value.)
+            - slippage_direction is CATEGORICAL ("up"/"down"/"flat"); pair it with slippage_bps
+              (e.g. "walked 11.0 bps up across N levels").
             """;
 
     private final LlamaClient llama;
