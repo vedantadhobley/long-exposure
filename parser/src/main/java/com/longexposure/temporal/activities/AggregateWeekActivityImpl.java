@@ -57,7 +57,7 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             .getOrDefault("LLAMA_MODEL", "Qwen3.5-122B-A10B");
 
     /** Bumped when the prompt changes. */
-    private static final String PROMPT_VERSION = "aggregate-v4-no-priors-guard-2026-05-26";
+    private static final String PROMPT_VERSION = "aggregate-v5-streak-bound-2026-05-27";
 
     /** Prior weekly rollups passed as week-over-week trend context (§4.3). Tunable. */
     private static final int PRIOR_WEEKS = 8;
@@ -78,11 +78,12 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
               - PER-DAY LIST: each trading day's already-written themes paragraph,
                 in chronological order, labeled by date. THIS is the substance of
                 your paragraph.
-              - PRIOR WEEKS (trend context): up to a few preceding weeks' themes
-                paragraphs. Use these ONLY to frame week-over-week trends ("a third
-                straight week of rising halt activity", "the layering that dominated
-                last week faded"). Do NOT present a prior week's tickers or numbers
-                as if they happened THIS week.
+              - PRIOR WEEKS (trend context): the preceding weeks' themes paragraphs,
+                labeled with their count. Use these ONLY to frame week-over-week
+                trends ("the layering that dominated last week faded", "halts rose
+                again versus last week"). Do NOT present a prior week's tickers or
+                numbers as if they happened THIS week. CRITICAL: you only know about
+                the prior weeks explicitly listed — do NOT invent a longer history.
 
             OUTPUT: one paragraph (3-6 sentences, ~450-750 chars). Financial-journalist
             register (FT / Bloomberg). Acronyms (LULD, NBBO, MCB, VWAP, HFT) glossed
@@ -115,8 +116,13 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             Do not claim external events ("the Fed", "earnings", "geopolitics"). Do
             not speculate about intent. Do not editorialize about severity.
             Week-over-week comparison IS welcome when grounded in the PRIOR WEEKS
-            block (e.g. "the third straight week of …"); just don't reach beyond
-            the prior-week paragraphs provided.
+            block — but a STREAK claim must not exceed the number of prior weeks
+            provided, plus this week. The prompt tells you how many prior weeks
+            you have: with N prior weeks the longest honest streak is N+1 weeks.
+            With 1 prior week, the strongest claim is "a second consecutive week"
+            or "again vs last week" — NEVER "third", "fourth", "fifth …
+            consecutive/straight week", which would invent weeks you cannot see.
+            When unsure, drop the count: "continuing from last week" is always safe.
             """;
 
     @Override
@@ -185,35 +191,43 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             String userPrompt = buildUserPrompt(weekStart, weekEnd, weekAggregates, days, priors);
 
             SynthesisVerifier verifier = new SynthesisVerifier();
+            // The longest honest streak this week can claim = prior weeks + this one.
+            // (Safety net behind the prompt's streak bound; catches written/digit
+            // ordinals the number-grounding verifier doesn't, e.g. "fifth
+            // consecutive week" off a single prior week.)
+            int allowedStreak = priors.size() + 1;
 
             // Verifier-driven retry: re-roll on a rejected rollup (a derived /
-            // cross-week-summed number, a mis-tokenized ticker) — AGGREGATE
-            // runs at temp 1.0, so a re-roll usually grounds. Keep first
-            // passing, else last.
+            // cross-week-summed number, a mis-tokenized ticker, or a streak claim
+            // beyond the priors) — AGGREGATE runs at temp 1.0, so a re-roll
+            // usually grounds. Keep first passing, else last.
             actx.heartbeat("llm");
             String aggregate = null;
             SynthesisVerifier.Result verify = null;
+            boolean streakOk = true;
             long llmElapsedMs = 0;
             for (int attempt = 1; attempt <= MAX_LLM_ATTEMPTS; attempt++) {
                 long llmT0 = System.nanoTime();
                 aggregate = llama.chat(SYSTEM_PROMPT, userPrompt, SamplingParams.AGGREGATE).trim();
                 llmElapsedMs = (System.nanoTime() - llmT0) / 1_000_000L;
                 verify = verifier.verify(aggregate, weekTickers, haystack.toString());
-                if (verify.passed()) {
+                int claimedStreak = maxStreakWeeksClaimed(aggregate);
+                streakOk = claimedStreak <= allowedStreak;
+                if (verify.passed() && streakOk) {
                     if (attempt > 1) LOG.info("aggregate verifier passed on retry  week_start={} attempt={}", weekStart, attempt);
                     break;
                 }
-                LOG.warn("aggregate verifier failed  week_start={} attempt={}/{} mismatches={}",
-                        weekStart, attempt, MAX_LLM_ATTEMPTS, verify.mismatches());
+                LOG.warn("aggregate verifier failed  week_start={} attempt={}/{} mismatches={} streak_claimed={} allowed={}",
+                        weekStart, attempt, MAX_LLM_ATTEMPTS, verify.mismatches(), claimedStreak, allowedStreak);
             }
 
             actx.heartbeat("upsert");
             upsert(conn, weekStart, weekEnd, aggregate, weekAggregates, days.size(),
-                    verify, contentHash, json);
+                    verify, streakOk, allowedStreak, contentHash, json);
 
-            LOG.info("aggregated  week_start={} week_end={} days={} llm_ms={} verifier_passed={} mismatches={}",
+            LOG.info("aggregated  week_start={} week_end={} days={} llm_ms={} verifier_passed={} streak_ok={} mismatches={}",
                     weekStart, weekEnd, days.size(), llmElapsedMs,
-                    verify.passed(), verify.mismatches().size());
+                    verify.passed() && streakOk, streakOk, verify.mismatches().size());
             return 1;
         } catch (Exception e) {
             throw new RuntimeException("aggregate failed for week_start=" + weekStart, e);
@@ -311,8 +325,15 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
                     + "Do NOT make any week-over-week comparison or reference earlier weeks, "
                     + "streaks, or trends; describe only THIS week.\n\n");
         } else {
+            // State the COUNT explicitly so the model can bound any streak claim
+            // to (priors + 1) weeks — without it, the model invents streak lengths
+            // ("fifth consecutive week" off a single prior week).
+            int n = priors.size();
+            sb.append("PRIOR WEEKS (").append(n).append(" week").append(n == 1 ? "" : "s")
+              .append(" of trend context — the ONLY earlier weeks you know about; ")
+              .append("the longest honest streak is ").append(n + 1).append(" weeks; ")
+              .append("do NOT present these as this week's activity):\n\n");
             // Chronological (oldest-first) reads more naturally as a trend run-up.
-            sb.append("PRIOR WEEKS (trend context only — do NOT present these as this week's activity):\n\n");
             for (int i = priors.size() - 1; i >= 0; i--) {
                 PriorWeek p = priors.get(i);
                 sb.append("[week of ").append(p.weekStart).append("] ")
@@ -336,11 +357,23 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
     private void upsert(final Connection conn, final LocalDate weekStart, final LocalDate weekEnd,
                         final String aggregate, final ObjectNode weekAggregates,
                         final int daysConsidered, final SynthesisVerifier.Result verify,
+                        final boolean streakOk, final int allowedStreak,
                         final byte[] contentHash, final ObjectMapper json) throws Exception {
+        // verifier_passed reflects BOTH the number/ticker verifier and the
+        // streak-bound check, so a fabricated streak is stored as a failure
+        // (filterable, not served by the API) even though the number verifier
+        // didn't catch the written ordinal.
+        boolean passed = verify.passed() && streakOk;
         ObjectNode verifierNotes = json.createObjectNode();
         verifierNotes.put("tickers_checked", verify.tickersChecked());
         verifierNotes.put("numbers_checked", verify.numbersChecked());
-        verifierNotes.set("mismatches", json.valueToTree(verify.mismatches()));
+        verifierNotes.put("streak_ok", streakOk);
+        ArrayNode mismatches = json.valueToTree(verify.mismatches());
+        if (!streakOk) {
+            mismatches.add("streak claim exceeds the " + allowedStreak
+                    + "-week ceiling (prior weeks + 1) — unsupported by the prior-week window");
+        }
+        verifierNotes.set("mismatches", mismatches);
 
         String sql = """
                 INSERT INTO weekly_aggregate (
@@ -369,7 +402,7 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             st.setString(5, weekAggregates.toString());
             st.setString(6, MODEL_ID);
             st.setString(7, PROMPT_VERSION);
-            st.setBoolean(8, verify.passed());
+            st.setBoolean(8, passed);
             st.setString(9, verifierNotes.toString());
             st.setBytes(10, contentHash);
             st.executeUpdate();
@@ -446,6 +479,40 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
                 return rs.next();
             }
         }
+    }
+
+    private static final java.util.regex.Pattern STREAK_RE = java.util.regex.Pattern.compile(
+            "\\b(\\d{1,2}(?:st|nd|rd|th)?|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth)"
+            + "\\s+(?:consecutive|straight)\\s+weeks?\\b",
+            java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    private static final java.util.Map<String, Integer> ORD_WORDS = java.util.Map.ofEntries(
+            java.util.Map.entry("first", 1), java.util.Map.entry("second", 2), java.util.Map.entry("third", 3),
+            java.util.Map.entry("fourth", 4), java.util.Map.entry("fifth", 5), java.util.Map.entry("sixth", 6),
+            java.util.Map.entry("seventh", 7), java.util.Map.entry("eighth", 8), java.util.Map.entry("ninth", 9),
+            java.util.Map.entry("tenth", 10), java.util.Map.entry("eleventh", 11), java.util.Map.entry("twelfth", 12));
+
+    /**
+     * Largest "Nth consecutive/straight week(s)" streak length claimed in the
+     * prose (0 if none). Catches both word ordinals ("fifth consecutive week")
+     * and digit forms ("5th straight week"). The safety net behind the prompt's
+     * streak bound — the number-grounding verifier misses these because written
+     * ordinals aren't digit-numbers.
+     */
+    static int maxStreakWeeksClaimed(final String text) {
+        if (text == null) return 0;
+        int max = 0;
+        java.util.regex.Matcher m = STREAK_RE.matcher(text);
+        while (m.find()) {
+            String g = m.group(1).toLowerCase();
+            Integer n = ORD_WORDS.get(g);
+            if (n == null) {
+                try { n = Integer.parseInt(g.replaceAll("(st|nd|rd|th)$", "")); }
+                catch (NumberFormatException e) { n = 0; }
+            }
+            max = Math.max(max, n);
+        }
+        return max;
     }
 
     private static Connection openConnection() throws Exception {
