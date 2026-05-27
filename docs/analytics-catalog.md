@@ -133,41 +133,93 @@ computation or a second pass) · 🔴 research-grade (estimation, fragile on the
 | `liquidity_withdrawal` | % of displayed book removed, two-sidedness, **recovery time** (depth restoration) |
 | `volume_deviation` | robust z + percentile rank (not just the ratio); intraday *timing* of the surge (open/midday/close); accompanying spread/OFI behavior |
 
-## 3. What we actually pass to the LLM — the breakdown-contract discussion
+## 3. What data goes to which LLM call, and why
 
-> This is the part to decide together. The catalog is the supply; this is the *ration*.
+> The catalog (§2) is the *supply*. This is the *allocation* — and it's not primarily a
+> rationing problem, it's a **relevance + zoom** problem. Reframed 2026-05-27.
 
-**The tension.** ~40 candidate analytics ≠ 40 breakdown fields. Three forces fight:
-1. **Attention dilution** — a 40-field breakdown produces unfocused, kitchen-sink prose; the LLM narrates whatever's shiny, not what matters.
-2. **Token cost** — every field is prompt tokens × every event × every re-run; and SYNTHESIZE/AGGREGATE already brush joi's `n_ctx`.
-3. **Correctness is *not* a force here** — the verifier accepts any field that's in the breakdown, so adding fields never *breaks* grounding; it only affects prose *quality* and cost.
+### 3.0 The reframe: compute all · show all · pass rich · narrate selectively
 
-**Three design options:**
+The earlier framing ("pick a tight ~8-field whitelist to save budget") was wrong on its own
+terms: per-event breakdowns are cheap (a few hundred tokens), and the tiers that *do* have a
+context budget read **prose**, not breakdowns. And **correctness is not a force here** — the
+verifier accepts anything in the breakdown, so passing more never *breaks* grounding. The
+real decisions are:
 
-| Option | How | Pro | Con |
-|---|---|---|---|
-| **A. Pass-all, prompt curates** | put every computed metric in the breakdown; prompt says "lead with the most significant" | simplest; LLM has everything | dilution + cost + inconsistent field choice across events |
-| **B. Per-scorer-type curated set** | each scorer emits a tight **narration set** (~8–15 fields) chosen as the most narration-worthy for *that* pattern; the full analytic set lands in `scored_events` for drill-down/API | focused prose, bounded cost, type-appropriate | a curation decision per scorer; the "best" field set is a judgment |
-| **C. Two-tier breakdown** | `headline` (must-use, ~5) + `detail` (may-use appendix) in one breakdown | LLM leads with headline, enriches from detail | prompt has to respect the tiering; more structure to verify against |
+- **Compute everything** that's relevant + affordable → `scored_events` (the analytics are cheap; have them all).
+- **Show everything** in the UI drill-down ("every figure traces to IEX data" — the full quant readout; analytics are never wasted, the reader sees all of them).
+- **Pass a rich, *relevant* set** to each LLM call — generously, because it's safe and cheap.
+- **Narrate selectively** — the prose *leads* with the defining metrics and weaves in the notable; selectivity lives in the *sentence* (a prompt/structure concern), not in *withholding data from the system*. A paragraph that lists 25 stats is a CSV, not journalism — but that's fixed by a priority hint + the structured slots, not by starving the model.
 
-**Recommendation: B, with a dash of C.** Per-scorer-type curated narration sets keep
-prose focused and costs bounded; the *full* analytics still get computed and stored in
-`scored_events` (and surfaced in the frontend drill-down — that's where the "show the
-grounding" wow item lives), but only the curated subset enters the LLM-facing breakdown.
-Within that subset, a light headline/detail split (C) helps DESCRIBE lead with the
-1–2 metrics that *define* the event. The verifier haystack = whatever's in the breakdown,
-so this is purely a quality/cost choice, reversible per scorer.
+So "what to pass" reduces to two real questions: **relevance** (which metrics are meaningful for *this event type*) and **zoom** (which belong at *this call's altitude*). Both follow from the call's *job*.
 
-**Per-stage rationing** (they don't all want the same fields):
-- **DESCRIBE** — the curated narration set (the event's defining metrics).
-- **INTERPRET** — the narration set + the *surrounding-window* deltas (it already reads ±60 s; the new flow/vol metrics computed on those windows are its natural fuel).
-- **SYNTHESIZE / AGGREGATE** — *not* per-event analytics; the **day/period-level** ones (§2.7 concentration/breadth/entropy) + the distribution of which metrics fired. Keep per-event detail out (context-budget).
+### 3.1 The organizing principle — data follows the call's job (a zoom ladder)
 
-**Open questions for the discussion:**
-- Which ~8–15 metrics are the "narration set" per scorer? (§2.9 is the first draft.)
-- Do we compute analytics *eagerly* for every scored event, or *lazily* only for the ~90–170 *selected* events? (Lazy is far cheaper — most analytics only matter for narrated events. Likely lazy, in a `SelectTopEvents`→enrich step or in the scorer for selected rows only.)
-- A shared `com.longexposure.analytics.*` package the scorers call, vs inline per scorer? (Shared — OFI, z-score, burstiness are reused across scorers.)
-- Frontend: the full analytic set behind the drill-down badge ("every figure traces to IEX data") is a strong showcase — the *un*-narrated metrics become the "expand for the full microstructure readout."
+The four LLM calls form a **ladder of zoom**, and each wants data at *its* altitude. Passing
+finer data up the ladder is noise; passing coarser data down is irrelevant.
+
+| Call | Job | Zoom | Data it wants | Data it must NOT get |
+|---|---|---|---|---|
+| **DESCRIBE** | state what happened, factually | this *event*, zoomed in | the event's **defining facts + shape** (magnitude, geometry, identity, time) | surrounding-window or cross-event data (it's not structured to verify claims about them) |
+| **INTERPRET** | place the event in its **neighborhood** — sequence, cause-shape, cost | this event **+ its ±60 s surround** | event facts **+ the contextual analytics** (reversion, OFI around it, pre/post windows) **+ the catalog entry** (mechanism + drivers) | other days; period-level aggregates |
+| **SYNTHESIZE** | the **day's** cross-event themes | this *day*, zoomed out | the day's per-event **interpretation prose** + **day-level** aggregates (concentration, breadth, scorer-mix, time-of-day) | per-event raw analytics (already summarized in the prose); other days |
+| **AGGREGATE** | **period vs history** — the trend | this *period*, zoomed way out | the period's daily/weekly **rollup prose** + **period-level** metrics + the **prior-period** window | per-event or per-day detail (wrong altitude) |
+
+This is why the right answer isn't one breakdown — it's **the event's breakdown for the
+zoomed-in calls (DESCRIBE/INTERPRET), and progressively coarser aggregates for the
+zoomed-out calls (SYNTHESIZE/AGGREGATE)**, which is already how the pipeline is built; the
+analytics just make each altitude *richer*.
+
+### 3.2 Why some data is deliberately withheld (per call)
+
+Not everything computed belongs in every call. Four exclusion classes, each for a concrete reason:
+
+1. **Raw / wire-internal** (`ts_nanos`, `trade_id`, `order_id`, `sale_condition_flags`, the wire `side` enum) — excluded from *all* LLM calls. These leaked into prose before ("trade ID 173670…", `"side": "8"` → "sell"); they're identifiers, not facts a reader wants. Kept in `source_refs`/`scored_events` for joins + drill-down.
+2. **Redundant encodings** of the same quantity (`notional_dollars` *and* `notional_million_dollars`; a raw value *and* its formatted string) — pass *one* canonical form per call. Passing both invites the model to render them inconsistently across events.
+3. **Irrelevant-to-type** — iceberg-reserve on a halt, LULD-band on a sweep. Structurally `null`; passing null/NA fields is pure noise that dilutes attention. Each scorer emits only the metrics that *mean* something for its event type (§3.3).
+4. **Wrong-altitude** — per-event analytics in SYNTHESIZE, per-day detail in AGGREGATE. Not because of budget alone, but because the call's *job* is at a coarser zoom; finer data is a distraction from the cross-event/longitudinal pattern it exists to find.
+
+### 3.3 Per-scorer data spec, with the *why*
+
+For each scorer: the financial meaning → what DESCRIBE *states* → what INTERPRET can *infer*
+(the contextual analytic is the fuel) → what bubbles to SYNTHESIZE/AGGREGATE → the **wow
+metric** (the one that reveals structure a human couldn't see in the raw feed). Bold = net-new analytics.
+
+- **halt** — *trading suspended; market-wide, the one thing we see fully.* DESCRIBE: company, duration, reason (T1/LULD/MCB), session phase. INTERPRET infers regime from the **pre-halt OFI + spread behavior** ("spreads had already tripled and OFI gone one-sided in the minute before — the book was bracing") and **time-to-resume vs the LULD-tier norm** ("resumed unusually fast for a tier-2 name"). Up: halt *count* + reason mix per day/week. **Wow:** the pre-halt microstructure signature — the book reacting *before* the suspension.
+- **large_trade** — *a block changed hands.* DESCRIBE: company, notional, size, price. INTERPRET infers significance from **% of the symbol's ADV** ("a single print = 18% of its typical *daily* IEX volume") + **price vs VWAP** (premium/discount) + **post-print reversion** ("price held — informed, not liquidity-driven"). Up: block count, $ concentration. **Wow:** % of ADV — turns "10,582 shares" into "a fifth of the day in one trade."
+- **sweep** — *one aggressive order walked the book.* DESCRIBE: company, notional swept, levels, shares. INTERPRET infers the *cost + nature* from **slippage** ("paid 11 bps walking 8 levels") + **post-sweep reversion** ("80% reverted in 30 s — transient impact, the aggressor overpaid into thin liquidity, not informed flow") + **effective spread**. Up: aggressive-flow share of the day. **Wow:** slippage + reversion — the *cost of impatience* and whether it was *informed*, neither visible raw.
+- **post_cancel_cluster** — *a burst of orders posted and yanked in ms.* DESCRIBE: company, orders, total shares, median lifetime. INTERPRET infers shape from the **order-to-trade ratio** ("131 orders, 0 fills") + **one-sidedness** + **burstiness** + **cancel-after-opposite-move** ("84% pulled within 20 ms of an offer-side print"), framed against the catalog's *multiple drivers* (market-making, SOR probing, risk, …). Up: cluster frequency, symbols. **Wow:** order-to-trade ∞ + cancel-after-opposite-move — the spoof *shape* made undeniable, without the intent claim.
+- **layering** — *post_cancel across many price levels.* DESCRIBE: company, orders × distinct levels, price range (bps). INTERPRET adds **depth-weighted distance from touch** ("the fake depth sat 8–40 bps off — decorative, not competing") + **one-sidedness** + order-to-trade. Up: layering frequency, sided-ness trend. **Wow:** depth-weighted distance — *where* the manufactured depth sat tells you what it was for.
+- **iceberg** — *a hidden order revealing itself in equal fills.* DESCRIBE: company, fills, total shares, price. INTERPRET infers the *hidden* size from the **implied reserve estimate** ("the displayed 200-share tip implies a ~50k-share reserve worked over 8 min") + **refill-cadence regularity** (machine vs human). Up: iceberg presence by symbol. **Wow:** implied reserve — *seeing the part of the order that's designed to be invisible.*
+- **liquidity_withdrawal** — *a cancel storm; market-makers pulling quotes.* DESCRIBE: company, deletes, duration, rate/sec. INTERPRET infers from **% of the displayed book removed** ("pulled 70% of top-5 depth in 11 s") + **two-sidedness** (both sides = de-risking ahead of news/vol; one side = directional) + **recovery time** ("depth restored within 4 s — a flicker, not a flight"). Up: withdrawal clustering across correlated names. **Wow:** % of book removed + recovery — the *severity and persistence* of the liquidity vacuum.
+- **volume_deviation** — *today is unusual for this symbol* (inter-day). DESCRIBE: company, deviation ×, today vs baseline volume. INTERPRET adds **robust z + percentile rank** ("6σ above its fortnight norm — the busiest in the window") + **intraday timing** ("the surge was all in the final 20 min") + accompanying **spread/OFI**. Up: how many names broke their norm (breadth). **Wow:** robust-z + timing — *how* anomalous and *when*, not just a bare multiple.
+
+### 3.4 The point of all this — grounded *inference*, not a stats dump
+
+The aspiration (yours): the LLM should output **inference about what's happening, beyond the
+raw data.** This is exactly what the right analytics at the right zoom *enable* — and the
+reason the work is worth it. DESCRIBE *can't* infer (it has only the event). The inference
+lives one rung up, at **INTERPRET** and above, and the analytics are its raw material:
+
+- "reverted 80% in 30 s → **transient liquidity impact, not informed flow**" — inference, grounded in the reversion stat + the catalog's driver list.
+- "70% of the book pulled, two-sided, no recovery → **a genuine liquidity flight, not a flicker**" — inference, grounded in the withdrawal analytics.
+- "OFI one-sided and spread tripling *before* the halt → **the book was pricing the news in early**" — inference, grounded in pre-event flow.
+
+**The guardrail that keeps inference safe** (carried from `pattern-catalog.md` §5): inference
+must (1) cite a *computed signal* it stands on, (2) stay within the catalog's **multiple
+drivers** — describe the *kind* of event ("transient vs informed", "decorative vs competing
+depth"), never the trader's *intent* ("this was spoofing"), and (3) qualify "on IEX." The
+analytics are what let the model say something *true and non-obvious*; the catalog + verifier
+are what stop it from saying something *confident and unprovable*. That combination — sharp,
+grounded inference that never overclaims — is the thing that actually blows people away,
+because it reads like an analyst who can *see the order book*, not a model guessing.
+
+### 3.5 Settled mechanics (no longer open)
+
+- **Compute lazily for selected events** (~90–170/day), not all 660 K — most analytics only matter for narrated events; a `SelectTopEvents`→enrich step (or in-scorer for selected rows).
+- **Shared `com.longexposure.analytics.*` package** — OFI/z/Fano/slippage are reused across scorers; existing inline stats migrate in too (§6, byte-identical).
+- **Frontend renders the full set generically** + tolerant of absent fields — the drill-down *is* the "show all" surface.
+- **Still genuinely open:** the exact per-scorer field lists above are a *first draft* to react to (which to headline, which to cut); and the **prose-density knob** — how dense a paragraph we want (terse-journalist lead vs a richer "by the numbers" line) — is a prompt decision separate from how much we compute.
 
 ## 4. Prioritization — what's actually worth implementing (value × effort)
 
