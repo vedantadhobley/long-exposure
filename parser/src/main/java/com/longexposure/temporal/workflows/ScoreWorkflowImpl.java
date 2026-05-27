@@ -1,5 +1,6 @@
 package com.longexposure.temporal.workflows;
 
+import com.longexposure.temporal.activities.EnrichAnalyticsActivity;
 import com.longexposure.temporal.activities.EnrichWithCoOccurrenceActivity;
 import com.longexposure.temporal.activities.MaterializeOrderLifecycleActivity;
 import com.longexposure.temporal.activities.RefreshBaselinesActivity;
@@ -59,6 +60,17 @@ public final class ScoreWorkflowImpl implements ScoreWorkflow {
                     .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(2).build())
                     .build());
 
+    private final EnrichAnalyticsActivity enrichAnalytics = Workflow.newActivityStub(
+            EnrichAnalyticsActivity.class,
+            ActivityOptions.newBuilder()
+                    // Per-event lazy analytics over the ~90–170 selected events
+                    // (order_lifecycle lookups now; book replay later). Generous
+                    // budget for the eventual replay tier; heartbeated.
+                    .setStartToCloseTimeout(Duration.ofMinutes(30))
+                    .setHeartbeatTimeout(Duration.ofMinutes(10))
+                    .setRetryOptions(RetryOptions.newBuilder().setMaximumAttempts(2).build())
+                    .build());
+
     @Override
     public long run(final LocalDate date) {
         LOG.info("score start  date={}", date);
@@ -71,8 +83,11 @@ public final class ScoreWorkflowImpl implements ScoreWorkflow {
         long enriched = enrich.enrichWithCoOccurrence(date);
         LOG.info("co-occurrence enrichment done  date={} parents_enriched={}", date, enriched);
         long selected = selectTopEvents.selectTopEvents(date);
-        LOG.info("score done  date={} lifecycle={} scored_events={} enriched={} selected_events={}",
-                date, materialized, scored, enriched, selected);
+        // Post-select per-event analytics enrichment (order_lifecycle / window /
+        // book-state derived) — only the ~90–170 narratable events.
+        long analyticsEnriched = enrichAnalytics.enrichAnalytics(date);
+        LOG.info("score done  date={} lifecycle={} scored_events={} enriched={} selected_events={} analytics_enriched={}",
+                date, materialized, scored, enriched, selected, analyticsEnriched);
         return scored;
     }
 }
