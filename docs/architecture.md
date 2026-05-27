@@ -110,7 +110,7 @@ The schema (committed in `parser/src/main/resources/schema.sql`, applied idempot
 
 **Derived hypertable** — `order_lifecycle` (one row per order: paired `Add` + terminal `Delete`/`Execute` event with lifetime), built once per day by `MaterializeOrderLifecycleActivity` between Parse and Score. Partial index on `lifetime_ns < 100 ms` so `PostCancelClusterScorer` and `LayeringScorer` hit a sub-second sequential range scan instead of a 13 GB hash JOIN.
 
-**Standard tables (7)**:
+**Standard (non-hypertable) tables (9 = 7 product + 2 bookkeeping)**:
 - `scored_events` — per-scorer raw output (~660 K rows/day under current thresholds). Has `subsumed_by_event_id` for children absorbed via co-occurrence enrichment.
 - `selected_events` — top-N per scorer, the narration input set (~90–170 rows/day).
 - `narratives` — keyed by `event_hash` (which incorporates breakdown + prompt versions, so prompt changes invalidate the cache; the activity skips the LLM call when a `verifier_passed` row with that hash exists). Stores both stitched `narrative TEXT` and `render_structured JSONB` (the three-slot `{lead, facts, co_occurring}` form).
