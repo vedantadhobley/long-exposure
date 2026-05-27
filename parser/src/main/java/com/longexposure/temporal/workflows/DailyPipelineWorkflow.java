@@ -6,8 +6,9 @@ import io.temporal.workflow.WorkflowMethod;
 /**
  * Daily ingest pipeline — downloads all three IEX HIST feeds (DPLS,
  * DEEP, TOPS) for a trading date, parses DPLS into Postgres, validates
- * the triangle, cleans up raw files, and (in cron mode) sweeps the
- * 30-day Postgres retention floor.
+ * the triangle, scores → DESCRIBE → INTERPRET → SYNTHESIZE → AGGREGATE,
+ * compresses the day's chunks, cleans up raw files, and (in cron mode)
+ * runs the week-aligned 2-week retention sweep.
  *
  * <p>Same workflow class for both cron-scheduled and ad-hoc executions;
  * behavior differs only by the input flags. See

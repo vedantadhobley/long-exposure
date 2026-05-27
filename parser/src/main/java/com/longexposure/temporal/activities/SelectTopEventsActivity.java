@@ -10,12 +10,12 @@ import java.time.LocalDate;
  * {@code selected_events}. Runs after {@link ScoreEventsActivity}; the
  * narration layer reads only from {@code selected_events}.
  *
- * <p>Per-scorer caps are hardcoded in
- * {@link SelectTopEventsActivityImpl#PER_SCORER_CAPS}. Tunable per scorer
- * because halts and large trades produce few high-quality events
- * (10-100 per day) while pattern scorers produce many low-quality
- * events (10K-100K per day) — they need different cutoffs to keep the
- * eventual narration set balanced.
+ * <p>Selection is by <b>within-scorer percentile rank</b>, not a hardcoded
+ * per-scorer cap (the old {@code PER_SCORER_CAPS} map is gone): rank each
+ * scorer's events by score and take {@code clamp(round(pct × count), FLOOR=1,
+ * CEILING=30)}. This is scorer-agnostic — halts/large-trades (few, high-quality)
+ * and pattern scorers (many, mixed) self-balance without per-scorer tuning, and
+ * a newly-registered scorer is picked up automatically with no change here.
  *
  * <p>Idempotent: deletes existing rows for {@code tradingDate} before
  * inserting, so re-runs produce a deterministic table state.
