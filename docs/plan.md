@@ -81,36 +81,42 @@ Concrete next actions in order:
 
 Bootstrap problem: on day-1-live we have zero history in DB, so every baseline is undefined. Fix is one-time backfill against 30 days of HIST data before launch. After backfill, baselines exist; launch-day narratives use them. The same 30 backfilled days double as the visible launch archive.
 
-- [ ] Implement the rolling-baseline calculation via TimescaleDB continuous aggregates (per-symbol, per-metric, rolling 30 trading days)
-- [ ] One-time bootstrap: download + parse the last 30 trading days of TOPS HIST data into the events hypertable
-- [ ] Re-run the scorer + narrator over those 30 backfilled days (now with baselines defined) to produce the visible launch archive
-- [ ] Spot-check baselines: a real halt from the past month should score high; a routine quote on a quiet day should score low
+> **✅ done / superseded (2026-05-26).** The per-symbol baseline cagg (`daily_volume_by_symbol`, 400-day refresh window) is built and read by `VolumeDeviationScorer` via `BaselineProvider`. The **30-trading-day bootstrap was superseded by the week-aligned 2-week retention model** (see `decisions.md` 2026-05-25): we backfilled 2 full weeks (05-11→15, 05-18→22) instead of 30 days. Boxes below reconciled accordingly.
+
+- [x] Rolling-baseline calculation via TimescaleDB continuous aggregate (`daily_volume_by_symbol`)
+- [~] ~~30 trading days~~ → **2-week** bootstrap: downloaded + parsed two full weeks of DPLS HIST
+- [x] Re-ran scorer + narrator over the backfilled days to produce the visible launch archive (the uniform re-run)
+- [x] Spot-checked baselines: `volume_deviation` surfaces real surges (MEHA 22.2×, IMRX 14.5×) against the trailing median
 
 ## Days 14–17 — Event scoring
 
-- [ ] Implement `scoring.EventScorer` with the significance dimensions documented in the README:
-  - [ ] Event-type weighting
-  - [ ] Ticker liquidity tier
-  - [ ] Deviation from baseline
-  - [ ] Time-of-day weighting
-  - [ ] Duration
-- [ ] Every event surfaces its score breakdown in the data model (visible in API responses for inspection)
-- [ ] Tune until the top-N events on a sample day pass the "would I read this?" check
+> **✅ done (2026-05-16, extended through 2026-05-25).** 8 push-model `EventScorer`s shipped (7 intraday + 1 inter-day `volume_deviation`). The design evolved from the original "significance dimensions" sketch into per-pattern scorers + percentile-rank selection; see `docs/scoring-and-narration.md`.
+
+- [x] `scoring.EventScorer` (push-model interface) + `EventScorerRegistry`
+- [x] Per-pattern intraday scorers: halt, large_trade, sweep, post_cancel_cluster, layering, iceberg, liquidity_withdrawal
+- [x] Inter-day scorer `volume_deviation` (deviation from the trailing-window baseline, via `BaselineProvider`)
+- [x] Every event carries a transparent `breakdown` JSON (the LLM-grounding contract; derived-field enrichment pre-computes the analytical ratios)
+- [x] Selection tuned: within-scorer percentile rank → ~90–170 narratable events/day
 
 ## Days 18–19 — LLM narration
 
-- [ ] Implement `NarrateEventsActivity` calling `llama-large.joi` (OpenAI-compatible)
-- [ ] Cache by event hash in the `narratives` table
-- [ ] Prompt engineering: factual, plain-language, refuse on incomplete data
-- [ ] Generate + review narratives for a week of historical events; iterate prompt
+> **✅ done (2026-05-21, extended through 2026-05-27).** Shipped well beyond the original single-pass sketch: a two-pass DESCRIBE (`BlueprintExtractor` → `ProseRenderer` → pure-code `GroundingVerifier`) plus three further LLM stages — INTERPRET, SYNTHESIZE, AGGREGATE — each with its own verifier and a verifier-driven retry. See `docs/scoring-and-narration.md`.
+
+- [x] `NarrateEventActivity` calling `llama-large.joi` (DESCRIBE), via `LlamaClient` with the 2-concurrent cap
+- [x] Content-addressed by `event_hash` (true compute-skip, not just storage idempotency)
+- [x] Prompt engineering: structured-output slots + the pure-code grounding verifier (the moat)
+- [x] Generated + reviewed across the 2-week dataset; iterated to ~100% verifier-passed with retry
+- [x] **Beyond original scope:** INTERPRET (per-event surrounding context), SYNTHESIZE (daily themes), AGGREGATE (weekly rollup)
 
 ## Days 20–21 — Temporal + API
 
-- [ ] Wire `Main.java` as the Temporal worker registration (replaces the Day-1 stub)
-- [ ] Implement the workflow + activity classes (see @architecture.md for the activity list)
-- [ ] Retry policies + heartbeating per activity
-- [ ] Implement the FastAPI v1 endpoints listed in @../README.md
-- [ ] End-to-end pipeline run on a single trading day
+> **✅ done (2026-05-13, extended through 2026-05-27).** 13 workflows / 22 activities on the daily-pipeline task queue. **Note:** there is no FastAPI in this repo — the HTTP API moved to vedanta-systems' unified Express service (decided 2026-05-10, `decisions.md`); this repo ships only the worker.
+
+- [x] `Main.java` → `WorkerMain.start()` Temporal worker registration (replaces the Day-1 stub)
+- [x] Workflow + activity classes — full layout in `docs/temporal-design.md`
+- [x] Per-activity retry policies + heartbeating
+- [x] ~~FastAPI endpoints~~ → served by vedanta-systems' Express API querying this repo's Postgres directly (no API container here)
+- [x] End-to-end pipeline run on a single trading day (then the full 2-week dataset)
 
 ## Day 22 — vedanta-systems integration + deploy
 
@@ -125,8 +131,8 @@ Cross-repo work in `~/workspace/dev/vedanta-systems/`:
 In this repo:
 
 - [ ] Production bring-up on luv (apply Caddyfile entries from @../deploy/INFRA-NOTES.md, fill `.env`, `docker compose up -d`)
-- [ ] Backfill the previous 30 days end-to-end so launch day already has narrated history
-- [ ] Public launch verification: `curl https://vedanta.systems/api/long-exposure/v1/health`
+- [x] ~~Backfill the previous 30 days~~ → **2 full weeks** backfilled end-to-end (superseded by the 2-week retention model)
+- [ ] Public launch verification: `curl https://vedanta.systems/api/long-exposure/health`
 
 ---
 
@@ -143,14 +149,14 @@ Reframed 2026-05-11 — see `docs/decisions.md`. The TOPS work done today is rep
 - [x] `SaleConditionFlags` promoted from `tops/` to `wire/` (shared across feeds per Appendix A)
 - [x] 14 JUnit tests against spec worked examples; 45 total passing
 
-### Sprint B — Order book state machine 🔜 next
+### Sprint B — Order book state machine ✅ done 2026-05-11
 
-- [ ] `OrderBook` class — `Map<Long orderId, OrderState>` per symbol
-- [ ] Update on Add/Modify/Delete/Execute messages
-- [ ] Drop entries on ClearBook
-- [ ] Derive top-of-book (BBO) at arbitrary timestamps
-- [ ] Compute aggregate book metrics (best-price size, depth at level)
-- [ ] `OrderBookManager` per symbol; route messages from the parser stream
+- [x] `OrderBook` class — `Map<Long orderId, OrderState>` per symbol
+- [x] Update on Add/Modify/Delete/Execute messages
+- [x] Drop entries on ClearBook
+- [x] Derive top-of-book (BBO) at arbitrary timestamps (`bestBidProtected()` / `bestAskProtected()`)
+- [x] Compute aggregate book metrics (best-price size, depth at level)
+- [x] `OrderBookManager` per symbol; route messages from the parser stream
 
 ### Sprint C — Storage extensions ✅ done 2026-05-12
 
@@ -185,41 +191,6 @@ Reframed 2026-05-11 — see `docs/decisions.md`. The TOPS work done today is rep
 
 ## After DEEP+ ships — Days 11+ (renumbered)
 
-The remaining post-parser work, in priority order. Day numbers are nominal now; pace will dictate real cadence.
-
-### Days 11–13 (post-DEEP+) — Baseline data + bootstrap
-
-- [ ] One-time bootstrap: download + parse the last 30 trading days of DPLS HIST data
-- [ ] Re-run the scorer + narrator over those 30 backfilled days to produce the visible launch archive
-- [ ] Spot-check baselines (real halt should score high; routine quote should score low)
-
-### Days 14–17 (post-DEEP+) — Event scoring
-
-Design reference: @scoring-and-narration.md — pattern catalog (spoof-shaped post-cancel clusters, liquidity withdrawal, layering, sweeps, iceberg detection, time-in-book distribution shifts).
-
-- [ ] `EventScorer` interface (input: event + symbol baseline; output: score + JSON breakdown)
-- [ ] Per-pattern scorers — one class per pattern in @scoring-and-narration.md plus the simpler ones (halt, large trade, quote-spread anomaly)
-- [ ] Score breakdown JSON must be sufficient to reconstruct every claim in the eventual narrative (grounding contract)
-- [ ] Tune weights until top-N events on 2026-05-08 pass the "would I read this?" check
-
-### Days 18–19 — LLM narration
-
-**The hardest design work in the project.** Design reference: @scoring-and-narration.md "Narration design principles" + "Output structure" sections.
-
-- [ ] Prompt template that takes a structured scored event and produces 2–3 sentence narration
-- [ ] Automated grounding check: every number / claim in the output text must appear in the structured input
-- [ ] Per-day "daily patterns" second-pass narration consuming the full scored event list
-- [ ] Cache by event hash (already supported by `narratives` table schema)
-- [ ] Refuse on incomplete data
-- [ ] Tone: financial-journalist register, no jargon, no excited-blog tone
-
-### Days 20–21 — Temporal + API
-
-- Convert the smoke-test loop in `Main.java` into a Temporal workflow with proper retry policies, heartbeating, replayability.
-- Wire FastAPI endpoints listed in README.
-
-### Day 22 — vedanta-systems integration + deploy
-
-- nginx `/api/long-exposure/*` → API container
-- `src/components/long-exposure-browser.tsx` in vedanta-systems
-- Production bring-up on luv, public launch with 30-day backfilled archive
+> **✅ superseded / done (2026-05-27).** This was a post-pivot re-listing of the same post-parser work as the original "Days 11–22" sections above — kept here historically, but it had drifted into a second, all-`[ ]` copy. All of it has since shipped (event scoring, the four LLM stages DESCRIBE/INTERPRET/SYNTHESIZE/AGGREGATE, Temporal, durable baselines) or been superseded (30-day bootstrap → week-aligned 2-week retention; "FastAPI endpoints" / "API container" → vedanta-systems' Express service querying this repo's Postgres directly). Collapsed to a pointer rather than maintain two divergent copies. Reconciled status is in the Days 11–22 sections above; current state is in `AGENTS.md`.
+>
+> **Genuinely still open** (tracked in `docs/launch-sprint.md` + `docs/todo.md`): the polished frontend in vedanta-systems, production bring-up on luv, and public launch verification.
