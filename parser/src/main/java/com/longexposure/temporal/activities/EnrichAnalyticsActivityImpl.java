@@ -1,8 +1,10 @@
 package com.longexposure.temporal.activities;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.longexposure.analytics.Analytics;
+import com.longexposure.analytics.BookSnapshotEngine;
 import com.longexposure.scoring.BreakdownFmt;
 import com.longexposure.storage.SchemaManager;
 import io.temporal.activity.Activity;
@@ -10,6 +12,8 @@ import io.temporal.activity.ActivityExecutionContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -17,8 +21,12 @@ import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.OptionalLong;
 
 public final class EnrichAnalyticsActivityImpl implements EnrichAnalyticsActivity {
 
@@ -30,6 +38,13 @@ public final class EnrichAnalyticsActivityImpl implements EnrichAnalyticsActivit
 
     /** Below this dominant-side share, the withdrawal reads as genuinely two-sided. */
     private static final double TWO_SIDED_CUTOFF = 0.60;
+
+    private static final ObjectMapper JSON = new ObjectMapper();
+    /** Where the day's DPLS pcap lives during ScoreWorkflow (before CleanupFiles). */
+    private static final String RAW_DIR = System.getenv().getOrDefault("IEX_RAW_DIR", "/storage/raw");
+    private static final DateTimeFormatter PCAP_DATE = DateTimeFormatter.ofPattern("yyyyMMdd");
+    /** Recovery snapshot offset after a withdrawal ends — did displayed depth come back? */
+    private static final long RECOVERY_NS = 5_000_000_000L;  // 5 s
 
     @Override
     public long enrichAnalytics(final LocalDate tradingDate) {
@@ -66,6 +81,13 @@ public final class EnrichAnalyticsActivityImpl implements EnrichAnalyticsActivit
                     actx.heartbeat("enriched:" + processed);
                 }
             }
+            conn.commit();
+
+            // Phase 2 — book-state tier: one decode-only DPLS pcap pass snapshots
+            // each book-needing event's book at its timestamp(s) and derives the
+            // stats that reference the book's STATE (halt spread, layering
+            // depth-from-touch, liquidity_withdrawal %-of-book + recovery).
+            enriched += addBookReplayStats(conn, tradingDate, events, actx);
             conn.commit();
         } catch (Exception ex) {
             throw new RuntimeException("enrichAnalytics failed for date=" + tradingDate, ex);
@@ -142,9 +164,128 @@ public final class EnrichAnalyticsActivityImpl implements EnrichAnalyticsActivit
         }
     }
 
+    /**
+     * Book-state tier: one decode-only DPLS pcap pass (the validated
+     * {@link BookSnapshotEngine}) snapshots each book-needing event's book at
+     * its timestamp(s), then derives the stats whose definition references the
+     * book's STATE at the event — halt pre-event spread, layering
+     * depth-from-touch, liquidity_withdrawal %-of-book-removed + recovery.
+     * Skips cleanly (returns 0) if the day's pcap isn't on disk; the fields are
+     * omitted rather than guessed.
+     *
+     * @return number of events that gained a book-state field.
+     */
+    private long addBookReplayStats(final Connection conn, final LocalDate date,
+                                    final List<Selected> events,
+                                    final ActivityExecutionContext actx) throws Exception {
+        Path pcap = Path.of(RAW_DIR, date.format(PCAP_DATE) + "_IEXTP1_DPLS1.0.pcap.gz");
+        if (!Files.exists(pcap)) {
+            LOG.warn("book-replay skipped — pcap not on disk: {} (book-state stats omitted)", pcap);
+            return 0;
+        }
+
+        List<BookSnapshotEngine.Request> reqs = new ArrayList<>();
+        for (Selected e : events) {
+            long ts    = epochNanos(e.ts);
+            long tsEnd = epochNanos(e.tsEnd);
+            switch (e.scorerId) {
+                case "halt", "layering" ->
+                        reqs.add(new BookSnapshotEngine.Request(e.selectedId, e.symbol, ts, "at"));
+                case "liquidity_withdrawal" -> {
+                    reqs.add(new BookSnapshotEngine.Request(e.selectedId, e.symbol, ts, "before"));
+                    reqs.add(new BookSnapshotEngine.Request(e.selectedId, e.symbol, tsEnd, "after"));
+                    reqs.add(new BookSnapshotEngine.Request(e.selectedId, e.symbol, tsEnd + RECOVERY_NS, "recovery"));
+                }
+                default -> { }
+            }
+        }
+        if (reqs.isEmpty()) return 0;
+
+        LOG.info("book-replay  date={} pcap={} requests={}", date, pcap.getFileName(), reqs.size());
+        List<BookSnapshotEngine.Snapshot> snaps = BookSnapshotEngine.run(pcap, reqs, actx::heartbeat);
+
+        Map<Long, Map<String, BookSnapshotEngine.Snapshot>> byEvent = new HashMap<>();
+        for (BookSnapshotEngine.Snapshot s : snaps) {
+            byEvent.computeIfAbsent(s.selectedId(), k -> new HashMap<>()).put(s.role(), s);
+        }
+
+        long enriched = 0;
+        for (Selected e : events) {
+            Map<String, BookSnapshotEngine.Snapshot> s = byEvent.get(e.selectedId);
+            if (s == null) continue;
+            ObjectNode add = JSON.createObjectNode();
+            switch (e.scorerId) {
+                case "halt"                 -> addHaltSpread(add, s.get("at"));
+                case "layering"             -> addDepthFromTouch(add, s.get("at"), e.breakdown);
+                case "liquidity_withdrawal" -> addPctOfBook(add, s.get("before"), s.get("after"), s.get("recovery"));
+                default -> { }
+            }
+            if (!add.isEmpty()) {
+                mergeBreakdown(conn, e.selectedId, add.toString());
+                enriched++;
+            }
+        }
+        LOG.info("book-replay done  date={} events_enriched={}", date, enriched);
+        return enriched;
+    }
+
+    /** Spread (abs + bps) at halt onset — "spreads were already N bps when trading halted". */
+    private void addHaltSpread(final ObjectNode add, final BookSnapshotEngine.Snapshot s) {
+        if (s == null || !s.captured() || s.bestBidPriceRaw().isEmpty() || s.bestAskPriceRaw().isEmpty()) return;
+        long bidRaw = s.bestBidPriceRaw().getAsLong();
+        long askRaw = s.bestAskPriceRaw().getAsLong();
+        long spreadRaw = askRaw - bidRaw;
+        if (spreadRaw <= 0) return;
+        double mid = (bidRaw + askRaw) / 2.0 / 10_000.0;
+        add.put("pre_halt_spread_dollars", BreakdownFmt.round(spreadRaw / 10_000.0, 4));
+        if (mid > 0) add.put("pre_halt_spread_bps", BreakdownFmt.round(spreadRaw / 10_000.0 / mid * 10_000.0, 1));
+    }
+
+    /** Distance of the layered price band from the touch (BBO on the layered side), in bps. */
+    private void addDepthFromTouch(final ObjectNode add, final BookSnapshotEngine.Snapshot s, final JsonNode breakdown) {
+        if (s == null || !s.captured() || breakdown == null) return;
+        String side = breakdown.path("side").asText("");
+        OptionalLong touchOpt = "sell".equals(side) ? s.bestAskPriceRaw()
+                              : "buy".equals(side)  ? s.bestBidPriceRaw() : OptionalLong.empty();
+        if (touchOpt.isEmpty()) return;
+        double touch = touchOpt.getAsLong() / 10_000.0;
+        if (touch <= 0) return;
+        JsonNode minN = breakdown.get("min_price_dollars");
+        JsonNode maxN = breakdown.get("max_price_dollars");
+        if (minN == null || maxN == null) return;
+        double dMin = Math.abs(minN.asDouble() - touch) / touch * 10_000.0;
+        double dMax = Math.abs(maxN.asDouble() - touch) / touch * 10_000.0;
+        add.put("depth_from_touch_near_bps", BreakdownFmt.round(Math.min(dMin, dMax), 1));
+        add.put("depth_from_touch_far_bps",  BreakdownFmt.round(Math.max(dMin, dMax), 1));
+    }
+
+    /** %-of-displayed-book removed across the withdrawal + how much had recovered after. */
+    private void addPctOfBook(final ObjectNode add, final BookSnapshotEngine.Snapshot before,
+                              final BookSnapshotEngine.Snapshot after, final BookSnapshotEngine.Snapshot recovery) {
+        if (before == null || !before.captured()) return;
+        long beforeTotal = before.totalBidSize() + before.totalAskSize();
+        if (beforeTotal <= 0) return;
+        if (after != null && after.captured()) {
+            long afterTotal = after.totalBidSize() + after.totalAskSize();
+            double removed = (beforeTotal - afterTotal) / (double) beforeTotal * 100.0;
+            // Only emit when depth actually dropped. A negative value means the
+            // displayed book GREW across the window (incoming orders outpaced the
+            // cancels) — not a "removal"; omit rather than narrate "removed -18%".
+            if (removed >= 0) add.put("pct_of_book_removed", BreakdownFmt.round(removed, 1));
+        }
+        if (recovery != null && recovery.captured()) {
+            long recTotal = recovery.totalBidSize() + recovery.totalAskSize();
+            add.put("depth_recovery_pct", BreakdownFmt.round(recTotal / (double) beforeTotal * 100.0, 0));
+        }
+    }
+
+    private static long epochNanos(final Instant t) {
+        return t.getEpochSecond() * 1_000_000_000L + t.getNano();
+    }
+
     private List<Selected> loadSelected(final Connection conn, final LocalDate date) throws Exception {
         String sql = """
-                SELECT selected_id, scorer_id, symbol, ts, ts_end
+                SELECT selected_id, scorer_id, symbol, ts, ts_end, breakdown::text AS breakdown
                 FROM selected_events
                 WHERE trading_date = ?
                 ORDER BY selected_id
@@ -162,6 +303,7 @@ public final class EnrichAnalyticsActivityImpl implements EnrichAnalyticsActivit
                     s.ts          = rs.getTimestamp("ts").toInstant();
                     Timestamp end = rs.getTimestamp("ts_end");
                     s.tsEnd       = (end != null) ? end.toInstant() : s.ts;   // instantaneous events
+                    s.breakdown   = JSON.readTree(rs.getString("breakdown"));
                     out.add(s);
                 }
             }
@@ -186,5 +328,6 @@ public final class EnrichAnalyticsActivityImpl implements EnrichAnalyticsActivit
         LocalDate tradingDate;
         Instant   ts;
         Instant   tsEnd;
+        JsonNode  breakdown;
     }
 }
