@@ -75,23 +75,27 @@ Everything that must be **solid before the 10–12 hr overnight relaunch** (the 
    - `order_to_trade_phrase` on cluster scorers: when ratio is ∞ (0 fills), pre-render as `"no fills against N posted orders"` → kills the stilted "order-to-trade ratio of infinite" phrasing (9/163 narratives). *(~20 min combined)*
 - [ ] **A4. Worker restart** before kicking the relaunch — `TimeInBookDriftScorer` + the lifetime-baseline upsert don't exist in the running JVM (worker started at 01:46:36Z, before commit `509e525`). Schema is auto-applied on worker start, so `daily_lifetime_by_symbol` gets created automatically. *(~30 sec)*
 
-### 🚩 Round 2 — pre-overnight fixes (kicked off ~2 AM EDT 2026-05-29)
+### 🚩 Round 2 — pre-overnight fixes (kicked off ~midnight EDT 2026-05-29)
 
-After the first overnight relaunch ran 2026-05-28 morning + the all-day audit surfaced new findings, the dataset is being thrown out and a SECOND overnight rerun is queued with these additional fixes. All items below land between 18:00 EDT and 24:00 EDT 2026-05-28 with a 1-day end-to-end test before the full kick.
+After the first overnight relaunch ran 2026-05-28 morning + the all-day audit surfaced new findings, the dataset is being thrown out and a SECOND overnight rerun is queued with these additional fixes. All items below shipped between 18:00 EDT and 19:30 EDT 2026-05-28 with a 1-day end-to-end test on 05-13 before the full kick.
 
-- [ ] **R1. AttributionVerifier "split between A and B" false-positive** — observed in v7 Synth-05-13: prose "16 events split between post-cancel clusters and depth contractions" generated three (subject=QQQ, count=16, scorer=X) tuples for both X={post_cancel_cluster, liquidity_withdrawal} when the model meant "16 *distributed* between." *Fix*: track consumed count positions in `AttributionVerifier.extractClaims` — each count attributes to ONLY the closest noun. Implementation: per-count "used" set; once a noun consumes a count, subsequent nouns scanning back skip it. ~30 min + a regression test for "X events split between A and B."
+- [x] **✅ R1. AttributionVerifier "split between A and B" false-positive — FIXED** (commit `aeba0e4`). Track consumed count positions in `extractClaims`; each count attributes to ONLY the closest noun via per-count "used" set. Regression test for "X events split between A and B." Verified on 05-13 — prose with the pattern correctly produces 1 claim, not 3.
 
-- [ ] **R2 / option A. Per-symbol cap on selection** — currently `SelectTopEventsActivityImpl` selects within-scorer percentile-rank, no per-symbol limit. Result: TQQQ dominates 20+ events on heavy days, synthesis becomes "the TQQQ paragraph." *Fix*: after per-scorer selection produces ~90-170 candidates, apply `MAX_EVENTS_PER_SYMBOL=8` filter — keep top-N per symbol by score. *Impact*: forces symbol diversity in the LLM-facing set; SYNTHESIZE prose breadth improves materially. *Test*: re-run select for one day, verify no symbol has >8 events selected, total drop is small (~5-10%). ~45 min.
+- [x] **✅ R2. Per-symbol cap on selection — SHIPPED** (commit `0511866`). `PER_SYMBOL_CAP = 8` applied AFTER the per-scorer budget pass. Verified on 05-13: TQQQ dropped from 20 → 8 selected, total 170 → 150 events. Heavy symbols rebalanced, synthesis prose breadth improves.
 
-- [ ] **R3 / option B. Per-scorer floor 1 → 3** — `SelectTopEventsActivityImpl` clamps `round(0.05 × event_count)` to `[1, 30]`. Floor=1 means a scorer that fires only 6 events for the day gets 1 selected. *Fix*: floor=3 so rare-but-interesting patterns (time_in_book_drift, halt) are guaranteed at least 3 events. *Impact*: cross-scorer diversity in the dataset. ~10 min.
+- [x] **✅ R3. Per-scorer floor 1 → 3 — SHIPPED** (commit `0511866`). Same file as R2. Rare-but-interesting patterns guaranteed at least 3 events. Verified on 05-13: volume_deviation = 3 events.
 
-- [ ] **R4 / option C. Halt scoring linear → log10** — `HaltScorer` currently `score = halt_duration_seconds`. A 4h halt scores 14,400, a 5min halt scores 300 — ratio 48×. So selection over-represents marathon halts (1-2 multi-hour halts) at the expense of multiple short-but-interesting halts. *Fix*: `score = log10(halt_duration_seconds)`. Same orderings within typical durations; less extreme bias. *Impact*: better halt mix. ~10 min.
+- [x] **✅ R4. Halt scoring linear → log10 — SHIPPED** (commit `0511866`). `score = log10(duration_seconds + 1.0)` (+1 guards log10(0)). Verified on 05-13: halt scores compressed from linear [105–23400] range to log [3.51–4.36] range — keeps ordinal order, less marathon-bias.
 
-- [ ] **R5 / option D. Extend AttributionVerifier to AggregateWeek** — current `AggregateWeekActivityImpl` uses the 3-arg `SynthesisVerifier.verify()` (no attribution check). Same misattribution class exists at the week tier when prose says "TQQQ had X events this week" against per-week aggregates. *Fix*: aggregate by_symbol_by_scorer + by_symbol totals across the week's days; pass to the new 5-arg overload. ~60 min.
+- [x] **✅ R5. AttributionVerifier extended to AggregateWeek — SHIPPED** (commit `3109133`). `loadWeekTruthMaps` queries `selected_events` over the week's date range to build by_symbol_by_scorer + by_symbol_total sums. Passed to the new 5-arg verify overload. PROMPT_VERSION bumped aggregate-v6 → v7.
 
-- [ ] **R6. End-to-end test on 1 day** before committing to overnight — Score → Narrate → Interpret → Synth → AggregateWeek with ALL of R1-R5 applied. Validate no regressions + new behaviors fire correctly. ~40 min.
+- [x] **✅ R6. 1-day end-to-end test on 05-13 — PASSED 2026-05-28 18:17 EDT.** Score (150 events, R2/R3/R4 visible) → Narrate (150/150 cache-hit + relinked) → Interpret (146/150, 4 inter-day skips expected) → Synth (v7 verifier_passed=true with attribution check active). FK-orphaning bug discovered + fixed mid-test.
 
-- [ ] **R7. Build single overnight script** covering 14 days (05-08 + 05-11..05-15 + 05-18..05-22 + 05-26 + 05-27). Includes pre-fetched pcaps for 05-26/27. Chronological with interleaved weekly aggregates. ~20 min.
+- [x] **✅ R7. Overnight script `rerun-dataset-v3.sh`** — committed `9a93b0b`. 12-day plan (week-of-05-11 + week-of-05-18 + new 05-26/27) with interleaved AggregateWeek-05-11/05-18/05-25. Pcaps pre-fetched via `prefetch2-download-*` DownloadWorkflows.
+
+- [x] **✅ FK relink on cache hit — STRUCTURAL FIX** (commit `d13fc52`, HARD BLOCKER discovered during R6 test). `NarrateEventActivity` + `InterpretEventActivity` now UPDATE the cached row's `selected_id` to point at the current selected_events row instead of leaving stale orphans. Without this, re-scoring would produce 0 user-visible narrations. The cache-skip still saves the LLM call.
+
+- [x] **✅ Hyphenated noun match** (commit `d9841fb`). `AttributionVerifier` builds NOUN_RE with `[\s\-]+` between words so "depth-contraction" matches the same vocabulary key as "depth contraction." 1 new test.
 
 ### Scoring system — post-launch improvements (parked, NOT for tonight)
 
@@ -216,34 +220,11 @@ Surfaced auditing the full 5-day backfill (05-18→05-22). One actionable item (
 - [x] **✅ Number misattribution in SYNTHESIZE — FIXED 2026-05-28 via structural AttributionVerifier** (commit `bfa3da3`). The bug: prose said "TQQQ which recorded ten distinct order-deletion events" when TQQQ actually had 20 liquidity_withdrawals; "10" passed the existing verifier because it was in the haystack (as the day's halt count), but the (TQQQ, 10, liquidity_withdrawal) triple did not match data. **Fix**: new `AttributionVerifier` class extracts (subject, count, scorer-type) triples from prose via a longest-first noun-phrase regex + bounded-window subject/count lookup; each triple checked against the activity-supplied by_symbol_by_scorer truth map. Three claim shapes covered (subject-led / verb-led / possessive); digit + word-form numerals via the existing `GroundingVerifier.cardinalWordNumbersIn`. Maps populated in `SynthesizeDayActivityImpl.computeDayAggregates` via out-params and passed to the new 5-arg `SynthesisVerifier.verify()` overload — NOT exposed in the LLM-facing JSON (band-aid avoidance per project structural-fix discipline). PROMPT_VERSION bumped synthesize-v6 → v7. 15 unit tests. Reverted earlier same-day attempts (the prompt-instruction + JSON-only band-aids) recorded for posterity in `SynthesizeDayActivityImpl` javadoc.
 
    *Out of scope, separate todo*: multi-symbol attribution ("DGP, TQQQ, and QQQ collectively generated 49"), AggregateWeek/Quarter/Year attribution (would need period-aggregated truth maps — same pattern, deferred).
-- [ ] **AttributionVerifier false-positive on "split between A and B" pattern.** Observed 2026-05-28 in v7 Synth-05-13: prose "QQQ logged 16 events split between post-cancel clusters and depth contractions" generated 3 claim tuples — (QQQ, 16, generic-total) ✓, (QQQ, 16, post_cancel_cluster) ✗, (QQQ, 16, liquidity_withdrawal) ✗. The model meant "16 distributed between X and Y," not "16 of each." Root cause: `AttributionVerifier.extractClaims` walks each noun-match in order, looking backward for the nearest count — a count that's the nearest for multiple subsequent nouns (with no closer count in between) gets re-attributed.
-
-   *Fix*: track consumed count positions; only the noun CLOSEST to a given count gets the claim. Implementation: after extracting (count_pos, ...) for a noun, mark count_pos as consumed; subsequent nouns must find a different count or skip. Or simpler: when same count's used twice, attribute only to the noun nearest to the count by character distance. ~30 min of refactoring + a test case for "split between."
-
-   *Workaround until fixed*: retry-3x usually produces alternative phrasings that don't use "split between." Days where all 3 attempts use the pattern stay verifier_passed=false (hidden by API). Observed rate so far: 1/8 days hit this pattern through 3 retries. Acceptable transient cost; fix before Saturday's overnight is doable but not blocking.
+- [x] **✅ AttributionVerifier "split between A and B" false-positive — FIXED 2026-05-28 evening** (commit `aeba0e4`). Duplicate of R1 above; see that entry for the structural fix.
 - [ ] **Derived-sum verification gap (verifier-uncatchable, prompt-tractable).** Observed 2026-05-28 in v6 05-11 synthesis: "DGP, TQQQ, and QQQ collectively generated 49 of the session's 168 recorded events" — the sum (14+21+14=49) is mathematically correct but "49" not in haystack as a single token. The model is doing valid journalistic arithmetic; the verifier can only check raw presence. *Fix path*: add common derived totals to the synthesis haystack (sum of top 3 by_symbol counts, sum of by_scorer counts, etc.) — a few lines in `SynthesizeDayActivityImpl`. Or constrain the prompt to cite raw counts only. Low priority — model gets it right when it derives but verifier rejects; user-facing impact is only the verifier_passed=false → hidden by API.
-- [ ] **🚩 DESCRIBE/selected_events FK orphaning — DATA-INTEGRITY ISSUE.** Found 2026-05-28 during 05-12 INTERPRET audit, but spans the dataset:
+- [x] **✅ 🚩 DESCRIBE/selected_events FK orphaning — FIXED 2026-05-28 evening** (commit `d13fc52`). Was option 3 from the original three: `NarrateEventActivityImpl` + `InterpretEventActivityImpl` now run `UPDATE narratives/interpretations SET selected_id = ?` on cache hit, refreshing the FK to point at the current selected_events row. Same content (same event_hash = same prose); only the FK moves. Verified during R6 test on 05-13: 150/150 selected_events joined a narrative (was 0/150 before the fix); 146/150 joined an interpretation (4 inter-day skips expected). LLM call still skipped on cache hit (the savings are preserved). The overnight rerun and all future re-scores produce a fully UI-visible dataset.
 
-   | trading_date | selected | DESCRIBE-linked | missing | orphan narratives (different selected_id) |
-   |---|---:|---:|---:|---:|
-   | 2026-05-11 | 168 | **0** | 168 | 481 |
-   | 2026-05-12 | 163 | 106 | 57 | 367 |
-   | 2026-05-13 | 170 | 170 | 0 | 322 |
-   | 2026-05-14 | 180 | 180 | 0 | 311 |
-   | 2026-05-15 | 188 | 188 | 0 | 310 |
-   | 2026-05-18 | 196 | 196 | 0 | 315 |
-   | 2026-05-19 | 193 | 46 (in-flight) | — | 362 |
-
-   **Root cause**: re-scoring a day generates new `selected_id` (BIGSERIAL) values. The `narratives` table content-addresses by `event_hash` and stays after re-score, but its `selected_id` FK points at the OLD selected_events row that's been DELETE+INSERT'd. When `NarrateEventActivity` then runs and the event_hash matches, the activity SKIPS the LLM call (correct on content) but doesn't UPDATE the narrative's `selected_id` to the new one. Result: prose exists but the API query (joining on selected_id) returns nothing for these events.
-
-   **Visibility impact**: The 168 events on 05-11 + 57 on 05-12 will appear in the frontend's drill-down UI with INTERPRET prose but NO DESCRIBE prose. SYNTHESIZE and AGGREGATE are unaffected — they read INTERPRET, which is also content-addressed but somehow stays linked (worth confirming whether its FK works the same way).
-
-   **Three fix options** (post-relaunch, NOT blocking v2):
-   1. **SQL re-link** — UPDATE narratives.selected_id = current selected_events.selected_id WHERE join on (trading_date, symbol, event_ts, event_type, score). Cheap, idempotent, no LLM cost. Restores existing prose.
-   2. **Force re-narrate** for the affected days — invoke `NarrateWorkflow` with a cache-bust env var. Expensive (~30-50 min wall per day) but produces fresh rows with current selected_ids.
-   3. **Fix `NarrateEventActivity`** to UPDATE existing rows' `selected_id` on cache hit. The proper code fix going forward. Combine with option 1 to repair the existing dataset.
-
-   **Decision recommended**: do (1) + (3) post-relaunch. (1) repairs the existing data in seconds; (3) prevents recurrence. Investigation needed first to confirm `InterpretEventActivity` doesn't have the same bug (its FK is also `selected_id`, but coverage is 100% so either it doesn't have the bug OR it's been re-linked through some other path).
+   *Historical impact (pre-fix data)*: 05-11/05-12 still have stale FK orphans from earlier re-scores. The overnight rerun fully re-Scores → re-Narrates those days, which exercises the fix and produces fresh joined data. The orphan prune (`docs/sql/prune-stale-narrations.sql`) collapses old superseded rows after the overnight settles.
 
 ### Explicitly NOT doing yet
 
