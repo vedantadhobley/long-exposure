@@ -3,9 +3,11 @@ package com.longexposure.temporal.activities;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.longexposure.analytics.Analytics;
 import com.longexposure.llm.LlamaClient;
 import com.longexposure.llm.SamplingParams;
 import com.longexposure.narration.Catalog;
+import com.longexposure.scoring.BreakdownFmt;
 import com.longexposure.narration.InterpretationVerifier;
 import com.longexposure.narration.TradeWindow;
 import com.longexposure.storage.SchemaManager;
@@ -47,7 +49,7 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
             .getOrDefault("LLAMA_MODEL", "Qwen3.5-122B-A10B");
 
     /** Bumped when the prompt changes; invalidates the cache. */
-    private static final String PROMPT_VERSION = "interpret-v7-holistic-approx-example";
+    private static final String PROMPT_VERSION = "interpret-v8-derived-reversion";
 
     /** Half-window for the surrounding trade context. */
     private static final long WINDOW_SECONDS = 60L;
@@ -147,6 +149,13 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
             ObjectNode preJson  = pre.toJson(json);
             ObjectNode postJson = post.toJson(json);
 
+            // INTERPRET-tier derived metrics — cross-window stats the breakdown
+            // can't carry (they need the surrounding windows). Attached under
+            // postJson.derived so they ride into the verifier haystack + the hash
+            // (no verifier-signature change), then surfaced in the prompt.
+            ObjectNode derived = computeDerived(json, row, pre, post);
+            if (!derived.isEmpty()) postJson.set("derived", derived);
+
             // Content-addressed skip (same pattern as NarrateEventActivity). The
             // window queries above are cheap SQL; the LLM call below is the
             // expensive part. interpretation_hash folds in breakdown + window
@@ -161,7 +170,7 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
 
             actx.heartbeat("llm:" + selectedId);
 
-            String userPrompt = buildUserPrompt(row, catalog, pre, post);
+            String userPrompt = buildUserPrompt(row, catalog, pre, post, derived);
             InterpretationVerifier verifier = new InterpretationVerifier();
 
             // Verifier-driven retry: RENDER runs at temp 0.7, so re-rolling a
@@ -202,7 +211,8 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
     private static String buildUserPrompt(final EventRow row,
                                            final Catalog.Entry catalog,
                                            final TradeWindow pre,
-                                           final TradeWindow post) {
+                                           final TradeWindow post,
+                                           final ObjectNode derived) {
         return  "Scorer: " + row.scorerId + "\n\n"
               + "Catalog entry for this scorer:\n"
               + "  mechanism: " + catalog.mechanism() + "\n"
@@ -211,12 +221,69 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
               + row.breakdown.toString() + "\n\n"
               + "Surrounding wire context (same symbol, DPLS feed):\n"
               + "  PRE-EVENT window  (immediately preceding the event): " + pre.toPromptLine() + "\n"
-              + "  POST-EVENT window (immediately following the event): " + post.toPromptLine() + "\n\n"
+              + "  POST-EVENT window (immediately following the event): " + post.toPromptLine() + "\n"
+              + "  DERIVED cross-window metrics: " + derivedLine(derived) + "\n\n"
               + "Now write 1-2 sentences identifying the sequential / causal context "
               + "the surrounding data reveals. If both windows are empty / quiet, say "
               + "so — isolation is a valid observation. Stay grounded — every number "
               + "must come from the breakdown or the surrounding context, and do not "
               + "mention the window size.";
+    }
+
+    /**
+     * Cross-window INTERPRET metrics — stats that need the surrounding windows
+     * (so they can't live in the score-time breakdown): a scorer-agnostic
+     * pre→post VWAP move, and post-event reversion for the price-impact scorers
+     * (sweep, large_trade). Reversion is the headline inference: ~100% = the
+     * price displacement came back (transient impact, the aggressor overpaid
+     * into thin liquidity); ~0% = it held (consistent with informed flow).
+     */
+    private static ObjectNode computeDerived(final ObjectMapper json, final EventRow row,
+                                             final TradeWindow pre, final TradeWindow post) {
+        ObjectNode d = json.createObjectNode();
+        double preVwap  = vwap(pre);
+        double postVwap = vwap(post);
+        if (Double.isNaN(preVwap) || Double.isNaN(postVwap) || preVwap <= 0) return d;
+        d.put("pre_to_post_vwap_move_bps",
+              BreakdownFmt.round((postVwap - preVwap) / preVwap * 10_000.0, 1));
+        Double eventPrice = eventPrice(row);
+        if (eventPrice != null && eventPrice > 0) {
+            double rev = Analytics.reversionFraction(preVwap, eventPrice, postVwap);
+            if (!Double.isNaN(rev)) d.put("post_event_reversion_pct", BreakdownFmt.round(rev * 100.0, 0));
+        }
+        return d;
+    }
+
+    private static double vwap(final TradeWindow w) {
+        return w.totalShares() > 0 ? (w.totalNotionalRaw() / 10_000.0) / w.totalShares() : Double.NaN;
+    }
+
+    /** Representative price the event pushed to, for reversion (price-impact scorers only). */
+    private static Double eventPrice(final EventRow row) {
+        JsonNode b = row.breakdown;
+        switch (row.scorerId) {
+            case "sweep" -> {
+                JsonNode mn = b.get("min_price_dollars"), mx = b.get("max_price_dollars");
+                if (mn != null && mx != null) return (mn.asDouble() + mx.asDouble()) / 2.0;
+            }
+            case "large_trade" -> {
+                JsonNode p = b.get("price_dollars");
+                if (p != null) return p.asDouble();
+            }
+            default -> { }
+        }
+        return null;
+    }
+
+    /** One-line readable form of the derived metrics for the prompt. */
+    private static String derivedLine(final ObjectNode d) {
+        if (d == null || d.isEmpty()) return "(none — surrounding windows too quiet to derive)";
+        StringBuilder sb = new StringBuilder();
+        if (d.has("post_event_reversion_pct"))
+            sb.append("post-event price reversion ").append(d.get("post_event_reversion_pct").asText()).append("%; ");
+        if (d.has("pre_to_post_vwap_move_bps"))
+            sb.append("pre→post VWAP move ").append(d.get("pre_to_post_vwap_move_bps").asText()).append(" bps");
+        return sb.toString().trim();
     }
 
     /**

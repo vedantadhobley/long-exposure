@@ -248,6 +248,19 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
             s.put("symbol", e.getKey());
             s.put("count", e.getValue());
         }
+
+        // Day-level concentration + breadth (the SYNTHESIZE/AGGREGATE-tier stats):
+        // HHI of events across symbols (→1 = a few names dominated the day) and
+        // normalized entropy of the scorer-type mix (→0 = a one-note day, e.g.
+        // mostly liquidity withdrawals; →1 = an even spread across pattern types).
+        double hhi = com.longexposure.analytics.Analytics.hhi(
+                bySymbol.values().stream().mapToDouble(Integer::doubleValue).toArray());
+        if (!Double.isNaN(hhi)) agg.put("symbol_concentration_hhi",
+                com.longexposure.scoring.BreakdownFmt.round(hhi, 3));
+        double ent = com.longexposure.analytics.Analytics.normalizedEntropy(
+                byScorer.values().stream().mapToDouble(Integer::doubleValue).toArray());
+        if (!Double.isNaN(ent)) agg.put("scorer_mix_entropy",
+                com.longexposure.scoring.BreakdownFmt.round(ent, 2));
         return agg;
     }
 

@@ -27,7 +27,7 @@ import java.util.Map;
 public final class BlueprintExtractor {
 
     /** Bump this string when the prompt or output shape changes. Used in the event_hash. */
-    public static final String PROMPT_VERSION = "extract-v2-narration-set";
+    public static final String PROMPT_VERSION = "extract-v4-full-analytics";
 
     private static final String SYSTEM_PROMPT = """
             You are an extraction system. Given a market microstructure event with structured facts,
@@ -52,14 +52,21 @@ public final class BlueprintExtractor {
 
             HEADLINE FIELDS BY EVENT TYPE — lead key_numbers with the DEFINING fields for the event
             type below (include them FIRST when present in the breakdown, then add supporting facts):
-            - sweep:                notional_dollars, distinct_levels, slippage_bps
+            - sweep:                notional_dollars, distinct_levels, slippage_bps, effective_spread_bps
             - large_trade:          notional_dollars, pct_of_baseline_volume
             - volume_deviation:     deviation_x, percentile_rank
-            - liquidity_withdrawal: deletes, rate_per_sec, withdrawal_side_class
-            - post_cancel_cluster:  orders, median_lifetime_ms, burstiness_fano
-            - layering:             orders, distinct_levels, price_range_basis_points, burstiness_fano
-            - iceberg:              fills, total_shares, refill_cadence_cv
-            - halt:                 the halt duration and reason (default salience)
+            - liquidity_withdrawal: deletes, rate_per_sec, withdrawal_side_class, pct_of_book_removed
+            - post_cancel_cluster:  orders, order_to_trade_ratio, median_lifetime_ms, burstiness_fano
+            - layering:             orders, distinct_levels, depth_from_touch_near_bps, order_to_trade_ratio
+            - iceberg:              fills, total_shares, display_ratio_pct, refill_cadence_cv
+            - halt:                 halt duration + reason; pre_halt_spread_bps when present
+
+            SUPPORTING ANALYTICS — the breakdown also carries deeper measures (window_realized_vol_bps,
+            window_vpin, window_jump_ratio, self_excitation, arrival_autocorr, book_depth_imbalance,
+            volume_regime_shift, depth_recovery_pct, pre_event_ofi, …). Weave in AT MOST ONE if it
+            sharpens the story; do NOT list them mechanically — a paragraph that recites every metric
+            reads like a CSV, not journalism. window_vpin / window_kyle_lambda are IEX-slice
+            approximations (render "on IEX" if used).
 
             The `what_happened` phrase NAMES THE EVENT TYPE (from "Event type:") and is INDEPENDENT
             of which number leads — never let a leading notional value relabel a sweep as a "block
@@ -78,6 +85,10 @@ public final class BlueprintExtractor {
               intent. (Categorical key_numbers carry the label text as their value.)
             - slippage_direction is CATEGORICAL ("up"/"down"/"flat"); pair it with slippage_bps
               (e.g. "walked 11.0 bps up across N levels").
+            - book-state stats (present only when the symbol had a live IEX book):
+              depth_from_touch_near_bps/far_bps → "the layered band sat N-M bps off the touch";
+              pre_halt_spread_bps → "the spread was N bps when trading halted";
+              pct_of_book_removed → "pulled N% of displayed depth".
             """;
 
     private final LlamaClient llama;
