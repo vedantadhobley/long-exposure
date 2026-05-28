@@ -6,6 +6,81 @@ Append-only record of architectural and operational decisions, ordered by date. 
 
 ---
 
+## 2026-05-28 — Pre-overnight pass: class-label vocabulary generalization, Tier B (quarterly + yearly rollups), intent-denylist mirror on InterpretationVerifier
+
+The pre-overnight audit + 1-day validation gate produced the design pattern
+captured here, plus the calendar rollup hierarchy completed. All shipped
+2026-05-28 across 6 commits (`e5b1c36`, `167dfaa`, `d4e357c`, `9a432b8`,
+`cad18f6`, `4a2ae5e`, `620086e`, `1ef2b33`).
+
+**1. Class-label vocabulary is the structural answer to prose-jargon, not
+prompt rules.** Observed 05-22: model rendered bare ratios as "burstiness
+of 9.43" / "ratio of infinite" / "bid-skewed at imbalance 0.19" — all
+factually grounded but stats-jargon, not journalism. The structural fix
+is per the existing architecture: code pre-computes anchored vocabulary,
+LLM picks from supplied labels.
+
+Pattern: for any signed/banded ratio metric, pre-compute a `_class` string
+field alongside the bare numeric in the scorer / EnrichAnalyticsActivity:
+
+  - `burstiness_class` (PostCancel, Layering): highly / moderately / weakly bursty / Poisson-like
+  - `order_to_trade_phrase` (cluster scorers, ∞ case): "no fills against N posted orders"
+  - `pre_event_ofi_class`: buyer-leaning / seller-leaning / balanced
+  - `book_depth_imbalance_class`: bid-skewed / ask-skewed / balanced
+  - `refill_cadence_class` (Iceberg): metronomic / regular / irregular / erratic
+
+Threshold cutoffs live in `Analytics.<metric>Class(value)`, unit-tested. The
+extract prompt's FRAMING RULES section instructs the model to lead with the
+WORD and add the bare value as parenthetical ("highly bursty (Fano 9.4)"
+not "burstiness of 9.43"). 1-day test confirmed 65% adoption across the
+relevant scorer subset, 100% verifier-pass. Same pattern available for
+future ratio metrics; the threshold cutoffs are the only per-metric work.
+
+**Why this is structural, not band-aid.** The existing architecture says
+"code pre-computes every number; LLM only wraps grounded facts; pure-code
+verifier rejects ungrounded prose." Adding `_class` fields is the data
+layer doing MORE pre-computation (same pattern as `withdrawal_side_class`,
+`slippage_direction`, `duration_humanized` via `BreakdownFmt`). The
+alternative — prompt rules of the form "when value > X, say Y; when value
+< Z, say W" — would push computation INTO the prompt, which is fragile
+(model must do arithmetic) and inconsistent (model variability). Code-side
+pre-computation is deterministic + testable. The framing rules in the
+prompt then just describe WHICH field to lead with, not what to compute.
+
+**2. Tier B — quarterly + yearly rollups built and wired now**
+(rather than post-launch). Calendar reasoning: by ~Sept 30 the first
+quarterly rollup will be eligible (8+ weeks of weekly_aggregate); by
+~Q3 2027 the first yearly. Building both NOW with dormant gates
+(`MIN_WEEKS_FOR_QUARTER=8`, `MIN_QUARTERS_FOR_YEAR=2`) means no
+cold-context re-engineering when the data arrives. The 1-day test
+validated both workflows kick + return 0 cleanly (<1 sec each) when
+the gates aren't met. Mirror of AggregateWeek; shares SynthesisVerifier
+(intent denylist + ticker + number grounding) + retry-on-failure +
+content-hash skip + chronological prior-window reads. The cascade
+mechanism (`CascadeAggregate(fromDate)` from `tiered-baselines-design.md`
+§8.2) remains the one piece deferred to post-launch — needed when a
+historical re-synthesis ripples downstream, not for the nightly path.
+
+**3. Intent-denylist on InterpretationVerifier is defense-in-depth, not
+empirical patch.** INTERPRET prose was 0/160 intent-leak-clean on the
+1-day test. The denylist mirror is preventive — if INTERPRET ever does
+leak (the prompt forbids intent claims at line 96, but verifier wasn't
+enforcing), the retry path catches it the same way SYNTHESIZE does.
+Symmetry across the 3 verifier tiers is the design discipline; the cost
+of mirror-symmetry is one regex + one loop.
+
+**4. Doc-drift prevention: 7-doc count sweep + a discipline note.** Today's
+pass found 7 stale count claims across AGENTS.md / README.md / docs/plan.md
+/ docs/temporal-design.md / docs/tiered-baselines-design.md / docs/todo.md
+that had drifted after the Tier B additions (e.g., "13 workflows / 24
+activities" → 15 / 26; "10 standard tables" → 12). All fixed in commit
+`1ef2b33`. The recurring drift is exactly why item 25 in todo.md says
+"de-number the docs + `scripts/docs-check.sh`" — replace counts with code
+pointers where possible, gate remaining numbers behind a CI grep.
+Post-launch item; for now, manual sweeps at each milestone.
+
+---
+
 ## 2026-05-27 (later) — TimeInBookDriftScorer + daily_lifetime_by_symbol baseline; analytics suite shipped + cheap-validated; per-metric meaningfulness on the IEX slice deferred to relaunch data
 
 Completes the "build it all" wave the analytics-wave entry below initiated.
