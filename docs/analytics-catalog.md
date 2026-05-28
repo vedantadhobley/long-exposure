@@ -1,13 +1,23 @@
 # Analytics Catalog — computations the code layer can feed the LLM
 
-> **Status: design / menu (2026-05-27).** This is the catalog of *computations* the
-> code layer (scorers + breakdown enrichment) can calculate and hand to the LLM as
-> grounded facts. None of the Tier-2/3 items below are built yet; the Tier-1 set is
-> the proposed next scorer/enrichment wave (post-launch — it requires a full re-run,
-> which the 2-week scope + content-addressed skip keep tractable). Companion to
-> `scoring-and-narration.md` (the scorers + the breakdown contract),
-> `pattern-catalog.md` (the *prose-side* interpretation vocabulary), and
-> `interpretation-design.md`.
+> **Status: largely BUILT + cheap-validated (2026-05-27).** This was the catalog of
+> *computations* the code layer (scorers + breakdown enrichment) can hand to the LLM as
+> grounded facts — and as of 2026-05-27 the bulk of it is **implemented and validated**:
+> a shared pure-function `com.longexposure.analytics.Analytics` (unit-tested), a
+> post-select `EnrichAnalyticsActivity` (windowed + book-replay stats), per-scorer
+> breakdown fields, and day-level aggregates. Shipped across Tier 1, most of Tier 2,
+> and the Tier-3 stats that render cleanly (VPIN, Kyle's λ, jump ratio, CUSUM,
+> Hawkes-style self-excitation) — kept behind the slice-caveat discipline (§5).
+> **Cheap-validated** on 2026-05-08/05-22: a non-LLM re-score + SQL confirmed sane
+> values, and a 1-day narration run confirmed every featured metric renders, grounds,
+> and passes the pure-code verifier (e.g. layering "order-to-trade ratio of infinite
+> (0 fills), depth from touch 299.3 bps, burstiness 9.43"; liquidity_withdrawal
+> "two-sided… removed 29.5% of the book… recovered by 87.0%"; iceberg "display ratio
+> 0.52%"). The one still-pending judgment is **per-metric meaningfulness on the IEX
+> slice** (VPIN/Kyle's λ in particular) — assessed across the overnight full 2-week
+> run, not cut a-priori. Companion to `scoring-and-narration.md` (the scorers + the
+> breakdown contract), `pattern-catalog.md` (the *prose-side* interpretation
+> vocabulary), and `interpretation-design.md`.
 
 ## 0. Why this exists + the architectural contract (unchanged)
 
