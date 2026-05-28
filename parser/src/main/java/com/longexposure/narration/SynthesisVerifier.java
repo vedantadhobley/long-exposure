@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -126,16 +127,42 @@ public final class SynthesisVerifier {
     }
 
     /**
-     * @param prose          synthesis paragraph from the LLM
-     * @param daySymbols     every symbol that has a narration on this date
-     * @param numberHaystack concatenation of all narrations + interpretations
-     *                       + day_aggregates JSON, used as the number-grounding
-     *                       source. Provided pre-built so the activity can
-     *                       construct it once.
+     * Original 3-arg form — runs ticker fabrication, number grounding, and
+     * intent denylist. Does NOT run the per-claim attribution check. Used by
+     * AggregateWeek / Quarter / Year stages (which currently don't have a
+     * structured per-period claim-truth map; their attribution would need to
+     * sum across days). Kept as a backward-compatible entry point.
+     *
+     * <p>SYNTHESIZE-day callers should use the 5-arg overload below to
+     * additionally run {@link AttributionVerifier}.
      */
     public Result verify(final String prose,
                          final Set<String> daySymbols,
                          final String numberHaystack) {
+        return verify(prose, daySymbols, numberHaystack, null, null);
+    }
+
+    /**
+     * Full verification with per-claim attribution check.
+     *
+     * @param prose             synthesis paragraph from the LLM
+     * @param daySymbols        every symbol that has a narration today
+     * @param numberHaystack    concatenation of narrations + interpretations
+     *                          + day_aggregates JSON, the number-grounding
+     *                          haystack
+     * @param bySymbolByScorer  per-symbol per-scorer count map (truth source
+     *                          for symbol-attributed scorer-specific claims).
+     *                          {@code null} skips the attribution check.
+     * @param bySymbolTotal     per-symbol total event count (truth source for
+     *                          symbol-attributed generic event-noun claims).
+     *                          {@code null} skips that branch even if
+     *                          bySymbolByScorer is provided.
+     */
+    public Result verify(final String prose,
+                         final Set<String> daySymbols,
+                         final String numberHaystack,
+                         final Map<String, Map<String, Integer>> bySymbolByScorer,
+                         final Map<String, Integer> bySymbolTotal) {
         List<String> mismatches = new ArrayList<>();
 
         // ─── Ticker fabrication check ───────────────────────────────────────
@@ -217,7 +244,24 @@ public final class SynthesisVerifier {
                     + "\" — pattern-catalog rule: describe shape, not intent");
         }
 
-        return new Result(mismatches.isEmpty(), mismatches, proseTickers.size(), numbersChecked);
+        // ─── Per-claim attribution check ────────────────────────────────────
+        // The structural fix for misattribution surfaced 2026-05-28: "TQQQ
+        // with ten X events" passes when 10 is in the haystack as some OTHER
+        // count (e.g. the day's halt count), but the (TQQQ, 10, X) triple
+        // doesn't match data. AttributionVerifier extracts (subject, count,
+        // scorer-type) tuples from prose and checks each against the truth
+        // maps. Skipped if maps not provided (AggregateWeek/Quarter/Year
+        // currently don't supply them).
+        int claimsChecked = 0;
+        if (bySymbolByScorer != null && bySymbolTotal != null) {
+            AttributionVerifier av = new AttributionVerifier();
+            AttributionVerifier.Result ar = av.verify(prose, bySymbolByScorer, bySymbolTotal);
+            mismatches.addAll(ar.mismatches());
+            claimsChecked = ar.claimsChecked();
+        }
+
+        return new Result(mismatches.isEmpty(), mismatches,
+                proseTickers.size(), numbersChecked + claimsChecked);
     }
 
     /**

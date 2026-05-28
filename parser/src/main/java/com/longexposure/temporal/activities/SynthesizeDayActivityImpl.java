@@ -52,25 +52,28 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
 
     /**
      * Bumped when prompt changes — also bumped on verifier changes that
-     * invalidate prior verdicts. v6 (2026-05-28) extends grounding to
-     * cardinal word-form numerals ("six halts" / "ten layering"). The 05-12
-     * audit found 5/5 word-form counts in that day's synthesis were wrong
-     * (eight/ten/six/four/three vs actual 14/12/14/5/4) and bypassed
-     * verification entirely because the regex was digit-only. Bumping the
-     * version invalidates existing content-hash → forces re-run with the
-     * new verifier in place. See `GroundingVerifier.cardinalWordNumbersIn`.
+     * invalidate prior verdicts. v7 (2026-05-28 later same day) is a
+     * VERIFIER-ONLY change: {@link AttributionVerifier} added as a third
+     * verification layer on top of ticker fabrication + number grounding +
+     * intent denylist. Catches misattribution: prose that says "TQQQ with
+     * ten X events" when (TQQQ, X) actually had 20. Activity computes
+     * by_symbol_by_scorer + by_symbol_total maps and passes them to the
+     * verifier; they are NOT exposed in the LLM-facing JSON (per project
+     * structural-fix discipline — band-aid avoidance). Prompt unchanged
+     * from v6.
      *
-     * <p>v7 was prototyped but reverted same day — added by_scorer_by_symbol
-     * to the day-aggregates haystack + an "ATTRIBUTING COUNTS" prompt
-     * section. The prompt section was prompt-engineering band-aid (cf.
-     * the project's principle: structural fixes only); the JSON addition
-     * alone would actually have made misattribution slightly worse
-     * (verifier checks number-presence, not attribution, so a wider
-     * haystack means more misattributions pass). Real fix for symbol-
-     * attributed claim correctness is a structural attribution verifier —
-     * tracked in docs/todo.md, post-launch.
+     * <p>v6 (earlier 2026-05-28) extended grounding to cardinal word-form
+     * numerals ("six halts" / "ten layering"). The 05-12 audit found 5/5
+     * word-form counts in that day's synthesis were wrong and bypassed
+     * verification entirely because the regex was digit-only.
+     *
+     * <p>An earlier v7 prototype (by_scorer_by_symbol JSON + "ATTRIBUTING
+     * COUNTS" prompt section) was reverted same day — the prompt section
+     * was prompt-engineering band-aid; the JSON-only would have made
+     * misattribution slightly worse. This v7 supersedes it via the
+     * structural verifier approach.
      */
-    private static final String PROMPT_VERSION = "synthesize-v6-cardinal-word-form-2026-05-28";
+    private static final String PROMPT_VERSION = "synthesize-v7-attribution-verifier-2026-05-28";
 
     /** Max LLM attempts per day — re-roll on verifier failure (temp 1.0 gives variance). */
     private static final int MAX_LLM_ATTEMPTS = 3;
@@ -138,7 +141,14 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
             }
 
             actx.heartbeat("aggregate");
-            ObjectNode dayAggregates = computeDayAggregates(events, json);
+            // Attribution-truth maps populated by computeDayAggregates. NOT
+            // exposed in the LLM-facing JSON (per the project's structural-
+            // fix discipline); only consumed by AttributionVerifier inside
+            // the SynthesisVerifier.verify() call below.
+            Map<String, Map<String, Integer>> bySymbolByScorer = new HashMap<>();
+            Map<String, Integer> bySymbolTotal = new HashMap<>();
+            ObjectNode dayAggregates = computeDayAggregates(
+                    events, json, bySymbolByScorer, bySymbolTotal);
             Set<String> daySymbols = new HashSet<>();
             for (EventRow e : events) if (e.symbol != null) daySymbols.add(e.symbol);
 
@@ -160,7 +170,8 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
                 long llmT0 = System.nanoTime();
                 synthesis = llama.chat(SYSTEM_PROMPT, userPrompt, SamplingParams.SYNTHESIZE).trim();
                 llmElapsedMs = (System.nanoTime() - llmT0) / 1_000_000L;
-                verify = verifier.verify(synthesis, daySymbols, numberHaystack);
+                verify = verifier.verify(synthesis, daySymbols, numberHaystack,
+                        bySymbolByScorer, bySymbolTotal);
                 if (verify.passed()) {
                     if (attempt > 1) LOG.info("synthesis verifier passed on retry  date={} attempt={}", tradingDate, attempt);
                     break;
@@ -235,17 +246,37 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
         return out;
     }
 
-    /** Per-scorer counts + top symbols by event count + time-of-day buckets. */
-    private ObjectNode computeDayAggregates(final List<EventRow> events, final ObjectMapper json) {
+    /**
+     * Per-scorer counts + top symbols by event count + time-of-day buckets.
+     * Also populates the verifier's attribution truth maps via the supplied
+     * out-parameters — those are NOT included in the JSON sent to the LLM
+     * (band-aid risk per docs/decisions.md), only consumed by
+     * {@link AttributionVerifier} for the per-claim grounding check.
+     *
+     * @param events            today's selected events
+     * @param json              object-mapper for JSON construction
+     * @param outBySymbolScorer (out) per-symbol per-scorer counts (truth)
+     * @param outBySymbolTotal  (out) per-symbol total counts (truth)
+     */
+    private ObjectNode computeDayAggregates(final List<EventRow> events,
+                                            final ObjectMapper json,
+                                            final Map<String, Map<String, Integer>> outBySymbolScorer,
+                                            final Map<String, Integer> outBySymbolTotal) {
         Map<String, Integer> byScorer = new TreeMap<>();
         Map<String, Integer> bySymbol = new HashMap<>();
         Map<String, Integer> byPhase  = new TreeMap<>();
         for (EventRow e : events) {
             byScorer.merge(e.scorerId, 1, Integer::sum);
-            if (e.symbol != null) bySymbol.merge(e.symbol, 1, Integer::sum);
+            if (e.symbol != null) {
+                bySymbol.merge(e.symbol, 1, Integer::sum);
+                outBySymbolScorer
+                        .computeIfAbsent(e.symbol, k -> new TreeMap<>())
+                        .merge(e.scorerId, 1, Integer::sum);
+            }
             String phase = com.longexposure.scoring.BreakdownFmt.sessionPhase(e.ts.toInstant());
             if (phase != null) byPhase.merge(phase, 1, Integer::sum);
         }
+        outBySymbolTotal.putAll(bySymbol);
 
         // Top 10 symbols by event count
         List<Map.Entry<String, Integer>> topSyms = new ArrayList<>(bySymbol.entrySet());
