@@ -58,15 +58,42 @@ The seven scorers — halt, large_trade, sweep, post_cancel_cluster, layering, i
 15. **The three wow items** (agreed 2026-05-25): **#1** intraday price/volume chart with event markers (the "long exposure photograph" — highest wow); **#2** visible-grounding badge ("every figure traces to IEX data" → expandable breakdown — the verifier is the moat, show it); **#4** recursive drill from a narration to its raw atomic events. If the frontend overruns, #1 and #2 are must-keep; #4 is the first to drop.
 16. **Prod bring-up + dev→prod copy** — copy only the narrative-layer tables (narratives/interpretations/daily_synthesis/weekly_aggregate/selected_events/scored_events/symbols/pipeline_runs/validation_runs — kilobytes, no re-parse, preserves the audited prose). Wire tables stay in dev / accumulate in prod via cron. Procedure → `operations.md`.
 
-### Tonight's relaunch — prerequisites (2026-05-27, in priority order)
+### Pre-relaunch — Tier A/B/C audit (2026-05-28)
 
-Everything that must be **100% solid before the 10–12 hr overnight relaunch** (the relaunch bakes the finalized analytics fields + rollups into the whole 2-week dataset, so any bug becomes a re-run to undo).
+Everything that must be **solid before the 10–12 hr overnight relaunch** (the relaunch bakes the finalized analytics fields + rollups + new prompts into the whole 2-week dataset; any bug here becomes a re-run to undo). Updated 2026-05-28 after the comprehensive audit (commits `8cc84f6`, `ef49eb3`, `d8a3f45`).
 
-- [ ] **A. One-day analytics test (gate).** Re-score + re-narrate a single day (05-08) after wiring, confirm `slippage_bps`/`pct_of_baseline_volume`/`robust_z`/`percentile_rank` land in the breakdowns AND the verifiers still pass (the new fields are part of the haystack, so a fabricated/derived figure off them must be caught). Do NOT start the overnight run until this is clean. *(task #90)*
-- [ ] **B. Relaunch driver must re-aggregate each week in cascade order.** **Why the weekly rollup didn't auto-fire on reprocess:** only `DailyPipelineWorkflow` chains `AggregateWeekWorkflow` after SYNTHESIZE — the *standalone* `ScoreWorkflow`/`NarrateWorkflow`/`InterpretWorkflow`/`SynthesizeDayWorkflow` (what `rerun-dataset.sh` calls per day) do **not**. So re-running a day's prose leaves its week's rollup stale until something explicitly re-runs `AggregateWeekWorkflow` for that week. The relaunch driver must, after a week's days are all re-processed, fire `AggregateWeekWorkflow` for that `week_start` — **chronologically (05-11 week → 05-18 week)** so each week's prior-week trend context reads the *finalized* earlier week (skip the 05-08 fragment, which is a partial pre-window week). This is the general cascade-trigger gap (`CascadeAggregate`, post-launch item #23); the driver does the launch-scoped version by hand. *(task #93)*
-- [ ] **C. dev→prod export/import tooling.** A scripted `pg_dump`/`pg_restore` (or `\copy`) of *only* the narrative-layer tables (list in #16) so the audited dev output can be moved to prod **without re-running the 10–12 hr pipeline there**. Idempotent (truncate-or-upsert target), documented in `operations.md`. The wire/order_lifecycle substrate is explicitly NOT copied (prod accumulates it via cron; it's only needed for re-scoring). *(task #91)*
-- [ ] **D. Pre-relaunch audit of the current clean dataset.** Spot-check the existing 2-week output (per-day verifier-pass rates, the 05-18 weekly rollup is the known-bad streak row that the relaunch will overwrite, orphan-row counts) so we have a before/after baseline. *(task #92)*
-- [ ] **E. Run the orphan prune after the relaunch** — see "Open residuals" below.
+**✅ Already cleared:**
+- [x] **One-day analytics test** (was item A) — `b0igiuluz` ran Narrate → Interpret → SynthesizeDay on 05-22 end-to-end with the v4 narration-set + v8 INTERPRET + v5 SYNTHESIZE: 163/163 + 160/160 + 1/1 verifier-passed; every new analytic landed (slippage, effective spread, order-to-trade, depth-from-touch, display-ratio, refill-cadence, %-of-book + recovery, robust-z, burstiness, two-sidedness, VPIN). 62 min/day total.
+- [x] **Relaunch driver handles weekly cascade** (was item B) — `scripts/rerun-dataset.sh` per-day chains Score → Narrate → Interpret → SynthesizeDay, then per-week `AggregateWeekWorkflow` chronologically.
+- [x] **Doc-drift audit** (was item D) — 7 docs cleaned of stale "8 scorers / 22 activities / 9 tables" counts (commit `ef49eb3`).
+
+**🚩 Tier A — Quality fixes, do NOW before relaunch (~45 min):**
+- [ ] **A1. Intent-claim denylist in `SynthesisVerifier`** — 05-22's synthesis paragraph contained `"active, fleeting order-book manipulation across leveraged vehicles"` despite the prompt forbidding intent claims; the verifier passed because it only checks numbers + tickers. Add a regex denylist (`manipul`, `spoof*`, `front[- ]?run`, `wash[- ]?trad`, `\bgam(e|ing|ed)\b`, `illegal`, `fake`) so verifier rejects intent words; covers both daily SYNTHESIZE and weekly AGGREGATE (shared verifier). Retry mechanism (3 attempts, temp=1.0 variance) handles rejection cleanly. *(~15 min)*
+- [ ] **A2. `PRIOR_WEEKS` 8 → 13** — `AggregateWeekActivityImpl` line 63. Future-proofs the weekly trend horizon to **one full quarter** of context. No runtime change today (only 3 prior weeks in the dataset), but locks in the §8 design widening so future weeks read 13 priors automatically. *(~2 min)*
+- [ ] **A3. Pre-compute jargon-anchor strings** — two pockets where the 05-22 prose reads robotic:
+   - `burstiness_class` on `PostCancelClusterScorer` + `LayeringScorer`: `"highly bursty"` / `"moderately bursty"` / `"Poisson-like"` based on Fano bands → model writes "highly bursty (Fano 9.4)" not bare "burstiness of 9.43" (37/163 narratives affected).
+   - `order_to_trade_phrase` on cluster scorers: when ratio is ∞ (0 fills), pre-render as `"no fills against N posted orders"` → kills the stilted "order-to-trade ratio of infinite" phrasing (9/163 narratives). *(~20 min combined)*
+- [ ] **A4. Worker restart** before kicking the relaunch — `TimeInBookDriftScorer` + the lifetime-baseline upsert don't exist in the running JVM (worker started at 01:46:36Z, before commit `509e525`). Schema is auto-applied on worker start, so `daily_lifetime_by_symbol` gets created automatically. *(~30 sec)*
+
+**📋 Tier B — Calendar rollup hierarchy, optional but recommended (~1.5 hr):**
+
+These don't materially affect the relaunch outcome (dormant until enough data accumulates) but get the calendar fractal *done* while we're context-loaded on the rollup design, so when the data arrives there's no human intervention needed. Per `tiered-baselines-design.md` §8 + the calendar reasoning (July 1 = Q3 start; first quarterly fires automatically when 13 weeklies exist ≈ Sept 30; first yearly fires ~Q3 2027).
+
+- [ ] **B1. `AggregateQuarterActivity` + `quarterly_aggregate` table** — mirror of weekly: reads ≤13 weekly rollups + prior 4 quarterly rollups; recompute-on-week-finalize; content-addressed; gated by `weekly_count >= MIN_WEEKS_FOR_QUARTER` (8) so it sits dormant until enough data. Wired into `DailyPipelineWorkflow` after `AggregateWeekWorkflow`. *(~1 hr)*
+- [ ] **B2. `AggregateYearActivity` + `yearly_aggregate` table** — mirror of quarterly; reads 4 quarterly rollups; gated by `quarterly_count >= 4`. *(~30 min)*
+
+**🧪 Single-day validation gate (after Tier A applied):**
+- [ ] Re-run the 1-day chain on 05-22 with the Tier A fixes loaded (worker restart → `ScoreWorkflow` → `NarrateWorkflow` → `InterpretWorkflow` → `SynthesizeDayWorkflow` → check synthesis paragraph contains no denylist hits + burstiness_class strings + ∞-phrase strings render). If this passes, kick the overnight 11-day relaunch with confidence.
+
+**📌 Tier C — Deferred to post-relaunch (data-driven decisions):**
+- TimeInBookDrift threshold tuning (`MIN_DRIFT=3.0` — see what the data produces across 11 days)
+- Per-metric meaningfulness of VPIN / Kyle's λ on the IEX slice (decisions.md 2026-05-27-later #6 — assessed on cross-day stability)
+- Slice qualifier rate on per-event narrations (26% today — debatable styling)
+- Softer intent-shaped phrasing ("institutional reserve execution", "to drive price discovery") — borderline; don't over-restrict the prose
+
+**🔁 Still open from earlier lists, post-relaunch:**
+- [ ] **dev→prod export/import tooling** (task #91) — scripted `pg_dump`/`pg_restore` of *only* the narrative-layer tables. Idempotent, documented in `operations.md`. Not blocking the relaunch (the relaunch produces dev data; export is the step after).
+- [ ] **Orphan prune after the relaunch** — `docs/sql/prune-stale-narrations.sql` collapses superseded rows. Run after the relaunch settles.
 
 ### Post-launch
 
@@ -78,9 +105,9 @@ Everything that must be **100% solid before the 10–12 hr overnight relaunch** 
 
 **Live post-launch work (calendar rollup hierarchy + cascade — design §8, decided 2026-05-27):**
 
-20. **Widen weekly prior-window 8 → 13** (one constant) so the weekly trend horizon = one quarter.
-21. **`AggregateQuarterActivity`/`Workflow` + `quarterly_aggregate` table** — mirror of `AggregateWeek`; reads the quarter's ≤13 weekly rollups + prior 4 quarters; recompute-on-week-finalize; content-addressed. (~half day.)
-22. **`AggregateYearActivity`/`Workflow` + `yearly_aggregate` table** — the capstone "year in IEX microstructure" retrospective; reads 4 quarters; recompute-on-quarter-finalize. Needs a year of data. (~half day.)
+20. **Widen weekly prior-window 8 → 13** (one constant) so the weekly trend horizon = one quarter. **Moved to Tier A2 (2026-05-28 pre-relaunch)** — do tonight.
+21. **`AggregateQuarterActivity`/`Workflow` + `quarterly_aggregate` table** — mirror of `AggregateWeek`; reads the quarter's ≤13 weekly rollups + prior 4 quarters; recompute-on-week-finalize; content-addressed. **Promoted to Tier B1 (2026-05-28 pre-relaunch, optional)** — would sit dormant until ~Sept 30 first fire; building now avoids future cold-context work. ~1 hr.
+22. **`AggregateYearActivity`/`Workflow` + `yearly_aggregate` table** — the capstone "year in IEX microstructure" retrospective; reads 4 quarters; recompute-on-quarter-finalize. **Promoted to Tier B2 (2026-05-28 pre-relaunch, optional)** — dormant until ~Q3 2027 first fire. ~30 min.
 23. **`CascadeAggregate(fromDate)` driver** — the load-bearing new mechanism (design §8.2): after a historical backfill/re-synthesis, re-run every period from `fromDate` forward, bottom-up by tier (weeks → quarters → year), pruned by `content_hash`. Wired into the backfill path, NOT the nightly path. (~half day.) **Applies to weekly too** — a historical change does NOT auto-propagate downstream today.
 24. ✅ **`TimeInBookDriftScorer`** — DONE 2026-05-27. Inter-day, mirrors `VolumeDeviationScorer`: today's per-symbol *average order-lifetime* vs its trailing median (collapse-or-stretch, symmetric drift magnitude). Reads a durable `daily_lifetime_by_symbol` table (PK (day,symbol), avg_lifetime_ns + order_count) the materialize step upserts after rebuilding `order_lifecycle`; `BaselineProvider` extended with `dayLifetimes`/`trailingLifetimeBaselines`/`trailingLifetimeWindows`; registered in `EventScorerRegistry`; RetentionSweep invariant updated to preserve the new baseline. avg-not-median (median needs `timescaledb_toolkit`, absent). Compiles clean; **runtime-validated by the overnight inter-day run** (needs ≥3 trailing days of lifetime baseline before it emits). **Monthly numeric tier** (cagg-on-cagg, §2.4) still deferred — only if multi-year *magnitude* reach is wanted.
 
