@@ -6,6 +6,107 @@ Append-only record of architectural and operational decisions, ordered by date. 
 
 ---
 
+## 2026-05-27 (later) — TimeInBookDriftScorer + daily_lifetime_by_symbol baseline; analytics suite shipped + cheap-validated; per-metric meaningfulness on the IEX slice deferred to relaunch data
+
+Completes the "build it all" wave the analytics-wave entry below initiated.
+
+**1. TimeInBookDriftScorer ships as the 9th scorer (2nd inter-day).** Mirrors
+`VolumeDeviationScorer`: today's per-symbol *average* terminal-order lifetime vs
+the trailing 14-day median, symmetric drift magnitude `max(today/baseline,
+baseline/today)` so both **collapse** (lifetimes shorter — the canonical "median
+order lifetime collapsed from 800 ms to 90 ms" regime-shift story) and
+**stretch** are caught. Gates: ≥3 prior days, baseline ≥1 µs (anti
+divide-by-tiny), today ≥1000 terminal orders (stable average), drift ≥3×.
+Breakdown carries both lifetimes (`durationNanos`-humanized as "412.3 μs" /
+"1.2 ms"), direction ("shorter" / "longer"), pre-computed magnitude, plus
+robust-z / percentile / CUSUM from the trailing window.
+
+**2. Storage: a small standard table, not a cagg.** `daily_lifetime_by_symbol`
+(PK `(day, symbol)`, `avg_lifetime_ns BIGINT`, `order_count BIGINT`) is populated
+by `MaterializeOrderLifecycleActivity` right after it rebuilds
+`order_lifecycle` — one cheap `GROUP BY` over the day's terminal-order rows
+(`lifetime_ns IS NOT NULL`), upserted on `(day, symbol)`. The shape mirrors
+`daily_volume_by_symbol` but the *source* differs: `order_lifecycle` is
+deliberately rebuilt each trading day in the daily pipeline, which is awkward
+for continuous-aggregate semantics (a cagg refreshing off a hypertable that
+gets re-materialized would produce flapping rows); a plain table the
+materialize step upserts is equally durable, simpler, and obvious. Persists
+indefinitely — `RetentionSweep` never drops it (invariant comment
+extended). Same "outlives the 2-week wire retention" property as the volume
+cagg, so ~1 year of per-symbol lifetime norms accumulate.
+
+**3. avg, not median.** Median would need `timescaledb_toolkit`, which isn't on
+the `timescale/timescaledb:latest-pg16` image. Avg-drift still detects regime
+shifts (a halving of average lifetime IS a regime shift); upgrade to median
+post-launch if the toolkit lands. Documented in the schema + scorer comments
+so this isn't lost.
+
+**4. `BaselineProvider` is the right seam.** Extended with the lifetime triplet
+(`dayLifetimes` → `DayLifetime{avgLifetimeNs, orderCount}`,
+`trailingLifetimeBaselines` → median + day-count, `trailingLifetimeWindows` →
+raw array for robust-z/percentile via the `Analytics` layer). One interface,
+two implementations of the same shape — the seam already imagined when
+`VolumeDeviationScorer` first used it. Future per-symbol baselines (depth,
+spread, order-to-trade norms) plug in identically.
+
+**5. Runtime validation strategy: the overnight relaunch.** The scorer can't
+emit on a 1-day test (it needs ≥3 trailing days of baseline data, and a fresh
+test means the baseline table starts empty). The rerun chronologically walks
+05-08, 05-11→15, 05-18→22: by the third trading day the baseline has enough
+days to gate, and by the second week drift events start landing. The overnight
+run is the validation surface, period — no faster cheap test exists.
+
+**6. Per-metric meaningfulness on the IEX slice is deferred to relaunch data,
+not cut a-priori.** This is the substantive open call from the analytics wave.
+VPIN and Kyle's λ in particular: their canonical formulations assume
+consolidated tape; on a 2–5 % IEX slice they are *approximations*, and whether
+those approximations carry useful signal across trading days is a question
+the data answers, not theory. The earlier instinct was to cut them a-priori as
+"slice-fragile"; the corrected approach (and the user's repeated instruction)
+is to **compute everything cheap-to-compute, render with the slice caveat,
+and let cross-day stability of the values decide keep-or-cut**. Concretely:
+if VPIN swings wildly day-to-day on the same symbol or never correlates with
+downstream events (halts, large_trade aggressor flow, post-event reversion),
+drop it post-launch; if it's stable and weakly predictive, keep with the
+slice qualifier in the prose. The verifier doesn't care — these values
+render + ground + pass the haystack check regardless; this is a curation
+decision over the field set, not a correctness one.
+
+**7. `implied_reserve` (iceberg) is the one analytic *not* shipped, dropped
+as ungroundable.** Hidden size is by design unknown — any specific number
+would be a fabrication, even a "lower bound" estimate. Replaced with
+`display_ratio_pct` (the *grounded* shape: displayed tip ÷ total executed),
+which carries the same "this order was working a hidden reserve" signal
+without inventing a number for what's structurally invisible. The iceberg
+*scorer* is fully built; only the `implied_reserve` field is omitted. A
+defensible lower-bound definition (e.g. minimum displayed-clip × refill-count
+extrapolation, labeled as a lower bound) could be designed post-launch if
+the narrations want it; today it stays out.
+
+**8. End-to-end 1-day validation on 05-22 (NarrateWorkflow → InterpretWorkflow
+→ SynthesizeDayWorkflow) confirms all four new PROMPT_VERSIONs work
+together.** 44 min Narrate (163 events, 0 verifier failures, every new
+analytic from the suite landed in the prose — sweep slippage + effective
+spread, post_cancel order-to-trade + burstiness, layering depth-from-touch,
+iceberg display-ratio + refill-cadence, liquidity_withdrawal two-sidedness
++ %-of-book + recovery, large_trade %-of-baseline + VPIN), 16 min Interpret
+(0 verifier failures), 2 min Synthesize (TQQQ-themed paragraph, leveraged-ETF
+microstructure thread caught). Total ~62 min per day for the LLM stages.
+The overnight 11-day relaunch budget: ~10 hr (most days re-narrate fully
+because the PROMPT_VERSION bumps invalidate every prior hash; 05-22 is
+already at-current-versions so it short-circuits).
+
+**What's open / deferred (post-launch):** monthly numeric tier (cagg-on-cagg
+over `daily_volume_by_symbol`, design §2.4 — only matters with multi-year
+*magnitude* reach); the calendar rollup fractal (quarter / year, design §8);
+the `Layer-N → function-name` doc vocabulary migration; depth/spread per-symbol
+baselines if a future scorer wants them; the slice-meaningfulness curation
+above; and the systemic drift-prevention item (`docs-check.sh` for static
+counts) — itself flagged during this audit when 7 doc claims of "8 scorers"
+needed updating.
+
+---
+
 ## 2026-05-27 — Analytics wave (pre-launch): compute layer, zoom-ladder routing, EnrichAnalyticsActivity, narration-set, book-replay design
 
 Full menu in [`analytics-catalog.md`](analytics-catalog.md); this entry records the *decisions* made while building the pre-launch slice. Goal: richer microstructure stats in the prose so each event type says something *quantified and non-obvious*, batched into ONE relaunch (adding a breakdown field changes the hash → forces re-narration, so a second relaunch is the cost of doing it piecemeal — batch it).
