@@ -58,12 +58,18 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
 
     /**
      * Bumped when the prompt changes — and on verifier changes that invalidate
-     * prior verdicts. v6 (2026-05-28) extends grounding to cardinal word-form
-     * numerals via the shared {@code GroundingVerifier.cardinalWordNumbersIn};
-     * see {@link SynthesizeDayActivityImpl}'s PROMPT_VERSION comment for the
-     * full rationale.
+     * prior verdicts. v7 (2026-05-28 evening) wires the structural
+     * AttributionVerifier into the weekly rollup tier: week-aggregated
+     * by_symbol_by_scorer + by_symbol_total maps loaded from selected_events
+     * and passed to the new 5-arg SynthesisVerifier.verify(). Closes the
+     * misattribution hole at the week level (mirror of the v7 fix that
+     * landed for SYNTHESIZE earlier this evening). Prompt unchanged from v6.
+     *
+     * <p>v6 (earlier 2026-05-28) extended grounding to cardinal word-form
+     * numerals; see {@link SynthesizeDayActivityImpl}'s PROMPT_VERSION
+     * comment for the full rationale.
      */
-    private static final String PROMPT_VERSION = "aggregate-v6-cardinal-word-form-2026-05-28";
+    private static final String PROMPT_VERSION = "aggregate-v7-attribution-verifier-2026-05-28";
 
     /**
      * Prior weekly rollups passed as week-over-week trend context. Set to 13 =
@@ -199,6 +205,23 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
                 haystack.append(p.aggregateText).append('\n');
             }
 
+            // Week-aggregated attribution truth maps — same shape as the
+            // per-day maps SynthesizeDayActivityImpl builds, but summed across
+            // the week's selected_events. Used by the new AttributionVerifier
+            // path in SynthesisVerifier's 5-arg verify(). NOT included in the
+            // LLM-facing prompt (the prompt sees only week_aggregates JSON +
+            // day paragraphs); the maps are pure verifier-side truth.
+            //
+            // R5 / option D (2026-05-28 evening): closes the misattribution
+            // hole at the week tier. A claim like "TQQQ saw 80 events this
+            // week" needs to be checked against the actual cross-day sum,
+            // which is structurally different from the per-day sum.
+            actx.heartbeat("attribution_maps");
+            Map<String, Map<String, Integer>> weekBySymbolByScorer = new HashMap<>();
+            Map<String, Integer> weekBySymbolTotal = new HashMap<>();
+            loadWeekTruthMaps(conn, weekStart, weekEndExclusive,
+                    weekBySymbolByScorer, weekBySymbolTotal);
+
             actx.heartbeat("prompt");
             String userPrompt = buildUserPrompt(weekStart, weekEnd, weekAggregates, days, priors);
 
@@ -222,7 +245,8 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
                 long llmT0 = System.nanoTime();
                 aggregate = llama.chat(SYSTEM_PROMPT, userPrompt, SamplingParams.AGGREGATE).trim();
                 llmElapsedMs = (System.nanoTime() - llmT0) / 1_000_000L;
-                verify = verifier.verify(aggregate, weekTickers, haystack.toString());
+                verify = verifier.verify(aggregate, weekTickers, haystack.toString(),
+                        weekBySymbolByScorer, weekBySymbolTotal);
                 int claimedStreak = maxStreakWeeksClaimed(aggregate);
                 streakOk = claimedStreak <= allowedStreak;
                 if (verify.passed() && streakOk) {
@@ -243,6 +267,45 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             return 1;
         } catch (Exception e) {
             throw new RuntimeException("aggregate failed for week_start=" + weekStart, e);
+        }
+    }
+
+    /**
+     * Load week-aggregated attribution truth maps from {@code selected_events}.
+     * Sums per-(symbol, scorer) counts across the week's days; the verifier
+     * uses these to validate (subject, count, scorer-type) claim tuples
+     * extracted from the rollup prose.
+     *
+     * <p>Out-params: populates {@code outBySymbolScorer} and
+     * {@code outBySymbolTotal}, mirroring the per-day pattern in
+     * {@link SynthesizeDayActivityImpl#computeDayAggregates}.
+     */
+    private void loadWeekTruthMaps(final Connection conn,
+                                    final LocalDate weekStart,
+                                    final LocalDate weekEndExclusive,
+                                    final Map<String, Map<String, Integer>> outBySymbolScorer,
+                                    final Map<String, Integer> outBySymbolTotal) throws Exception {
+        String sql = """
+                SELECT symbol, scorer_id, COUNT(*) AS cnt
+                FROM selected_events
+                WHERE trading_date >= ? AND trading_date < ?
+                  AND symbol IS NOT NULL
+                GROUP BY symbol, scorer_id
+                """;
+        try (PreparedStatement st = conn.prepareStatement(sql)) {
+            st.setObject(1, weekStart);
+            st.setObject(2, weekEndExclusive);
+            try (ResultSet rs = st.executeQuery()) {
+                while (rs.next()) {
+                    String symbol = rs.getString(1);
+                    String scorerId = rs.getString(2);
+                    int cnt = rs.getInt(3);
+                    outBySymbolScorer
+                            .computeIfAbsent(symbol, k -> new TreeMap<>())
+                            .merge(scorerId, cnt, Integer::sum);
+                    outBySymbolTotal.merge(symbol, cnt, Integer::sum);
+                }
+            }
         }
     }
 
