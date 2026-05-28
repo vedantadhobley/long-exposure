@@ -152,10 +152,12 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
         LocalDate weekStart = anyDateInWeek.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY));
         LocalDate weekEndExclusive = weekStart.plusDays(7);   // Mon .. Sun inclusive
 
-        try (Connection conn = openConnection()) {
+        // Background heartbeat — same band-aid removal as SynthesizeDay.
+        try (BackgroundHeartbeat hb = BackgroundHeartbeat.start(actx, "aggregate-week-heartbeat", 30);
+             Connection conn = openConnection()) {
             SchemaManager.apply(conn);
 
-            actx.heartbeat("load");
+            hb.setStage("load");
             // Stateless rebuild: read THIS week's daily syntheses fresh every
             // run. We never read this week's own prior aggregate_text (that
             // would compound LLM drift across the daily recompute). The
@@ -183,7 +185,7 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
                 return 1;
             }
 
-            actx.heartbeat("rollup");
+            hb.setStage("rollup");
             ObjectNode weekAggregates = rollUp(days, weekStart, weekEnd, json);
 
             // Allowed-ticker universe + number haystack come from the daily
@@ -216,13 +218,13 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             // hole at the week tier. A claim like "TQQQ saw 80 events this
             // week" needs to be checked against the actual cross-day sum,
             // which is structurally different from the per-day sum.
-            actx.heartbeat("attribution_maps");
+            hb.setStage("attribution_maps");
             Map<String, Map<String, Integer>> weekBySymbolByScorer = new HashMap<>();
             Map<String, Integer> weekBySymbolTotal = new HashMap<>();
             PeriodAttributionMaps.load(conn, weekStart, weekEndExclusive,
                     weekBySymbolByScorer, weekBySymbolTotal);
 
-            actx.heartbeat("prompt");
+            hb.setStage("prompt");
             String userPrompt = buildUserPrompt(weekStart, weekEnd, weekAggregates, days, priors);
 
             SynthesisVerifier verifier = new SynthesisVerifier();
@@ -236,7 +238,7 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             // cross-week-summed number, a mis-tokenized ticker, or a streak claim
             // beyond the priors) — AGGREGATE runs at temp 1.0, so a re-roll
             // usually grounds. Keep first passing, else last.
-            actx.heartbeat("llm");
+            hb.setStage("llm");
             String aggregate = null;
             SynthesisVerifier.Result verify = null;
             boolean streakOk = true;
@@ -257,7 +259,7 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
                         weekStart, attempt, MAX_LLM_ATTEMPTS, verify.mismatches(), claimedStreak, allowedStreak);
             }
 
-            actx.heartbeat("upsert");
+            hb.setStage("upsert");
             upsert(conn, weekStart, weekEnd, aggregate, weekAggregates, days.size(),
                     verify, streakOk, allowedStreak, contentHash, json);
 

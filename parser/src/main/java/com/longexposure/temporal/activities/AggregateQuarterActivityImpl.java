@@ -118,10 +118,12 @@ public final class AggregateQuarterActivityImpl implements AggregateQuarterActiv
         LocalDate quarterStart = quarterStartOf(anyDateInQuarter);
         LocalDate quarterEndExclusive = quarterStart.plusMonths(3);
 
-        try (Connection conn = openConnection()) {
+        // Background heartbeat — same pattern as SynthesizeDay / AggregateWeek.
+        try (BackgroundHeartbeat hb = BackgroundHeartbeat.start(actx, "aggregate-quarter-heartbeat", 30);
+             Connection conn = openConnection()) {
             SchemaManager.apply(conn);
 
-            actx.heartbeat("load");
+            hb.setStage("load");
             List<WeekRow> weeks = loadQuarter(conn, json, quarterStart, quarterEndExclusive);
             if (weeks.size() < MIN_WEEKS_FOR_QUARTER) {
                 LOG.info("aggregate-quarter dormant  quarter_start={} weeks={}/{}",
@@ -139,7 +141,7 @@ public final class AggregateQuarterActivityImpl implements AggregateQuarterActiv
                 return 1;
             }
 
-            actx.heartbeat("rollup");
+            hb.setStage("rollup");
             ObjectNode quarterAggregates = rollUp(weeks, quarterStart, quarterEnd, json);
 
             Set<String> tickers = new HashSet<>();
@@ -162,19 +164,19 @@ public final class AggregateQuarterActivityImpl implements AggregateQuarterActiv
             // catch quarter-scope misattribution like "TQQQ had X events this
             // quarter" against actual cross-day sums. Period-level mirror of
             // R5 from earlier this evening.
-            actx.heartbeat("attribution_maps");
+            hb.setStage("attribution_maps");
             Map<String, Map<String, Integer>> quarterBySymbolByScorer = new HashMap<>();
             Map<String, Integer> quarterBySymbolTotal = new HashMap<>();
             PeriodAttributionMaps.load(conn, quarterStart, quarterEnd.plusDays(1),
                     quarterBySymbolByScorer, quarterBySymbolTotal);
 
-            actx.heartbeat("prompt");
+            hb.setStage("prompt");
             String userPrompt = buildUserPrompt(quarterStart, quarterEnd, quarterAggregates, weeks, priors);
 
             SynthesisVerifier verifier = new SynthesisVerifier();
             int allowedStreak = priors.size() + 1;
 
-            actx.heartbeat("llm");
+            hb.setStage("llm");
             String aggregate = null;
             SynthesisVerifier.Result verify = null;
             boolean streakOk = true;
@@ -196,7 +198,7 @@ public final class AggregateQuarterActivityImpl implements AggregateQuarterActiv
                         quarterStart, attempt, MAX_LLM_ATTEMPTS, verify.mismatches(), claimedStreak, allowedStreak);
             }
 
-            actx.heartbeat("upsert");
+            hb.setStage("upsert");
             upsert(conn, quarterStart, quarterEnd, aggregate, quarterAggregates, weeks.size(),
                     verify, streakOk, allowedStreak, contentHash, json);
 

@@ -26,12 +26,11 @@ public final class AggregateWeekWorkflowImpl implements AggregateWeekWorkflow {
                     // a 5-min cap. AggregateQuarter/Year were already 10 min from
                     // their first build — propagating the same value here.
                     .setStartToCloseTimeout(Duration.ofMinutes(10))
-                    // 5 min, not 1 — same heartbeat-timeout bug as
-                    // SynthesizeDayWorkflowImpl. The activity does a blocking
-                    // LLM HTTP call per attempt (~30-90s) with no heartbeat
-                    // during the wait; a 1-min cap kills it before the LLM
-                    // returns. Propagating the 5-min fix here too.
-                    .setHeartbeatTimeout(Duration.ofMinutes(5))
+                    // 1-min heartbeat — the activity uses BackgroundHeartbeat
+                    // (Phase 7b) to call actx.heartbeat() every 30s while the
+                    // blocking LLM HTTP call runs. Real liveness signal, not
+                    // a band-aid. Replaces the 5-min workaround from 15af21f.
+                    .setHeartbeatTimeout(Duration.ofMinutes(1))
                     .setRetryOptions(RetryOptions.newBuilder()
                             .setInitialInterval(Duration.ofSeconds(15))
                             .setMaximumAttempts(2)

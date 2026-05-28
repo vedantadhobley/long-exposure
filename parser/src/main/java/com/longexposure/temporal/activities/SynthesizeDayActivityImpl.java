@@ -130,17 +130,22 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
         ObjectMapper json = new ObjectMapper();
         LlamaClient llama = LlamaClient.fromEnv();
 
-        try (Connection conn = openConnection()) {
+        // Background heartbeat — the blocking LLM HTTP call runs 30-90s with
+        // no yield points; without this thread the heartbeat-timeout fires
+        // before the call returns. Replaces the band-aid 5-min heartbeat
+        // workaround from commit 15af21f.
+        try (BackgroundHeartbeat hb = BackgroundHeartbeat.start(actx, "synth-day-heartbeat", 30);
+             Connection conn = openConnection()) {
             SchemaManager.apply(conn);
 
-            actx.heartbeat("load");
+            hb.setStage("load");
             List<EventRow> events = loadEventsForDay(conn, tradingDate);
             if (events.isEmpty()) {
                 LOG.warn("no narrations for date — skipping synthesis  date={}", tradingDate);
                 return 0;
             }
 
-            actx.heartbeat("aggregate");
+            hb.setStage("aggregate");
             // Attribution-truth maps populated by computeDayAggregates. NOT
             // exposed in the LLM-facing JSON (per the project's structural-
             // fix discipline); only consumed by AttributionVerifier inside
@@ -152,7 +157,7 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
             Set<String> daySymbols = new HashSet<>();
             for (EventRow e : events) if (e.symbol != null) daySymbols.add(e.symbol);
 
-            actx.heartbeat("prompt");
+            hb.setStage("prompt");
             String userPrompt = buildUserPrompt(tradingDate, dayAggregates, events);
 
             String numberHaystack = buildNumberHaystack(events, dayAggregates);
@@ -162,14 +167,15 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
             // or slightly-off number, a mis-tokenized ticker) — SYNTHESIZE runs
             // at temp 1.0, so a re-roll usually grounds. Keep first passing,
             // else last.
-            actx.heartbeat("llm");
             String synthesis = null;
             SynthesisVerifier.Result verify = null;
             long llmElapsedMs = 0;
             for (int attempt = 1; attempt <= MAX_LLM_ATTEMPTS; attempt++) {
+                hb.setStage("llm:attempt-" + attempt);
                 long llmT0 = System.nanoTime();
                 synthesis = llama.chat(SYSTEM_PROMPT, userPrompt, SamplingParams.SYNTHESIZE).trim();
                 llmElapsedMs = (System.nanoTime() - llmT0) / 1_000_000L;
+                hb.setStage("verify:attempt-" + attempt);
                 verify = verifier.verify(synthesis, daySymbols, numberHaystack,
                         bySymbolByScorer, bySymbolTotal);
                 if (verify.passed()) {
@@ -180,7 +186,7 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
                         tradingDate, attempt, MAX_LLM_ATTEMPTS, verify.mismatches());
             }
 
-            actx.heartbeat("upsert");
+            hb.setStage("upsert");
             upsert(conn, tradingDate, synthesis, dayAggregates, events.size(),
                    countWithNarration(events), countWithInterpretation(events),
                    verify, json);

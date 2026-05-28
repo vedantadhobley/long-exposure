@@ -90,10 +90,12 @@ public final class AggregateYearActivityImpl implements AggregateYearActivity {
         LocalDate yearStart = LocalDate.of(anyDateInYear.getYear(), Month.JANUARY, 1);
         LocalDate yearEndExclusive = yearStart.plusYears(1);
 
-        try (Connection conn = openConnection()) {
+        // Background heartbeat — same pattern as SynthesizeDay / AggregateWeek.
+        try (BackgroundHeartbeat hb = BackgroundHeartbeat.start(actx, "aggregate-year-heartbeat", 30);
+             Connection conn = openConnection()) {
             SchemaManager.apply(conn);
 
-            actx.heartbeat("load");
+            hb.setStage("load");
             List<QuarterRow> quarters = loadYear(conn, json, yearStart, yearEndExclusive);
             if (quarters.size() < MIN_QUARTERS_FOR_YEAR) {
                 LOG.info("aggregate-year dormant  year_start={} quarters={}/{}",
@@ -111,7 +113,7 @@ public final class AggregateYearActivityImpl implements AggregateYearActivity {
                 return 1;
             }
 
-            actx.heartbeat("rollup");
+            hb.setStage("rollup");
             ObjectNode yearAggregates = rollUp(quarters, yearStart, yearEnd, json);
 
             Set<String> tickers = new HashSet<>();
@@ -131,19 +133,19 @@ public final class AggregateYearActivityImpl implements AggregateYearActivity {
             // trading days; the SQL group-by stays small (~2-3K rows even
             // for the busiest dataset) so the cost is negligible vs the
             // LLM call. Mirror of the week + quarter tier fixes.
-            actx.heartbeat("attribution_maps");
+            hb.setStage("attribution_maps");
             Map<String, Map<String, Integer>> yearBySymbolByScorer = new HashMap<>();
             Map<String, Integer> yearBySymbolTotal = new HashMap<>();
             PeriodAttributionMaps.load(conn, yearStart, yearEnd.plusDays(1),
                     yearBySymbolByScorer, yearBySymbolTotal);
 
-            actx.heartbeat("prompt");
+            hb.setStage("prompt");
             String userPrompt = buildUserPrompt(yearStart, yearEnd, yearAggregates, quarters, priors);
 
             SynthesisVerifier verifier = new SynthesisVerifier();
             int allowedStreak = priors.size() + 1;
 
-            actx.heartbeat("llm");
+            hb.setStage("llm");
             String aggregate = null;
             SynthesisVerifier.Result verify = null;
             boolean streakOk = true;
@@ -165,7 +167,7 @@ public final class AggregateYearActivityImpl implements AggregateYearActivity {
                         yearStart, attempt, MAX_LLM_ATTEMPTS, verify.mismatches(), claimedStreak, allowedStreak);
             }
 
-            actx.heartbeat("upsert");
+            hb.setStage("upsert");
             upsert(conn, yearStart, yearEnd, aggregate, yearAggregates, quarters.size(),
                     verify, streakOk, allowedStreak, contentHash, json);
 
