@@ -245,38 +245,48 @@ public final class AttributionVerifier {
     /**
      * Extract (subject, count, scorer-noun) claim tuples from prose. Public for
      * testing; not part of the verify contract.
+     *
+     * <p><b>Consumed-count tracking</b> (2026-05-28 fix for the "split between
+     * A and B" false-positive): each count position in the prose can be
+     * attributed to AT MOST ONE noun — the noun closest to it that finds it
+     * via {@link #lookBackward}. Without this, prose like "16 events split
+     * between post-cancel clusters and depth contractions" generates three
+     * tuples ({@code (subj, 16, generic-events)}, {@code (subj, 16,
+     * post_cancel_cluster)}, {@code (subj, 16, liquidity_withdrawal)}) — the
+     * model meant "16 distributed between," not "16 of each." The closest
+     * noun consumes the count; subsequent nouns scanning back must find a
+     * different count or no claim fires.
      */
     public List<AttributedClaim> extractClaims(final String prose) {
         List<AttributedClaim> out = new ArrayList<>();
         if (prose == null || prose.isEmpty()) return out;
 
-        // Find every noun-phrase match. For each one, scan a bounded window
-        // before for the nearest number AND nearest ticker. Also support the
-        // verb-led "{N} {noun} on {SUBJECT}" shape by scanning forward.
+        // Walk the prose noun-by-noun in order. Track count positions consumed
+        // by earlier nouns; subsequent nouns must skip past consumed counts.
+        Set<Integer> consumedCountPositions = new HashSet<>();
+
         Matcher nm = NOUN_RE.matcher(prose);
         while (nm.find()) {
             int nounStart = nm.start();
             int nounEnd   = nm.end();
             String nounPhrase = nm.group(1);
             String scorerId   = NOUN_TO_SCORER.get(nounPhrase.toLowerCase());
-            // scorerId == null for generic nouns like "events" / "incidents"
-            // — that's intentional; the verify() method handles them via the
-            // bySymbolTotal lookup.
 
-            // Subject-led + possessive: look backward.
-            CountAndSubject lookback = lookBackward(prose, nounStart);
+            // Subject-led + possessive: look backward, skipping any count
+            // positions already consumed by earlier nouns.
+            CountAndSubject lookback = lookBackward(prose, nounStart, consumedCountPositions);
             if (lookback != null) {
+                consumedCountPositions.add(lookback.countAbsolutePosition);
                 out.add(new AttributedClaim(
                         lookback.subject, lookback.count, lookback.countWord,
                         scorerId, nounPhrase));
                 continue;
             }
 
-            // Verb-led: look forward for "{connector} {SUBJECT}". Note: also
-            // requires a number BEFORE the noun (which lookBackward already
-            // confirmed absent — so try to find one differently here).
-            CountAndSubject lookforward = lookForward(prose, nounStart, nounEnd);
+            // Verb-led: look forward for "{connector} {SUBJECT}".
+            CountAndSubject lookforward = lookForward(prose, nounStart, nounEnd, consumedCountPositions);
             if (lookforward != null) {
+                consumedCountPositions.add(lookforward.countAbsolutePosition);
                 out.add(new AttributedClaim(
                         lookforward.subject, lookforward.count,
                         lookforward.countWord, scorerId, nounPhrase));
@@ -287,28 +297,37 @@ public final class AttributionVerifier {
 
     /**
      * Look backward from {@code nounStart} for the nearest (count, subject)
-     * pair within {@link #LOOKBACK_TOKENS} tokens. Returns null if either
-     * isn't found.
+     * pair within {@link #LOOKBACK_TOKENS} tokens.
+     *
+     * @param consumed already-consumed absolute count positions; skipped during
+     *                 the search (the "split between" fix — each count
+     *                 attributes to AT MOST one noun)
      */
-    private CountAndSubject lookBackward(final String prose, final int nounStart) {
-        String before = prose.substring(Math.max(0, nounStart - 200), nounStart);
-        // Tokenize the window into words (preserving order).
-        String[] tokens = before.split("\\s+");
-        int n = tokens.length;
+    private CountAndSubject lookBackward(final String prose, final int nounStart,
+                                         final Set<Integer> consumed) {
+        int windowStart = Math.max(0, nounStart - 200);
+        String before = prose.substring(windowStart, nounStart);
+        // Tokenize the window with positions so we can compute absolute
+        // offsets into the original prose for consumed-tracking.
+        List<TokenAt> tokens = tokenizeWithPositions(before, windowStart);
+        int n = tokens.size();
         if (n == 0) return null;
 
-        // Walk backward through tokens. Find the nearest NUMBER first; then
-        // the nearest TICKER before it. Bounded by LOOKBACK_TOKENS.
+        // Walk backward through tokens. Find the nearest non-consumed NUMBER
+        // first; then the nearest TICKER before it. Bounded by LOOKBACK_TOKENS.
         int countIdx = -1;
+        int countAbsPos = -1;
         String countWord = null;
         Integer count = null;
         int limit = Math.max(0, n - LOOKBACK_TOKENS);
         for (int i = n - 1; i >= limit; i--) {
-            Integer c = parseCount(stripPunct(tokens[i]));
-            if (c != null) {
+            TokenAt t = tokens.get(i);
+            Integer c = parseCount(stripPunct(t.word));
+            if (c != null && !consumed.contains(t.absStart)) {
                 count = c;
-                countWord = stripPunct(tokens[i]);
+                countWord = stripPunct(t.word);
                 countIdx = i;
+                countAbsPos = t.absStart;
                 break;
             }
         }
@@ -319,9 +338,9 @@ public final class AttributionVerifier {
         // "QQQ's six events" — possessive subject before count, handled
         // by going backward from countIdx).
         for (int i = countIdx - 1; i >= limit; i--) {
-            String t = stripPunctButKeepDot(tokens[i]);
+            String t = stripPunctButKeepDot(tokens.get(i).word);
             if (isTicker(t)) {
-                return new CountAndSubject(t, count, countWord);
+                return new CountAndSubject(t, count, countWord, countAbsPos);
             }
         }
         return null;
@@ -333,17 +352,26 @@ public final class AttributionVerifier {
      * before the noun (within LOOKBACK_TOKENS) — pulled from the same window.
      */
     private CountAndSubject lookForward(final String prose,
-                                         final int nounStart, final int nounEnd) {
+                                         final int nounStart, final int nounEnd,
+                                         final Set<Integer> consumed) {
         // First find the count BEFORE the noun (verb-led "{N} {noun} on {SUBJ}").
-        String before = prose.substring(Math.max(0, nounStart - 200), nounStart);
-        String[] bTokens = before.split("\\s+");
-        int bn = bTokens.length;
+        int windowStart = Math.max(0, nounStart - 200);
+        String before = prose.substring(windowStart, nounStart);
+        List<TokenAt> bTokens = tokenizeWithPositions(before, windowStart);
+        int bn = bTokens.size();
         Integer count = null;
+        int countAbsPos = -1;
         String countWord = null;
         int blimit = Math.max(0, bn - LOOKBACK_TOKENS);
         for (int i = bn - 1; i >= blimit; i--) {
-            Integer c = parseCount(stripPunct(bTokens[i]));
-            if (c != null) { count = c; countWord = stripPunct(bTokens[i]); break; }
+            TokenAt t = bTokens.get(i);
+            Integer c = parseCount(stripPunct(t.word));
+            if (c != null && !consumed.contains(t.absStart)) {
+                count = c;
+                countWord = stripPunct(t.word);
+                countAbsPos = t.absStart;
+                break;
+            }
         }
         if (count == null) return null;
 
@@ -355,11 +383,30 @@ public final class AttributionVerifier {
             if (!CONNECTORS.contains(maybeConn)) continue;
             String maybeSubj = stripPunctButKeepDot(aTokens[i + 1]);
             if (isTicker(maybeSubj)) {
-                return new CountAndSubject(maybeSubj, count, countWord);
+                return new CountAndSubject(maybeSubj, count, countWord, countAbsPos);
             }
         }
         return null;
     }
+
+    /** Split text on whitespace, preserving absolute offsets into the source string. */
+    private static List<TokenAt> tokenizeWithPositions(final String text, final int absoluteOffset) {
+        List<TokenAt> out = new ArrayList<>();
+        int i = 0;
+        int n = text.length();
+        while (i < n) {
+            // skip whitespace
+            while (i < n && Character.isWhitespace(text.charAt(i))) i++;
+            if (i >= n) break;
+            int start = i;
+            while (i < n && !Character.isWhitespace(text.charAt(i))) i++;
+            out.add(new TokenAt(text.substring(start, i), absoluteOffset + start));
+        }
+        return out;
+    }
+
+    /** A token paired with its absolute start position in the original prose. */
+    private record TokenAt(String word, int absStart) {}
 
     /** Strip leading/trailing punctuation (but keep '.' for tickers like BRK.B). */
     private static String stripPunct(final String token) {
@@ -437,6 +484,12 @@ public final class AttributionVerifier {
     public record AttributedClaim(String subject, int count, String countWord,
                                    String scorerId, String nounMatch) {}
 
-    /** Backward-lookup helper. */
-    private record CountAndSubject(String subject, int count, String countWord) {}
+    /**
+     * Backward/forward lookup helper. {@code countAbsolutePosition} is the
+     * absolute character offset in the original prose where the count token
+     * starts — used to mark counts as consumed in
+     * {@link #extractClaims}.
+     */
+    private record CountAndSubject(String subject, int count, String countWord,
+                                    int countAbsolutePosition) {}
 }

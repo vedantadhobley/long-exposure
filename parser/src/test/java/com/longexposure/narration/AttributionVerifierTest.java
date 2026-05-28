@@ -200,4 +200,60 @@ class AttributionVerifierTest {
                 Map.of("TQQQ", 20));
         assertTrue(r.passed(), "twenty=20 should match: " + r.mismatches());
     }
+
+    // ─── Consumed-count tracking ────────────────────────────────────────────
+    // Regression for the 05-13 v7 false-positive: "16 events split between A
+    // and B" generated three (subj, 16, X) tuples for X ∈ {generic-events,
+    // post_cancel_cluster, liquidity_withdrawal}. The model meant "16
+    // *distributed* between," not "16 of each." Fix: each count attributes to
+    // ONLY the noun closest to it (the first one encountered while walking
+    // nouns in order).
+
+    /** "X events split between A and B" — count is consumed by the first noun
+     *  (generic "events"); A and B don't re-claim it. */
+    @Test
+    void splitBetweenAttributesOnlyToClosestNoun() {
+        AttributionVerifier v = new AttributionVerifier();
+        List<AttributionVerifier.AttributedClaim> claims = v.extractClaims(
+                "QQQ logged 16 events split between post-cancel clusters and depth contractions.");
+        // Should produce EXACTLY ONE claim — for the closest noun "events".
+        // (Post-cancel clusters and depth contractions don't get a count
+        //  attributed because 16 was consumed by "events".)
+        assertEquals(1, claims.size(),
+                "single count cannot be claimed by multiple nouns: " + claims);
+        assertEquals("QQQ", claims.get(0).subject());
+        assertEquals(16, claims.get(0).count());
+        // The closest noun match — "events" — is generic, so scorerId is null.
+        assertEquals(null, claims.get(0).scorerId(),
+                "first noun ('events') should be the generic, not a specific scorer");
+    }
+
+    /** And the full verify() — should PASS now (no false positives). */
+    @Test
+    void splitBetweenVerificationPasses() {
+        AttributionVerifier v = new AttributionVerifier();
+        // QQQ total = 16 (3 + 10 + 3 in this fake world); the generic 16
+        // claim grounds against bySymbolTotal, and post-cancel + withdrawal
+        // do not get a fake claim attributed to them.
+        AttributionVerifier.Result r = v.verify(
+                "QQQ logged 16 events split between post-cancel clusters and depth contractions.",
+                Map.of("QQQ", Map.of("post_cancel_cluster", 3, "liquidity_withdrawal", 10, "iceberg", 3)),
+                Map.of("QQQ", 16));
+        assertTrue(r.passed(), "split-between should pass: " + r.mismatches());
+    }
+
+    /** A different count next to each noun → each gets its own claim
+     *  (the consumed-tracking shouldn't BLOCK genuine multi-claim prose). */
+    @Test
+    void distinctCountsPerNounStillBothExtracted() {
+        AttributionVerifier v = new AttributionVerifier();
+        List<AttributionVerifier.AttributedClaim> claims = v.extractClaims(
+                "TQQQ saw 20 liquidity withdrawals and 10 post-cancel clusters.");
+        assertEquals(2, claims.size(), "distinct counts each anchor a claim: " + claims);
+        // Verify each claim has its own count
+        assertEquals(20, claims.get(0).count());
+        assertEquals("liquidity_withdrawal", claims.get(0).scorerId());
+        assertEquals(10, claims.get(1).count());
+        assertEquals("post_cancel_cluster", claims.get(1).scorerId());
+    }
 }
