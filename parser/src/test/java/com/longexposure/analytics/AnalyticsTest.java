@@ -124,4 +124,75 @@ class AnalyticsTest {
         assertEquals(25.0, Analytics.orderToTradeRatio(100, 4), EPS);
         assertTrue(Double.isNaN(Analytics.orderToTradeRatio(0, 5)));        // no orders
     }
+
+    @Test
+    void realizedVolatility_logReturns() {
+        double r = Math.log(1.1);                                  // 100 -> 110 -> 100
+        assertEquals(Math.sqrt(2 * r * r), Analytics.realizedVolatility(new double[]{100, 110, 100}), 1e-9);
+        assertTrue(Double.isNaN(Analytics.realizedVolatility(new double[]{100})));
+    }
+
+    @Test
+    void jumpRatio_continuousVsJump() {
+        assertEquals(0.0, Analytics.jumpRatio(new double[]{2, 2, 2, 2, 2}), EPS); // equal returns -> clamped 0
+        assertEquals(1.0, Analytics.jumpRatio(new double[]{0, 0, 5, 0, 0}), EPS); // a single jump
+        assertTrue(Double.isNaN(Analytics.jumpRatio(new double[]{1, 1})));
+    }
+
+    @Test
+    void hhi_concentration() {
+        assertEquals(0.25, Analytics.hhi(new double[]{1, 1, 1, 1}), EPS);  // even
+        assertEquals(1.0, Analytics.hhi(new double[]{10, 0, 0}), EPS);     // all in one
+        assertTrue(Double.isNaN(Analytics.hhi(new double[]{})));
+    }
+
+    @Test
+    void normalizedEntropy_uniformVsSkewed() {
+        assertEquals(1.0, Analytics.normalizedEntropy(new double[]{1, 1, 1, 1}), EPS); // uniform
+        assertEquals(1.0, Analytics.normalizedEntropy(new double[]{5, 5}), EPS);
+        assertTrue(Analytics.normalizedEntropy(new double[]{3, 1}) < 1.0);             // skewed
+        assertTrue(Double.isNaN(Analytics.normalizedEntropy(new double[]{4})));        // k<2
+    }
+
+    @Test
+    void lag1Autocorrelation_trendVsAlternating() {
+        assertEquals(0.4, Analytics.lag1Autocorrelation(new double[]{1, 2, 3, 4, 5}), 1e-9);
+        assertEquals(-0.75, Analytics.lag1Autocorrelation(new double[]{1, -1, 1, -1}), 1e-9);
+        assertTrue(Double.isNaN(Analytics.lag1Autocorrelation(new double[]{1, 2})));
+    }
+
+    @Test
+    void cusumShift_stationaryVsShifted() {
+        assertEquals(0.5, Analytics.cusumShift(new double[]{0, 0, 0, 5, 5, 5}), 1e-9);
+        assertTrue(Analytics.cusumShift(new double[]{0, 0, 0, 5, 5, 5})
+                 > Analytics.cusumShift(new double[]{1, 2, 1, 2, 1, 2}));
+        assertTrue(Double.isNaN(Analytics.cusumShift(new double[]{1, 1, 1})));  // zero variance
+    }
+
+    @Test
+    void branchingRatioFromFano_momentEstimate() {
+        assertEquals(0.5, Analytics.branchingRatioFromFano(4.0), EPS);    // 1 - 1/2
+        assertTrue(Double.isNaN(Analytics.branchingRatioFromFano(1.0)));  // no excitation
+        assertTrue(Double.isNaN(Analytics.branchingRatioFromFano(0.5)));
+    }
+
+    @Test
+    void orderFlowImbalance_signedFlow() {
+        assertEquals(1.0, Analytics.orderFlowImbalance(100, 0, 0, 0), EPS);  // all bid accumulation
+        assertEquals(0.0, Analytics.orderFlowImbalance(50, 0, 50, 0), EPS);  // balanced
+        assertTrue(Double.isNaN(Analytics.orderFlowImbalance(0, 0, 0, 0)));
+    }
+
+    @Test
+    void vpin_imbalanceFraction() {
+        assertEquals(0.6, Analytics.vpin(80, 20), EPS);
+        assertTrue(Double.isNaN(Analytics.vpin(0, 0)));
+    }
+
+    @Test
+    void kylesLambda_impactSlope() {
+        assertEquals(2.0, Analytics.kylesLambda(new double[]{1, 2, 3}, new double[]{2, 4, 6}), 1e-9);
+        assertTrue(Double.isNaN(Analytics.kylesLambda(new double[]{1, 2}, new double[]{1, 2, 3})));   // mismatched
+        assertTrue(Double.isNaN(Analytics.kylesLambda(new double[]{1, 1, 1}, new double[]{1, 2, 3}))); // zero var
+    }
 }

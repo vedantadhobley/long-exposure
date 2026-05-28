@@ -192,6 +192,10 @@ public final class IcebergScorer implements EventScorer {
         breakdown.put("price_dollars",    priceDollars);
         breakdown.put("median_fill_size", BreakdownFmt.formatCount(medianSize));
         breakdown.put("size_cv",          BreakdownFmt.round(cv, 3));
+        // Display ratio: median displayed tip as a % of the total worked. Small =
+        // heavily concealed (a tiny tip refilling into a large total). The grounded
+        // stand-in for "implied reserve" — both numbers observed, no hidden-size guess.
+        if (totalShares > 0) breakdown.put("display_ratio_pct", BreakdownFmt.round(medianSize * 100.0 / totalShares, 2));
         breakdown.put("duration",         BreakdownFmt.durationNanos(durationNanos));
         breakdown.put("start_et",         BreakdownFmt.toEtTime(first.ts));
         breakdown.put("end_et",           BreakdownFmt.toEtTime(last.ts));

@@ -227,6 +227,17 @@ public final class PostCancelClusterScorer implements EventScorer {
         double fano = com.longexposure.analytics.Analytics.fanoFactor(
                 addNanos, Math.max(2, Math.min(50, cluster.size() / 5)));
         if (!Double.isNaN(fano)) breakdown.put("burstiness_fano", BreakdownFmt.round(fano, 2));
+        // Hawkes self-excitation (moment estimate from Fano): fraction of orders
+        // "triggered" by prior orders. + arrival autocorrelation: regular gaps =
+        // machine cadence (a fixed-beat algo), near-zero = Poisson-random.
+        double selfExc = com.longexposure.analytics.Analytics.branchingRatioFromFano(fano);
+        if (!Double.isNaN(selfExc)) breakdown.put("self_excitation", BreakdownFmt.round(selfExc, 2));
+        if (addNanos.length >= 4) {
+            double[] gaps = new double[addNanos.length - 1];
+            for (int i = 1; i < addNanos.length; i++) gaps[i - 1] = addNanos[i] - addNanos[i - 1];
+            double ac = com.longexposure.analytics.Analytics.lag1Autocorrelation(gaps);
+            if (!Double.isNaN(ac)) breakdown.put("arrival_autocorr", BreakdownFmt.round(ac, 2));
+        }
         breakdown.put("event_session_phase",  BreakdownFmt.sessionPhase(first.addTs));
         breakdown.put("event_phase_label",    BreakdownFmt.sessionPhaseLabel(first.addTs));
 

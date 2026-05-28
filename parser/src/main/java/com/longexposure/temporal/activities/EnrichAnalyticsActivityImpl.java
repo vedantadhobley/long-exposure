@@ -46,6 +46,15 @@ public final class EnrichAnalyticsActivityImpl implements EnrichAnalyticsActivit
     /** Recovery snapshot offset after a withdrawal ends — did displayed depth come back? */
     private static final long RECOVERY_NS = 5_000_000_000L;  // 5 s
 
+    /** ±window around an event for the execution-window stats (realized vol, jumps, VPIN, Kyle's λ). */
+    private static final long WINDOW_NS = 60_000_000_000L;   // ±60 s
+    /** Scorers that get the price-path + signed-flow execution-window stats. */
+    private static final java.util.Set<String> EXEC_WINDOW_SCORERS = java.util.Set.of(
+            "sweep", "large_trade", "post_cancel_cluster", "layering", "halt");
+    /** Scorers that get order-to-trade + pre-event OFI (order-flow-shaped). */
+    private static final java.util.Set<String> FLOW_SCORERS = java.util.Set.of(
+            "post_cancel_cluster", "layering", "halt");
+
     @Override
     public long enrichAnalytics(final LocalDate tradingDate) {
         ActivityExecutionContext actx = Activity.getExecutionContext();
@@ -68,6 +77,12 @@ public final class EnrichAnalyticsActivityImpl implements EnrichAnalyticsActivit
                 // an empty `add` means "nothing to enrich" and is skipped.
                 if ("liquidity_withdrawal".equals(e.scorerId)) {
                     addTwoSidedness(conn, e, add);
+                }
+                if (EXEC_WINDOW_SCORERS.contains(e.scorerId)) {
+                    addExecutionWindowStats(conn, e, add);
+                }
+                if (FLOW_SCORERS.contains(e.scorerId)) {
+                    addOrderFlowStats(conn, e, add);
                 }
                 // (book-state tier — depth-from-touch / halt spread /
                 //  %-of-book + recovery / effective spread — slots in here.)
@@ -154,6 +169,126 @@ public final class EnrichAnalyticsActivityImpl implements EnrichAnalyticsActivit
         add.put("withdrawal_side_class",      sideClass);
     }
 
+    /**
+     * Price-path + signed-flow stats over the ±60 s execution window around the
+     * event, from one indexed orders_executed query: realized volatility, bipower
+     * jump ratio, VPIN (buy/sell imbalance), and Kyle's λ (price impact per unit
+     * of signed volume). VPIN + Kyle's λ are IEX-slice approximations — we see
+     * only IEX's executions, not the consolidated tape — and should be narrated
+     * with that qualifier. Skips quietly if the window has &lt;3 fills.
+     */
+    private void addExecutionWindowStats(final Connection conn, final Selected e, final ObjectNode add) throws Exception {
+        long fromN = epochNanos(e.ts) - WINDOW_NS;
+        long toN   = epochNanos(e.tsEnd) + WINDOW_NS;
+        List<double[]> fills = new ArrayList<>();   // [priceDollars, signedSize]
+        double buyVol = 0, sellVol = 0;
+        // orders_executed carries no side (side is on the original add), so join
+        // order_lifecycle on order_id to recover it for the signed-flow stats.
+        String sql = """
+                SELECT oe.price_raw, oe.size, ol.side
+                FROM orders_executed oe
+                JOIN order_lifecycle ol
+                  ON ol.trading_date = ? AND ol.symbol = oe.symbol AND ol.order_id = oe.order_id
+                WHERE oe.feed_source = 'DPLS' AND oe.symbol = ? AND oe.ts >= ? AND oe.ts < ?
+                ORDER BY oe.ts_nanos
+                """;
+        try (PreparedStatement st = conn.prepareStatement(sql)) {
+            st.setObject(1, e.tradingDate);
+            st.setString(2, e.symbol);
+            st.setTimestamp(3, tsFromNanos(fromN));
+            st.setTimestamp(4, tsFromNanos(toN));
+            try (ResultSet rs = st.executeQuery()) {
+                while (rs.next()) {
+                    double p = rs.getLong("price_raw") / 10_000.0;
+                    int sz = rs.getInt("size");
+                    String side = rs.getString("side");
+                    if (SIDE_BID.equals(side)) buyVol += sz; else if (SIDE_ASK.equals(side)) sellVol += sz;
+                    fills.add(new double[]{p, SIDE_BID.equals(side) ? sz : -sz});
+                }
+            }
+        }
+        if (fills.size() < 3) return;
+        double[] prices = new double[fills.size()];
+        for (int i = 0; i < fills.size(); i++) prices[i] = fills.get(i)[0];
+        double[] returns   = new double[prices.length - 1];
+        double[] signedVol = new double[prices.length - 1];
+        for (int i = 1; i < prices.length; i++) {
+            returns[i - 1]   = prices[i] - prices[i - 1];
+            signedVol[i - 1] = fills.get(i)[1];
+        }
+        double rvol = Analytics.realizedVolatility(prices);
+        if (!Double.isNaN(rvol)) add.put("window_realized_vol_bps", BreakdownFmt.round(rvol * 10_000.0, 1));
+        double jr = Analytics.jumpRatio(returns);
+        if (!Double.isNaN(jr)) add.put("window_jump_ratio", BreakdownFmt.round(jr, 2));
+        double v = Analytics.vpin(buyVol, sellVol);
+        if (!Double.isNaN(v)) add.put("window_vpin", BreakdownFmt.round(v, 2));
+        double kl = Analytics.kylesLambda(signedVol, returns);
+        if (!Double.isNaN(kl)) add.put("window_kyle_lambda", BreakdownFmt.round(kl, 6));
+    }
+
+    /**
+     * Order-flow stats: order-to-trade ratio (orders posted vs executed during
+     * the event window — the manipulation shape: lots posted, few/none filled)
+     * for the cluster scorers, and pre-event OFI (net signed displayed-size flow
+     * in the ±lead-in window from order_lifecycle) for all flow scorers.
+     */
+    private void addOrderFlowStats(final Connection conn, final Selected e, final ObjectNode add) throws Exception {
+        if ("post_cancel_cluster".equals(e.scorerId) || "layering".equals(e.scorerId)) {
+            long posts = countIn(conn, "orders_add",      e.symbol, e.ts, e.tsEnd);
+            long fills = countIn(conn, "orders_executed", e.symbol, e.ts, e.tsEnd);
+            double otr = Analytics.orderToTradeRatio(posts, fills);
+            if (Double.isInfinite(otr))        add.put("order_to_trade_ratio", "infinite (0 fills)");
+            else if (!Double.isNaN(otr))       add.put("order_to_trade_ratio", BreakdownFmt.round(otr, 1));
+            add.put("window_orders_posted", BreakdownFmt.formatCount(posts));
+            add.put("window_orders_filled", BreakdownFmt.formatCount(fills));
+        }
+        // Pre-event OFI over the lead-in window [ts − W, ts].
+        long fromN = epochNanos(e.ts) - WINDOW_NS, toN = epochNanos(e.ts);
+        Timestamp from = tsFromNanos(fromN), to = tsFromNanos(toN);
+        String sql = """
+                SELECT
+                  COALESCE(SUM(add_size) FILTER (WHERE side = '8' AND add_ts    >= ? AND add_ts    < ?), 0) AS bid_added,
+                  COALESCE(SUM(add_size) FILTER (WHERE side = '5' AND add_ts    >= ? AND add_ts    < ?), 0) AS ask_added,
+                  COALESCE(SUM(add_size) FILTER (WHERE side = '8' AND delete_ts >= ? AND delete_ts < ?), 0) AS bid_removed,
+                  COALESCE(SUM(add_size) FILTER (WHERE side = '5' AND delete_ts >= ? AND delete_ts < ?), 0) AS ask_removed
+                FROM order_lifecycle
+                WHERE trading_date = ? AND symbol = ?
+                  AND ((add_ts >= ? AND add_ts < ?) OR (delete_ts >= ? AND delete_ts < ?))
+                """;
+        try (PreparedStatement st = conn.prepareStatement(sql)) {
+            int i = 1;
+            for (int w = 0; w < 4; w++) { st.setTimestamp(i++, from); st.setTimestamp(i++, to); }
+            st.setObject(i++, e.tradingDate);
+            st.setString(i++, e.symbol);
+            st.setTimestamp(i++, from); st.setTimestamp(i++, to);
+            st.setTimestamp(i++, from); st.setTimestamp(i++, to);
+            try (ResultSet rs = st.executeQuery()) {
+                if (rs.next()) {
+                    double ofi = Analytics.orderFlowImbalance(
+                            rs.getLong("bid_added"), rs.getLong("bid_removed"),
+                            rs.getLong("ask_added"), rs.getLong("ask_removed"));
+                    if (!Double.isNaN(ofi)) add.put("pre_event_ofi", BreakdownFmt.round(ofi, 2));
+                }
+            }
+        }
+    }
+
+    private long countIn(final Connection conn, final String table, final String symbol,
+                         final Instant from, final Instant to) throws Exception {
+        // `table` is one of two hardcoded constants — no injection surface.
+        try (PreparedStatement st = conn.prepareStatement(
+                "SELECT count(*) FROM " + table + " WHERE feed_source = 'DPLS' AND symbol = ? AND ts >= ? AND ts < ?")) {
+            st.setString(1, symbol);
+            st.setTimestamp(2, Timestamp.from(from));
+            st.setTimestamp(3, Timestamp.from(to));
+            try (ResultSet rs = st.executeQuery()) { return rs.next() ? rs.getLong(1) : 0; }
+        }
+    }
+
+    private static Timestamp tsFromNanos(final long nanos) {
+        return Timestamp.from(Instant.ofEpochSecond(Math.floorDiv(nanos, 1_000_000_000L), Math.floorMod(nanos, 1_000_000_000L)));
+    }
+
     /** Shallow-merge the derived fields into the event's breakdown (idempotent — overwrites own keys). */
     private void mergeBreakdown(final Connection conn, final long selectedId, final String addJson) throws Exception {
         try (PreparedStatement st = conn.prepareStatement(
@@ -189,7 +324,7 @@ public final class EnrichAnalyticsActivityImpl implements EnrichAnalyticsActivit
             long ts    = epochNanos(e.ts);
             long tsEnd = epochNanos(e.tsEnd);
             switch (e.scorerId) {
-                case "halt", "layering" ->
+                case "halt", "layering", "sweep" ->
                         reqs.add(new BookSnapshotEngine.Request(e.selectedId, e.symbol, ts, "at"));
                 case "liquidity_withdrawal" -> {
                     reqs.add(new BookSnapshotEngine.Request(e.selectedId, e.symbol, ts, "before"));
@@ -217,6 +352,7 @@ public final class EnrichAnalyticsActivityImpl implements EnrichAnalyticsActivit
             switch (e.scorerId) {
                 case "halt"                 -> addHaltSpread(add, s.get("at"));
                 case "layering"             -> addDepthFromTouch(add, s.get("at"), e.breakdown);
+                case "sweep"                -> addEffectiveSpread(add, s.get("at"), e.breakdown);
                 case "liquidity_withdrawal" -> addPctOfBook(add, s.get("before"), s.get("after"), s.get("recovery"));
                 default -> { }
             }
@@ -239,6 +375,19 @@ public final class EnrichAnalyticsActivityImpl implements EnrichAnalyticsActivit
         double mid = (bidRaw + askRaw) / 2.0 / 10_000.0;
         add.put("pre_halt_spread_dollars", BreakdownFmt.round(spreadRaw / 10_000.0, 4));
         if (mid > 0) add.put("pre_halt_spread_bps", BreakdownFmt.round(spreadRaw / 10_000.0 / mid * 10_000.0, 1));
+        putDepthImbalance(add, s);
+    }
+
+    /** Effective spread (bps): how far the sweep's avg execution sat from the book mid at the event. */
+    private void addEffectiveSpread(final ObjectNode add, final BookSnapshotEngine.Snapshot s, final JsonNode breakdown) {
+        if (s == null || !s.captured() || s.bestBidPriceRaw().isEmpty() || s.bestAskPriceRaw().isEmpty()) return;
+        double mid = (s.bestBidPriceRaw().getAsLong() + s.bestAskPriceRaw().getAsLong()) / 2.0 / 10_000.0;
+        JsonNode mn = breakdown.get("min_price_dollars"), mx = breakdown.get("max_price_dollars");
+        if (mn == null || mx == null) return;
+        double sweepAvg = (mn.asDouble() + mx.asDouble()) / 2.0;
+        double es = Analytics.effectiveSpreadBps(sweepAvg, mid);
+        if (!Double.isNaN(es)) add.put("effective_spread_bps", BreakdownFmt.round(es, 1));
+        putDepthImbalance(add, s);
     }
 
     /** Distance of the layered price band from the touch (BBO on the layered side), in bps. */
@@ -257,6 +406,7 @@ public final class EnrichAnalyticsActivityImpl implements EnrichAnalyticsActivit
         double dMax = Math.abs(maxN.asDouble() - touch) / touch * 10_000.0;
         add.put("depth_from_touch_near_bps", BreakdownFmt.round(Math.min(dMin, dMax), 1));
         add.put("depth_from_touch_far_bps",  BreakdownFmt.round(Math.max(dMin, dMax), 1));
+        putDepthImbalance(add, s);
     }
 
     /** %-of-displayed-book removed across the withdrawal + how much had recovered after. */
@@ -277,10 +427,18 @@ public final class EnrichAnalyticsActivityImpl implements EnrichAnalyticsActivit
             long recTotal = recovery.totalBidSize() + recovery.totalAskSize();
             add.put("depth_recovery_pct", BreakdownFmt.round(recTotal / (double) beforeTotal * 100.0, 0));
         }
+        putDepthImbalance(add, before);
     }
 
     private static long epochNanos(final Instant t) {
         return t.getEpochSecond() * 1_000_000_000L + t.getNano();
+    }
+
+    /** Displayed depth imbalance at a snapshot: (bid − ask)/(bid + ask) ∈ [−1, 1]. */
+    private static void putDepthImbalance(final ObjectNode add, final BookSnapshotEngine.Snapshot s) {
+        if (s == null || !s.captured()) return;
+        long tb = s.totalBidSize(), ta = s.totalAskSize();
+        if (tb + ta > 0) add.put("book_depth_imbalance", BreakdownFmt.round((tb - ta) / (double) (tb + ta), 2));
     }
 
     private List<Selected> loadSelected(final Connection conn, final LocalDate date) throws Exception {

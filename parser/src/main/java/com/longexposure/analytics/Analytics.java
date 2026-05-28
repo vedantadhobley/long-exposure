@@ -201,4 +201,143 @@ public final class Analytics {
         if (trades <= 0) return Double.POSITIVE_INFINITY;
         return orders / (double) trades;
     }
+
+    // ─── volatility / price-path structure ────────────────────────────────────
+
+    /**
+     * Realized volatility over a price path: √(Σ squared log-returns) between
+     * consecutive positive prices. Unitless (a fraction; ×100 for %). The
+     * window's total realized move, not annualized. NaN if &lt;2 usable prices.
+     */
+    public static double realizedVolatility(final double[] prices) {
+        if (prices == null || prices.length < 2) return Double.NaN;
+        double ss = 0.0; int n = 0;
+        for (int i = 1; i < prices.length; i++) {
+            if (prices[i] > 0 && prices[i - 1] > 0) {
+                double r = Math.log(prices[i] / prices[i - 1]);
+                ss += r * r; n++;
+            }
+        }
+        return n == 0 ? Double.NaN : Math.sqrt(ss);
+    }
+
+    /**
+     * Bipower-variation jump ratio: {@code (RV − BV) / RV}, where RV = Σr² and
+     * BV = (π/2)·Σ|rᵢ||rᵢ₋₁|. ~0 = continuous diffusion; →1 = dominated by
+     * discrete jumps. Clamped to [0, 1]. NaN if &lt;3 returns or RV = 0.
+     */
+    public static double jumpRatio(final double[] returns) {
+        if (returns == null || returns.length < 3) return Double.NaN;
+        double rv = 0.0;
+        for (double r : returns) rv += r * r;
+        if (rv <= 0) return Double.NaN;
+        double bv = 0.0;
+        for (int i = 1; i < returns.length; i++) bv += Math.abs(returns[i]) * Math.abs(returns[i - 1]);
+        bv *= Math.PI / 2.0;
+        return Math.max(0.0, Math.min(1.0, (rv - bv) / rv));
+    }
+
+    // ─── concentration / breadth across a set (day-level) ─────────────────────
+
+    /** Herfindahl-Hirschman index: Σ(valueᵢ / total)² ∈ (0, 1]. 1 = all in one; →0 = even spread. */
+    public static double hhi(final double[] values) {
+        if (values == null || values.length == 0) return Double.NaN;
+        double total = 0.0;
+        for (double v : values) total += Math.max(v, 0);
+        if (total <= 0) return Double.NaN;
+        double h = 0.0;
+        for (double v : values) { double s = Math.max(v, 0) / total; h += s * s; }
+        return h;
+    }
+
+    /** Shannon entropy of a distribution, normalized to [0, 1] by log(k): 1 = uniform, 0 = concentrated. */
+    public static double normalizedEntropy(final double[] counts) {
+        if (counts == null || counts.length < 2) return Double.NaN;
+        double total = 0.0; int k = 0;
+        for (double c : counts) if (c > 0) { total += c; k++; }
+        if (total <= 0 || k < 2) return Double.NaN;
+        double h = 0.0;
+        for (double c : counts) if (c > 0) { double p = c / total; h -= p * Math.log(p); }
+        return h / Math.log(k);
+    }
+
+    // ─── temporal structure ───────────────────────────────────────────────────
+
+    /**
+     * Lag-1 autocorrelation of a series ∈ [−1, 1] — a periodicity / machine-cadence
+     * detector: regular inter-arrival gaps autocorrelate. NaN if &lt;3 points or
+     * zero variance.
+     */
+    public static double lag1Autocorrelation(final double[] x) {
+        if (x == null || x.length < 3) return Double.NaN;
+        double mean = 0.0; for (double v : x) mean += v; mean /= x.length;
+        double num = 0.0, den = 0.0;
+        for (int i = 0; i < x.length; i++) {
+            double d = x[i] - mean; den += d * d;
+            if (i > 0) num += d * (x[i - 1] - mean);
+        }
+        return den == 0 ? Double.NaN : num / den;
+    }
+
+    /**
+     * CUSUM change-point magnitude: the maximum absolute cumulative deviation
+     * from the series mean, normalized by (n · stddev). ~0 = stationary; larger
+     * = a sustained level shift somewhere in the series. NaN if &lt;3 points or
+     * zero variance.
+     */
+    public static double cusumShift(final double[] x) {
+        if (x == null || x.length < 3) return Double.NaN;
+        double mean = 0.0; for (double v : x) mean += v; mean /= x.length;
+        double var = 0.0; for (double v : x) { double d = v - mean; var += d * d; } var /= x.length;
+        double sd = Math.sqrt(var);
+        if (sd <= 0) return Double.NaN;
+        double cum = 0.0, maxAbs = 0.0;
+        for (double v : x) { cum += v - mean; maxAbs = Math.max(maxAbs, Math.abs(cum)); }
+        return maxAbs / (x.length * sd);
+    }
+
+    /**
+     * Hawkes branching-ratio estimate from the Fano factor (moment-based, not
+     * MLE): {@code n ≈ 1 − 1/√Fano} ∈ [0, 1) — the fraction of events
+     * "triggered" by prior events (self-excitation). A more interpretable
+     * framing of burstiness. NaN if Fano ≤ 1 (no excitation to estimate).
+     */
+    public static double branchingRatioFromFano(final double fano) {
+        if (Double.isNaN(fano) || fano <= 1.0) return Double.NaN;
+        return Math.min(0.999, 1.0 - 1.0 / Math.sqrt(fano));
+    }
+
+    // ─── signed-flow / impact (IEX-slice approximations — narrate with that caveat) ──
+
+    /** Order-flow imbalance: net signed displayed-size change ∈ [−1, 1]; +1 = all bid-side accumulation. */
+    public static double orderFlowImbalance(final double bidAdded, final double bidRemoved,
+                                            final double askAdded, final double askRemoved) {
+        double bid = bidAdded - bidRemoved;
+        double ask = askAdded - askRemoved;
+        double denom = Math.abs(bidAdded) + Math.abs(bidRemoved) + Math.abs(askAdded) + Math.abs(askRemoved);
+        return denom <= 0 ? Double.NaN : (bid - ask) / denom;
+    }
+
+    /** VPIN proxy: {@code |buy − sell| / (buy + sell)} ∈ [0, 1] over a volume window. IEX-slice approximation. */
+    public static double vpin(final double buyVolume, final double sellVolume) {
+        double total = buyVolume + sellVolume;
+        return total <= 0 ? Double.NaN : Math.abs(buyVolume - sellVolume) / total;
+    }
+
+    /**
+     * Kyle's λ: OLS slope of price change on signed volume (price impact per
+     * unit of one-sided flow). IEX-slice approximation. NaN if the inputs are
+     * mismatched, &lt;3 points, or signed volume has zero variance.
+     */
+    public static double kylesLambda(final double[] signedVolume, final double[] priceChange) {
+        if (signedVolume == null || priceChange == null
+                || signedVolume.length != priceChange.length || signedVolume.length < 3) return Double.NaN;
+        int n = signedVolume.length;
+        double mx = 0, my = 0;
+        for (int i = 0; i < n; i++) { mx += signedVolume[i]; my += priceChange[i]; }
+        mx /= n; my /= n;
+        double sxy = 0, sxx = 0;
+        for (int i = 0; i < n; i++) { double dx = signedVolume[i] - mx; sxy += dx * (priceChange[i] - my); sxx += dx * dx; }
+        return sxx == 0 ? Double.NaN : sxy / sxx;
+    }
 }

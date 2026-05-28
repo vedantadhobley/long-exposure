@@ -227,6 +227,14 @@ public final class LayeringScorer implements EventScorer {
         double fano = com.longexposure.analytics.Analytics.fanoFactor(
                 addNanos, Math.max(2, Math.min(50, cluster.size() / 5)));
         if (!Double.isNaN(fano)) breakdown.put("burstiness_fano", BreakdownFmt.round(fano, 2));
+        double selfExc = com.longexposure.analytics.Analytics.branchingRatioFromFano(fano);
+        if (!Double.isNaN(selfExc)) breakdown.put("self_excitation", BreakdownFmt.round(selfExc, 2));
+        if (addNanos.length >= 4) {
+            double[] gaps = new double[addNanos.length - 1];
+            for (int i = 1; i < addNanos.length; i++) gaps[i - 1] = addNanos[i] - addNanos[i - 1];
+            double ac = com.longexposure.analytics.Analytics.lag1Autocorrelation(gaps);
+            if (!Double.isNaN(ac)) breakdown.put("arrival_autocorr", BreakdownFmt.round(ac, 2));
+        }
         breakdown.put("density_class",
                 ordersPerLevel < 2.0 ? "sparse" :
                 ordersPerLevel < 5.0 ? "moderate" : "stacked");

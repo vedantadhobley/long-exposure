@@ -177,6 +177,10 @@ public final class VolumeDeviationScorer implements EventScorer {
             double pct = com.longexposure.analytics.Analytics.percentileRank(todayVol, window);
             if (mad > 0) breakdown.put("robust_z", BreakdownFmt.round(z, 1));
             if (!Double.isNaN(pct)) breakdown.put("percentile_rank", BreakdownFmt.round(pct, 0));
+            // Change-point on the symbol's own trailing volume series — did its
+            // volume regime shift over the window (a sustained step), vs a one-day spike?
+            double cp = com.longexposure.analytics.Analytics.cusumShift(window);
+            if (!Double.isNaN(cp)) breakdown.put("volume_regime_shift", BreakdownFmt.round(cp, 2));
         }
 
         ArrayNode sourceRefs = json.createArrayNode();
