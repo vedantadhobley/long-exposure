@@ -151,6 +151,13 @@ public final class HaltScorer implements EventScorer {
             breakdown.put("halt_end_session_phase",  BreakdownFmt.sessionPhase(haltEnd));
             breakdown.put("halt_end_phase_label",    BreakdownFmt.sessionPhaseLabel(haltEnd));
         }
+        // Pre-formatted GRAMMATICAL combination of the two phase labels into
+        // a single noun-phrase the LLM can use directly. Eliminates the
+        // "began in pre-market to midday" compound-stitch failure mode
+        // observed 2026-05-28 GMRS audit. Same structural-data-layer pattern
+        // as halt_reason_label and duration_humanized.
+        breakdown.put("halt_phase_span_label",
+                BreakdownFmt.haltPhaseSpan(haltStart, haltEnd));
 
         com.longexposure.scoring.SymbolFields.apply(breakdown, ctx, symbol);
 

@@ -49,4 +49,36 @@ class BreakdownFmtTest {
         assertEquals("0 seconds", BreakdownFmt.durationSecHumanized(0));
         assertEquals("unknown duration", BreakdownFmt.durationSecHumanized(-1));
     }
+
+    // ─── haltPhaseSpan — Phase 7 compound phase-label fix ──────────────────
+
+    @Test
+    void phaseSpanDifferentPhases() {
+        // 07:00 ET pre-market start, 13:30 ET midday end (different phases)
+        java.time.Instant preMarket = java.time.LocalDateTime.of(2026, 5, 12, 11, 0)
+                .atZone(java.time.ZoneOffset.UTC).toInstant();   // 07:00 ET
+        java.time.Instant midday = java.time.LocalDateTime.of(2026, 5, 12, 17, 30)
+                .atZone(java.time.ZoneOffset.UTC).toInstant();   // 13:30 ET
+        assertEquals("starting in pre-market trading and resuming around midday",
+                BreakdownFmt.haltPhaseSpan(preMarket, midday));
+    }
+
+    @Test
+    void phaseSpanSamePhase() {
+        // Both in midday — should be "lasting through midday"
+        java.time.Instant t1 = java.time.LocalDateTime.of(2026, 5, 12, 16, 30)
+                .atZone(java.time.ZoneOffset.UTC).toInstant();   // 12:30 ET (midday)
+        java.time.Instant t2 = java.time.LocalDateTime.of(2026, 5, 12, 17, 30)
+                .atZone(java.time.ZoneOffset.UTC).toInstant();   // 13:30 ET (still midday)
+        assertEquals("lasting through midday",
+                BreakdownFmt.haltPhaseSpan(t1, t2));
+    }
+
+    @Test
+    void phaseSpanUnbounded() {
+        java.time.Instant preMarket = java.time.LocalDateTime.of(2026, 5, 12, 11, 0)
+                .atZone(java.time.ZoneOffset.UTC).toInstant();   // 07:00 ET
+        assertEquals("starting in pre-market trading with no resume in the window",
+                BreakdownFmt.haltPhaseSpan(preMarket, null));
+    }
 }

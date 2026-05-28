@@ -240,4 +240,56 @@ public final class BreakdownFmt {
             default              -> phase;
         };
     }
+
+    /**
+     * Pre-formatted GRAMMATICAL combination of halt start + end phase labels
+     * into a single noun-phrase the LLM can use verbatim. Eliminates the
+     * "began in pre-market to midday" compound-stitch failure mode where the
+     * model glues two phase labels without a connector verb (observed
+     * 2026-05-28 GMRS audit).
+     *
+     * <p>Patterns by phase pair:
+     * <ul>
+     *   <li>same phase    → "lasting {phase}" (e.g. "lasting through midday")
+     *   <li>different     → "starting {start} and resuming {end}"
+     *   <li>unbounded end → "{start} (no resume in window)"
+     * </ul>
+     */
+    public static String haltPhaseSpan(final Instant start, final Instant endOrNull) {
+        if (start == null) return null;
+        String startLabel = sessionPhaseLabel(start);
+        if (endOrNull == null) {
+            return "starting " + startLabel + " with no resume in the window";
+        }
+        String endLabel = sessionPhaseLabel(endOrNull);
+        if (startLabel != null && startLabel.equals(endLabel)) {
+            // Same phase — "lasting through {phase}" reads cleaner than
+            // "starting in X and resuming in X".
+            return "lasting " + sessionThroughLabel(start);
+        }
+        // "starting {start} and resuming {end}" — the connector "and resuming"
+        // forces grammatical wholeness so the model can't glue the labels
+        // without it.
+        return "starting " + startLabel + " and resuming " + endLabel;
+    }
+
+    /**
+     * Phase label as a "through {phase}" phrase for same-phase halts.
+     * "lasting through midday" / "lasting through pre-market trading".
+     */
+    private static String sessionThroughLabel(final Instant utc) {
+        String phase = sessionPhase(utc);
+        if (phase == null) return "an unknown period";
+        return switch (phase) {
+            case "overnight"     -> "outside regular trading hours";
+            case "pre_market"    -> "through pre-market trading";
+            case "opening_5min"  -> "through the opening minutes of regular trading";
+            case "early_session" -> "through the early session";
+            case "midday"        -> "through midday";
+            case "late_session"  -> "through the late session";
+            case "closing_5min"  -> "through the final minutes before the close";
+            case "post_market"   -> "through post-market trading";
+            default              -> "through " + phase;
+        };
+    }
 }
