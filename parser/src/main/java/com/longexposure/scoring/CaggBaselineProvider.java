@@ -120,6 +120,85 @@ public final class CaggBaselineProvider implements BaselineProvider {
         return out;
     }
 
+    // ─── Order-lifetime baselines (daily_lifetime_by_symbol) ─────────────────
+    // This table uses a plain DATE `day` column (populated by the materialize
+    // step), not the cagg's UTC-midnight time_bucket — so these bind LocalDate
+    // directly rather than via utcMidnight().
+
+    @Override
+    public Map<String, DayLifetime> dayLifetimes(final LocalDate day) {
+        String sql = "SELECT symbol, avg_lifetime_ns, order_count FROM daily_lifetime_by_symbol WHERE day = ?";
+        Map<String, DayLifetime> out = new HashMap<>(16_384);
+        try (PreparedStatement st = conn.prepareStatement(sql)) {
+            st.setObject(1, day);
+            try (ResultSet rs = st.executeQuery()) {
+                while (rs.next()) {
+                    out.put(rs.getString("symbol"),
+                            new DayLifetime(rs.getLong("avg_lifetime_ns"), rs.getLong("order_count")));
+                }
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("dayLifetimes query failed for day=" + day, e);
+        }
+        return out;
+    }
+
+    @Override
+    public Map<String, TrailingLifetime> trailingLifetimeBaselines(final LocalDate day, final int windowDays) {
+        String sql = """
+                SELECT symbol,
+                       percentile_cont(0.5) WITHIN GROUP (ORDER BY avg_lifetime_ns) AS med_life,
+                       count(*) AS days
+                FROM daily_lifetime_by_symbol
+                WHERE day >= ? AND day < ?
+                GROUP BY symbol
+                """;
+        Map<String, TrailingLifetime> out = new HashMap<>(16_384);
+        try (PreparedStatement st = conn.prepareStatement(sql)) {
+            st.setObject(1, day.minusDays(windowDays));
+            st.setObject(2, day);
+            try (ResultSet rs = st.executeQuery()) {
+                while (rs.next()) {
+                    out.put(rs.getString("symbol"),
+                            new TrailingLifetime(rs.getDouble("med_life"), rs.getInt("days")));
+                }
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("trailingLifetimeBaselines query failed for day=" + day, e);
+        }
+        return out;
+    }
+
+    @Override
+    public Map<String, double[]> trailingLifetimeWindows(final LocalDate day, final int windowDays) {
+        String sql = """
+                SELECT symbol, avg_lifetime_ns
+                FROM daily_lifetime_by_symbol
+                WHERE day >= ? AND day < ?
+                ORDER BY symbol
+                """;
+        Map<String, List<Double>> acc = new HashMap<>(16_384);
+        try (PreparedStatement st = conn.prepareStatement(sql)) {
+            st.setObject(1, day.minusDays(windowDays));
+            st.setObject(2, day);
+            try (ResultSet rs = st.executeQuery()) {
+                while (rs.next()) {
+                    acc.computeIfAbsent(rs.getString("symbol"), k -> new ArrayList<>())
+                       .add((double) rs.getLong("avg_lifetime_ns"));
+                }
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("trailingLifetimeWindows query failed for day=" + day, e);
+        }
+        Map<String, double[]> out = new HashMap<>(acc.size() * 2);
+        for (Map.Entry<String, List<Double>> e : acc.entrySet()) {
+            double[] arr = new double[e.getValue().size()];
+            for (int i = 0; i < arr.length; i++) arr[i] = e.getValue().get(i);
+            out.put(e.getKey(), arr);
+        }
+        return out;
+    }
+
     private static Timestamp utcMidnight(final LocalDate day) {
         return Timestamp.from(day.atStartOfDay().toInstant(ZoneOffset.UTC));
     }

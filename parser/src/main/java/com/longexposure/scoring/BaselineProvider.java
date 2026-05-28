@@ -45,9 +45,37 @@ public interface BaselineProvider {
      */
     Map<String, double[]> trailingVolumeWindows(LocalDate day, int windowDays);
 
+    // ─── Order-lifetime baselines (for the inter-day TimeInBookDriftScorer) ──
+    // Backed by daily_lifetime_by_symbol (one row per symbol per day: the day's
+    // average terminal-order lifetime, populated by MaterializeOrderLifecycle).
+    // Same bulk three-method shape as the volume baselines above.
+
+    /** Per-symbol average order-lifetime (ns) + terminal-order count on a single day. */
+    Map<String, DayLifetime> dayLifetimes(LocalDate day);
+
+    /**
+     * Per-symbol trailing lifetime baseline over {@code [day - windowDays, day)}:
+     * the <em>median</em> of prior days' average lifetimes + the day-count
+     * (median so one quiet/frantic day doesn't wash out the norm).
+     */
+    Map<String, TrailingLifetime> trailingLifetimeBaselines(LocalDate day, int windowDays);
+
+    /**
+     * Raw per-symbol daily average-lifetimes over {@code [day - windowDays, day)}
+     * — the values the drift stats (median, MAD, percentile rank) are derived
+     * from in Java via {@code Analytics}.
+     */
+    Map<String, double[]> trailingLifetimeWindows(LocalDate day, int windowDays);
+
     /** A symbol's volume + trade count on one day. */
     record DayVolume(long volume, long tradeCount) {}
 
     /** A symbol's trailing-window median baseline + the day-count it was computed over. */
     record TrailingVolume(double medianVolume, double medianTradeCount, int dayCount) {}
+
+    /** A symbol's average order-lifetime (ns) + terminal-order count on one day. */
+    record DayLifetime(long avgLifetimeNs, long orderCount) {}
+
+    /** A symbol's trailing-window median average-lifetime + the day-count. */
+    record TrailingLifetime(double medianLifetimeNs, int dayCount) {}
 }

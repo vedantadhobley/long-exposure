@@ -489,6 +489,24 @@ CREATE INDEX IF NOT EXISTS order_lifecycle_short_lived_idx
 CREATE INDEX IF NOT EXISTS order_lifecycle_order_id_idx
     ON order_lifecycle (order_id);
 
+-- ─── Per-symbol-per-day order-lifetime baseline ──────────────────────────────
+-- Populated by MaterializeOrderLifecycleActivity right after it (re)builds
+-- order_lifecycle for the day (one cheap GROUP BY over the day it just built).
+-- A small standard table (not a cagg — order_lifecycle is rebuilt each day,
+-- which is quirky for continuous aggregates) that persists indefinitely: the
+-- durable trailing baseline the inter-day TimeInBookDriftScorer reads ("order
+-- lifetime collapsed vs its 2-week norm"). RetentionSweep never drops it.
+-- avg, not median: median needs timescaledb_toolkit (absent on this image);
+-- avg-drift still detects regime shifts. Upgrade to median post-launch if the
+-- toolkit is installed.
+CREATE TABLE IF NOT EXISTS daily_lifetime_by_symbol (
+    day              DATE    NOT NULL,
+    symbol           TEXT    NOT NULL,
+    avg_lifetime_ns  BIGINT  NOT NULL,
+    order_count      BIGINT  NOT NULL,
+    PRIMARY KEY (day, symbol)
+);
+
 -- ─── Scored events (per-event scoring output) ────────────────────────────────
 -- Written by ScoreEventsActivity after the validate triangle passes. Each row
 -- represents one "thing worth narrating" — could be a single source row

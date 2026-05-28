@@ -99,6 +99,12 @@ public final class MaterializeOrderLifecycleActivityImpl implements MaterializeO
             currentStage.set("materialize_join");
             rowsWritten = doMaterialize(conn, tradingDate);
             conn.commit();
+
+            // Durable per-symbol lifetime baseline for the inter-day
+            // TimeInBookDriftScorer — one cheap GROUP BY over the rows just built.
+            currentStage.set("lifetime_baseline");
+            populateLifetimeBaseline(conn, tradingDate);
+            conn.commit();
         } catch (Exception e) {
             throw new RuntimeException("materializeOrderLifecycle failed for date=" + tradingDate, e);
         } finally {
@@ -208,6 +214,33 @@ public final class MaterializeOrderLifecycleActivityImpl implements MaterializeO
             st.setTimestamp(6, lower); st.setTimestamp(7, upper);  // orders_add window
 
             return st.executeLargeUpdate();
+        }
+    }
+
+    /**
+     * Upsert the per-symbol average order-lifetime for the day into
+     * {@code daily_lifetime_by_symbol} — the durable trailing baseline the
+     * inter-day {@code TimeInBookDriftScorer} reads. One GROUP BY over the
+     * {@code order_lifecycle} rows just built (terminal orders only;
+     * {@code lifetime_ns IS NULL} = still-open orders are excluded). Idempotent
+     * (upsert by (day, symbol)), so a re-materialize refreshes the row.
+     */
+    private static void populateLifetimeBaseline(final Connection conn, final LocalDate tradingDate)
+            throws Exception {
+        final String sql = """
+                INSERT INTO daily_lifetime_by_symbol (day, symbol, avg_lifetime_ns, order_count)
+                SELECT trading_date, symbol, AVG(lifetime_ns)::BIGINT, COUNT(lifetime_ns)
+                  FROM order_lifecycle
+                 WHERE trading_date = ? AND lifetime_ns IS NOT NULL
+                 GROUP BY trading_date, symbol
+                ON CONFLICT (day, symbol) DO UPDATE
+                   SET avg_lifetime_ns = EXCLUDED.avg_lifetime_ns,
+                       order_count     = EXCLUDED.order_count
+                """;
+        try (PreparedStatement st = conn.prepareStatement(sql)) {
+            st.setObject(1, tradingDate);
+            long n = st.executeLargeUpdate();
+            LOG.info("lifetime baseline upserted  date={} symbols={}", tradingDate, n);
         }
     }
 
