@@ -18,7 +18,7 @@ Thirteen workflows registered on task queue `long-exposure-daily-pipeline`. The 
 | `ParseWorkflow` | child of DailyPipeline + ad-hoc | Parses the DPLS feed into 13 hypertables via JDBC COPY. Idempotent (pre-cleans by trading_date). |
 | `ValidateWorkflow` | child of DailyPipeline + ad-hoc | Runs the 3 validators in parallel and upserts `validation_runs`. Returns the per-leg result for the parent to record. |
 | `MaterializeWorkflow` | ad-hoc only | Builds the `order_lifecycle` table for a date whose DPLS data is already in Postgres. (DailyPipeline invokes the materialize step via `ScoreWorkflow`, not this workflow, but this exists for ad-hoc backfilling.) |
-| `ScoreWorkflow` | child of DailyPipeline + ad-hoc | Refresh baselines cagg → materialize lifecycle → run scoring (8 scorers) → enrich co-occurrence → select top-N. |
+| `ScoreWorkflow` | child of DailyPipeline + ad-hoc | Refresh baselines cagg → materialize lifecycle + lifetime baseline → run scoring (9 scorers: 7 intraday + 2 inter-day) → enrich co-occurrence → enrich analytics (windowed + book-replay) → select top-N. |
 | `SelectWorkflow` | ad-hoc only | Just SelectTopEvents — pulls top-N from existing `scored_events` to `selected_events`. For iterating on per-scorer caps without re-scoring. |
 | `NarrateWorkflow` | child of DailyPipeline + ad-hoc | DESCRIBE stage. Two-pass extract → render → verify against the LLM. Writes `narratives`. **LLM-bearing.** |
 | `InterpretWorkflow` | child of DailyPipeline + ad-hoc | INTERPRET stage. Per-event LLM call with surrounding ±60-sec wire-data window. Writes `interpretations`. **LLM-bearing.** |
@@ -114,7 +114,7 @@ flowchart TD
     ScoreGate -->|no| Skip[skip scoring +<br/>cleanup]
     ScoreGate -->|yes| Refresh[RefreshBaselines<br/>refresh daily_volume cagg<br/>for the trading day]
     Refresh --> Materialize[MaterializeOrderLifecycle<br/>orders_add ⨝ orders_delete<br/>once → order_lifecycle]
-    Materialize --> Score[ScoreEvents<br/>8 scorers → scored_events<br/>PostCancel + Layering read order_lifecycle]
+    Materialize --> Score[ScoreEvents<br/>9 scorers → scored_events<br/>PostCancel + Layering read order_lifecycle]
     Score --> Select[SelectTopEvents<br/>percentile-rank → selected_events]
     Select --> Narrate[NarrateEvents — DESCRIBE<br/>two-pass extract+render+verify, retry×3<br/>→ narratives]
     Narrate --> Interpret[InterpretEvents — INTERPRET<br/>per-event surrounding-context LLM, retry×3<br/>→ interpretations]

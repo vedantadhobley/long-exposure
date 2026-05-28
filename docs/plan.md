@@ -10,7 +10,7 @@ This file is now primarily the **sprint-by-sprint history** of the build. For cu
 
 ## ⏯ Current state (2026-05-27)
 
-Full LLM pipeline complete end-to-end including the weekly rollup: `parse → validate → materialize → refresh-baselines → score (8 scorers) → select → DESCRIBE → INTERPRET → SYNTHESIZE → AGGREGATE`, with content-addressed compute-skip + verifier-driven retry, durable 400-day cagg baselines, and week-aligned 2-week retention. Two full weeks loaded + uniform (05-08 + 05-11→15 + 05-18→22). Next: frontend integration in `vedanta-systems`, then prod bring-up. See `docs/launch-sprint.md` for the day-by-day plan; the dated sections below are preserved as build history.
+Full LLM pipeline complete end-to-end including the weekly rollup: `parse → validate → materialize → refresh-baselines → score (9 scorers) → enrich co-occurrence → enrich analytics → select → DESCRIBE → INTERPRET → SYNTHESIZE → AGGREGATE`, with content-addressed compute-skip + verifier-driven retry, durable 400-day cagg baselines, the analytics suite (slippage / reversion / OFI / order-to-trade / burstiness / depth-imbalance / VPIN / HHI / display-ratio / %-of-book / …) feeding every breakdown, and week-aligned 2-week retention. Two full weeks loaded + uniform (05-08 + 05-11→15 + 05-18→22). Next: overnight 11-day relaunch on the new analytics + the second inter-day scorer, then frontend integration in `vedanta-systems`, then prod bring-up. See `docs/launch-sprint.md` for the day-by-day plan; the dated sections below are preserved as build history.
 
 ## ⏯ Where we were (2026-05-11 late session — historical)
 
@@ -90,7 +90,7 @@ Bootstrap problem: on day-1-live we have zero history in DB, so every baseline i
 
 ## Days 14–17 — Event scoring
 
-> **✅ done (2026-05-16, extended through 2026-05-25).** 8 push-model `EventScorer`s shipped (7 intraday + 1 inter-day `volume_deviation`). The design evolved from the original "significance dimensions" sketch into per-pattern scorers + percentile-rank selection; see `docs/scoring-and-narration.md`.
+> **✅ done (2026-05-16, extended through 2026-05-27).** 9 push-model `EventScorer`s shipped (7 intraday + 2 inter-day: `volume_deviation`, `time_in_book_drift`). The design evolved from the original "significance dimensions" sketch into per-pattern scorers + percentile-rank selection; see `docs/scoring-and-narration.md`. Plus the microstructure analytics suite (`docs/analytics-catalog.md`) — `Analytics` pure-function layer + `EnrichAnalyticsActivity` (windowed + book-replay) + day-level aggregates surfaced into every breakdown.
 
 - [x] `scoring.EventScorer` (push-model interface) + `EventScorerRegistry`
 - [x] Per-pattern intraday scorers: halt, large_trade, sweep, post_cancel_cluster, layering, iceberg, liquidity_withdrawal
@@ -110,7 +110,7 @@ Bootstrap problem: on day-1-live we have zero history in DB, so every baseline i
 
 ## Days 20–21 — Temporal + API
 
-> **✅ done (2026-05-13, extended through 2026-05-27).** 13 workflows / 22 activities on the daily-pipeline task queue. **Note:** there is no FastAPI in this repo — the HTTP API moved to vedanta-systems' unified Express service (decided 2026-05-10, `decisions.md`); this repo ships only the worker.
+> **✅ done (2026-05-13, extended through 2026-05-27).** 13 workflows / 24 activities on the daily-pipeline task queue. **Note:** there is no FastAPI in this repo — the HTTP API moved to vedanta-systems' unified Express service (decided 2026-05-10, `decisions.md`); this repo ships only the worker.
 
 - [x] `Main.java` → `WorkerMain.start()` Temporal worker registration (replaces the Day-1 stub)
 - [x] Workflow + activity classes — full layout in `docs/temporal-design.md`

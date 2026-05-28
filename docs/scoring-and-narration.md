@@ -5,7 +5,7 @@ Distilled from the project-positioning + design discussion (captured 2026-05-11)
 > **Naming note (2026-05-22).** This doc was written when the pipeline stages were named "Layer 1" (scoring), "Layer 2" (per-event narration), "Layer 3" (daily synthesis), etc. The canonical names are now **DETECT / DESCRIBE / SYNTHESIZE / AGGREGATE** and the new per-event interpretation pass is **INTERPRET**. See [`pipeline-architecture.md`](pipeline-architecture.md) for the canonical pipeline-stage vocabulary. The "Layer N" references below are preserved as the doc was originally written; treat them as Layer 1 = DETECT, Layer 2 = DESCRIBE, Layer 3 = SYNTHESIZE, Layer 4 = AGGREGATE.
 
 > **Status (2026-05-27):**
-> - **DETECT (scoring + selection)** ✅ shipped. **8 scorers** — 7 intraday + 1 inter-day (`volume_deviation`) — + `SelectTopEventsActivity`. ~90–170 narratable events per trading day. Derived-field enrichment (2026-05-22) pre-computes every analytical ratio in the breakdown, eliminating the arithmetic-error failure mode by construction.
+> - **DETECT (scoring + selection)** ✅ shipped. **9 scorers** — 7 intraday + 2 inter-day (`volume_deviation`, `time_in_book_drift` 2026-05-27) — + `SelectTopEventsActivity`. ~90–170 narratable events per trading day. Derived-field enrichment (2026-05-22) pre-computes every analytical ratio in the breakdown, eliminating the arithmetic-error failure mode by construction. **Microstructure analytics suite (2026-05-27)** — shared pure-function `Analytics` layer + post-select `EnrichAnalyticsActivity` (windowed + book-replay) + day-level aggregates feed the full grounded metric menu (order-to-trade, OFI, slippage + reversion, effective spread, realized vol, burstiness, depth-imbalance, %-of-book + recovery, display-ratio, robust-z/percentile, HHI/entropy, slice-caveated VPIN/Kyle's-λ) into every breakdown; cheap-validated on 05-08/05-22; see `docs/analytics-catalog.md`.
 > - **Symbol enrichment** ✅ shipped. `symbols` reference table populated weekly from NASDAQ public listings + SEC EDGAR canonical names + IEX SecurityDirectory. `SymbolFields.apply()` joins company name, exchange, ETF flag, round lot, prev close into every breakdown.
 > - **DESCRIBE (two-pass narration)** ✅ shipped. `BlueprintExtractor` → `ProseRenderer` → pure-code `GroundingVerifier` chain, **verifier-driven retry ×3** (2026-05-27). ~100% verifier-passed on the uniform 2-week dataset (was 99.39% pre-retry).
 > - **INTERPRET (per-event interpretation)** ✅ shipped 2026-05-22. `InterpretEventActivity` + `InterpretWorkflow` + `InterpretationVerifier` + `TradeWindow` helper + `interpretations` table. Per-event LLM call with ±60-sec pre/post wire-data window. ~100% verifier-passed post-retry. Full design in [`interpretation-design.md`](interpretation-design.md).
@@ -38,7 +38,7 @@ The discipline is "each tier reads only the structured digest of the tier below,
 
 ## The scorers in plain English
 
-> The 7 **intraday** scorers below are the original detection vocabulary. An 8th, **inter-day** scorer — `volume_deviation` (today's per-symbol volume vs the trailing-window median, via `BaselineProvider`) — shipped 2026-05-25; see "Connecting intraday and interday" + the scoring-architecture section. `TimeInBookDriftScorer` is the next inter-day one (not built).
+> The 7 **intraday** scorers below are the original detection vocabulary. Two **inter-day** scorers, both via `BaselineProvider`: `volume_deviation` (2026-05-25 — today's per-symbol volume vs the trailing-window median, reading the 400-day `daily_volume_by_symbol` cagg) and `time_in_book_drift` (2026-05-27 — today's per-symbol average order-lifetime vs its trailing median, collapse-or-stretch, reading the durable `daily_lifetime_by_symbol` baseline the materialize step upserts). See "Connecting intraday and interday" + the scoring-architecture section.
 
 The detection vocabulary of the whole project. Every narrated event falls into one of these seven buckets. High-scoring events may get *enriched* at scoring time with deterministic summary stats about co-occurring same-symbol events of OTHER types whose intervals fall inside the parent's window — this is the "nested signals inside signals" mechanism (a liquidity_withdrawal absorbing the post_cancel/layering events that nested within its duration). See `## Scoring architecture` below.
 
@@ -278,11 +278,13 @@ status_events, etc.              │                          │               
         │     └───────────────┘      └──────────────────┘       └───────────────────┘
         │              ▲
         │              │
-   cagg │     ┌───────────────┐
-   ─────┴────▶│ VolumeDevia-  │   (✅ shipped 2026-05-25; reads the daily_volume_by_symbol
-   daily_     │  tionScorer   │    cagg via BaselineProvider; RefreshBaselinesActivity keeps
-   volume     │  (inter-day)  │    it current. TimeInBookDriftScorer is the next, not built.)
-              └───────────────┘
+   cagg +    │     ┌───────────────┐
+   table     │     │ VolumeDevia-  │   (✅ both shipped: VolumeDeviation 2026-05-25 reads the
+   ──────────┴────▶│  tionScorer + │    daily_volume_by_symbol cagg; TimeInBookDrift 2026-05-27
+   daily_volume    │ TimeInBookDr- │    reads daily_lifetime_by_symbol — both via BaselineProvider.
+   daily_lifetime  │  iftScorer    │    RefreshBaselinesActivity keeps the cagg current; the
+                   │  (inter-day)  │    materialize step upserts the lifetime baseline.)
+                   └───────────────┘
 ```
 
 Raw events live in the existing 13 hypertables and don't move. Scored

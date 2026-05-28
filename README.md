@@ -389,8 +389,8 @@ DailyPipelineWorkflow
   ├── ParseWorkflow         (DPLS → 13 hypertables via JDBC COPY)
   ├── ValidateWorkflow      (runs in parallel with Parse; 3 cross-check legs:
   │                          DPLS↔DEEP price-level, DPLS→TOPS BBO, DEEP→TOPS BBO)
-  ├── ScoreWorkflow         (RefreshBaselines → MaterializeOrderLifecycle → 8 scorers
-  │                          → EnrichWithCoOccurrence → SelectTopEvents)
+  ├── ScoreWorkflow         (RefreshBaselines → MaterializeOrderLifecycle → 9 scorers
+  │                          → EnrichWithCoOccurrence → EnrichAnalytics → SelectTopEvents)
   ├── NarrateWorkflow       (DESCRIBE — per-event fan-out, 2-concurrent, verifier-retry ×3)
   ├── InterpretWorkflow     (INTERPRET — per-event surrounding-context LLM, verifier-retry ×3)
   ├── SynthesizeDayWorkflow (SYNTHESIZE — one LLM call across the day's events)
@@ -399,7 +399,7 @@ DailyPipelineWorkflow
   └── CleanupWorkflow       (delete .pcap.gz + week-aligned 2-week retention sweep)
 ```
 
-Each phase is its own child workflow, independently invokable for replay or backfill. The four LLM-bearing phases (DESCRIBE / INTERPRET / SYNTHESIZE / AGGREGATE) are strictly sequential — they share `llama-large.joi`'s 2 GPU slots, so only one LLM workflow runs at a time. Per-activity retries, heartbeats, and start-to-close timeouts. Full layout including all 22 activities + their retry policies in [`docs/temporal-design.md`](docs/temporal-design.md).
+Each phase is its own child workflow, independently invokable for replay or backfill. The four LLM-bearing phases (DESCRIBE / INTERPRET / SYNTHESIZE / AGGREGATE) are strictly sequential — they share `llama-large.joi`'s 2 GPU slots, so only one LLM workflow runs at a time. Per-activity retries, heartbeats, and start-to-close timeouts. Full layout including all 24 activities + their retry policies in [`docs/temporal-design.md`](docs/temporal-design.md).
 
 Ancillary workflows on the same task queue:
 
@@ -469,9 +469,9 @@ The original 22-day plan compressed substantially. Current state (2026-05-27):
 
 ✅ **Storage** (2026-05-12). 13 wire-format hypertables, `order_lifecycle` derived hypertable for sub-second PostCancel/Layering scans, 7 standard tables, `daily_volume_by_symbol` continuous aggregate. End-to-end: 364 M rows ingested in 35:07 (~174 K rows/sec) via JDBC `COPY`.
 
-✅ **Temporal pipeline** (2026-05-13, extended through 2026-05-27). 13 workflows on the daily-pipeline task queue, 22 activities. Per-activity retry policies, heartbeats, start-to-close timeouts. Idempotent on pipeline_run with pre-clean by trading_date.
+✅ **Temporal pipeline** (2026-05-13, extended through 2026-05-27). 13 workflows on the daily-pipeline task queue, 24 activities. Per-activity retry policies, heartbeats, start-to-close timeouts. Idempotent on pipeline_run with pre-clean by trading_date.
 
-✅ **Scoring + selection** (2026-05-16). 8 scorers — 7 intraday (halt, large_trade, sweep, post_cancel_cluster, layering, iceberg, liquidity_withdrawal) + 1 inter-day (`volume_deviation`, 2026-05-25) — implementing push-model `EventScorer`. Selection via within-scorer percentile rank → ~90–170 narratable events per trading day.
+✅ **Scoring + selection** (2026-05-16, extended through 2026-05-27). 9 scorers — 7 intraday (halt, large_trade, sweep, post_cancel_cluster, layering, iceberg, liquidity_withdrawal) + 2 inter-day (`volume_deviation` 2026-05-25; `time_in_book_drift` 2026-05-27 reading a durable `daily_lifetime_by_symbol` baseline) — implementing push-model `EventScorer`. Selection via within-scorer percentile rank → ~90–170 narratable events per trading day. A shared pure-function `com.longexposure.analytics.Analytics` layer + post-select `EnrichAnalyticsActivity` (windowed + book-replay) feeds genuinely sophisticated grounded metrics into every breakdown — order-to-trade ratio, OFI, slippage + reversion, effective spread, realized vol, burstiness, depth-imbalance, % of book removed + recovery, iceberg display-ratio, robust-z/percentile, HHI/entropy, and slice-caveated VPIN/Kyle's-λ. See [`docs/analytics-catalog.md`](docs/analytics-catalog.md).
 
 ✅ **Symbol enrichment** (2026-05-18, expanded 2026-05-21). `RefreshSymbolsWorkflow` pulls from three sources: NASDAQ public listings, SEC EDGAR (canonical company names), and the local IEX SecurityDirectory. `CompanyNameNormalizer` handles the long tail.
 
@@ -493,7 +493,7 @@ The original 22-day plan compressed substantially. Current state (2026-05-27):
 
 🛠 **Public launch prep** (in progress). Frontend integration into the `vedanta-systems` portal + whitepaper.
 
-📋 **Queued post-launch.** `TimeInBookDriftScorer` (second inter-day scorer, reuses `BaselineProvider`); monthly numeric + prose rollup tiers (need months of history); the Layer-N → function-name doc vocabulary migration.
+📋 **Queued post-launch.** Monthly numeric + prose rollup tiers (need months of history); the Layer-N → function-name doc vocabulary migration; assessing per-metric meaningfulness of VPIN/Kyle's-λ on the IEX slice from the relaunch data.
 
 See [`docs/plan.md`](docs/plan.md) for sprint-by-sprint history and [`docs/todo.md`](docs/todo.md) for the active work list.
 
