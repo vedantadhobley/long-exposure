@@ -249,7 +249,10 @@ public final class IcebergScorer implements EventScorer {
 
         com.longexposure.scoring.SymbolFields.apply(breakdown, ctx, first.symbol);
 
-        double score = Math.log10(Math.max(totalShares, 1)) * run.size();
+        // Phase 7c TOD weight: iceberg anchored at first fill (when the
+        // pattern became detectable on the wire).
+        double score = Math.log10(Math.max(totalShares, 1)) * run.size()
+                       * BreakdownFmt.timeOfDayWeight(first.ts);
 
         return new ScoredEvent(
                 ctx.tradingDate(),

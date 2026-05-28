@@ -243,7 +243,19 @@ public final class SweepScorer implements EventScorer {
 
         com.longexposure.scoring.SymbolFields.apply(breakdown, ctx, first.symbol);
 
-        double score = Math.log10(Math.max(notional, 1.0)) * distinctLevels;
+        // Phase 7f (formula rebalance, 2026-05-28 audit): the prior
+        // `log10(notional) × levels` over-indexed on level count — a $42K
+        // LDOS sweep across 13 levels outranked a $458K CSX sweep across
+        // 9 levels because levels multiplied the log-scale notional.
+        // Switched to additive form: log10(notional) + log10(levels) so
+        // both contribute on the same logarithmic scale. Within-scorer
+        // ordering shifts toward notional-dominant events without losing
+        // the multi-level signature that defines a sweep.
+        //
+        // Phase 7c: TOD weight applied uniformly across all intraday scorers.
+        double score = (Math.log10(Math.max(notional, 1.0))
+                      + Math.log10(Math.max(distinctLevels, 1)))
+                      * BreakdownFmt.timeOfDayWeight(first.ts);
 
         return new ScoredEvent(
                 ctx.tradingDate(),

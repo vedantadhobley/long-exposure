@@ -168,7 +168,10 @@ public final class LargeTradeScorer implements EventScorer {
             breakdown.put("implied_round_lots", size / roundLot);
         }
 
-        double score = Math.log10(notionalDollars);
+        // Time-of-day weight (Phase 7c): gentle ±15% multiplier weighting
+        // open/close events higher than midday/overnight. Applies uniformly
+        // across all intraday scorers.
+        double score = Math.log10(notionalDollars) * BreakdownFmt.timeOfDayWeight(ts);
 
         return new ScoredEvent(
                 ctx.tradingDate(),

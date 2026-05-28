@@ -242,6 +242,46 @@ public final class BreakdownFmt {
     }
 
     /**
+     * Time-of-day score multiplier in the [0.80, 1.10] range — gently
+     * weights events at the open/close higher than midday/overnight events.
+     * Used uniformly across all INTRADAY scorers via
+     * {@code score = baseScore × timeOfDayWeight(eventTs)}; inter-day scorers
+     * (volume_deviation, time_in_book_drift) skip this since their scores
+     * have day-level semantics.
+     *
+     * <p>Weights (decided 2026-05-28 evening):
+     * <ul>
+     *   <li>overnight     0.80 — outside extended hours, low signal-to-noise
+     *   <li>pre_market    0.95 — quieter, fewer participants paying attention
+     *   <li>opening_5min  1.10 — high-attention window
+     *   <li>early_session 1.02 — mild lift on the morning push
+     *   <li>midday        0.98 — baseline
+     *   <li>late_session  1.05 — quiet midday's wake; pre-close positioning
+     *   <li>closing_5min  1.10 — high-attention window, mirror of opening
+     *   <li>post_market   0.95 — wind-down
+     * </ul>
+     *
+     * <p>Gentle by design (max swing ±15% × baseline) so this nudges the
+     * within-scorer ranking toward attention-windows without dominating
+     * pattern-specific signal (level count, share volume, duration).
+     */
+    public static double timeOfDayWeight(final Instant utc) {
+        String phase = sessionPhase(utc);
+        if (phase == null) return 1.0;
+        return switch (phase) {
+            case "overnight"     -> 0.80;
+            case "pre_market"    -> 0.95;
+            case "opening_5min"  -> 1.10;
+            case "early_session" -> 1.02;
+            case "midday"        -> 0.98;
+            case "late_session"  -> 1.05;
+            case "closing_5min"  -> 1.10;
+            case "post_market"   -> 0.95;
+            default              -> 1.0;
+        };
+    }
+
+    /**
      * Pre-formatted GRAMMATICAL combination of halt start + end phase labels
      * into a single noun-phrase the LLM can use verbatim. Eliminates the
      * "began in pre-market to midday" compound-stitch failure mode where the

@@ -267,7 +267,9 @@ public final class LayeringScorer implements EventScorer {
 
         com.longexposure.scoring.SymbolFields.apply(breakdown, ctx, first.symbol);
 
-        double score = Math.log10(Math.max(totalShares, 1)) * distinctLevels;
+        // Phase 7c TOD weight: layering anchored at first order in the cluster.
+        double score = Math.log10(Math.max(totalShares, 1)) * distinctLevels
+                       * BreakdownFmt.timeOfDayWeight(first.addTs);
 
         return new ScoredEvent(
                 ctx.tradingDate(),

@@ -189,7 +189,9 @@ public final class LiquidityWithdrawalScorer implements EventScorer {
 
         com.longexposure.scoring.SymbolFields.apply(breakdown, ctx, first.symbol);
 
-        double score = Math.log10(cluster.size()) * cluster.size();
+        // Phase 7c TOD weight: liquidity withdrawal anchored at first delete.
+        double score = Math.log10(cluster.size()) * cluster.size()
+                       * BreakdownFmt.timeOfDayWeight(first.ts);
 
         return new ScoredEvent(
                 ctx.tradingDate(),

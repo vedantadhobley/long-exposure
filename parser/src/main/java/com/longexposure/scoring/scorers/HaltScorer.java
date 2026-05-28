@@ -178,7 +178,12 @@ public final class HaltScorer implements EventScorer {
         // halts (no resume in the window) still score 0 — they're visible
         // but ranked low until we figure out the right policy.
         // 2026-05-28 evening (R4 / option C).
-        double score = (durationS != null) ? Math.log10(durationS.doubleValue() + 1.0) : 0.0;
+        // Phase 7c: TOD weight applied uniformly across all intraday scorers.
+        // Halt anchored at haltStart (start of suspension) — the moment that
+        // matters for "when did this hit the tape."
+        double score = (durationS != null)
+                ? Math.log10(durationS.doubleValue() + 1.0) * BreakdownFmt.timeOfDayWeight(haltStart)
+                : 0.0;
 
         return new ScoredEvent(
                 ctx.tradingDate(),

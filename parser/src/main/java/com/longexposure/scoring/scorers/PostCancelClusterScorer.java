@@ -268,7 +268,9 @@ public final class PostCancelClusterScorer implements EventScorer {
 
         com.longexposure.scoring.SymbolFields.apply(breakdown, ctx, first.symbol);
 
-        double score = Math.log10(Math.max(totalShares, 1)) * cluster.size();
+        // Phase 7c TOD weight: post-cancel cluster anchored at first add.
+        double score = Math.log10(Math.max(totalShares, 1)) * cluster.size()
+                       * BreakdownFmt.timeOfDayWeight(first.addTs);
 
         return new ScoredEvent(
                 ctx.tradingDate(),

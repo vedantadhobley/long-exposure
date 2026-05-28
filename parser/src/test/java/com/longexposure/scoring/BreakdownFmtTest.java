@@ -74,6 +74,48 @@ class BreakdownFmtTest {
                 BreakdownFmt.haltPhaseSpan(t1, t2));
     }
 
+    // ─── timeOfDayWeight — Phase 7c ──────────────────────────────────────
+
+    @Test
+    void todWeightOpening5min() {
+        // 09:32 ET = 13:32 UTC (opening_5min)
+        java.time.Instant t = java.time.LocalDateTime.of(2026, 5, 12, 13, 32)
+                .atZone(java.time.ZoneOffset.UTC).toInstant();
+        assertEquals(1.10, BreakdownFmt.timeOfDayWeight(t), 0.001);
+    }
+
+    @Test
+    void todWeightMidday() {
+        // 12:00 ET = 16:00 UTC (midday)
+        java.time.Instant t = java.time.LocalDateTime.of(2026, 5, 12, 16, 0)
+                .atZone(java.time.ZoneOffset.UTC).toInstant();
+        assertEquals(0.98, BreakdownFmt.timeOfDayWeight(t), 0.001);
+    }
+
+    @Test
+    void todWeightClosing5min() {
+        // 15:56 ET = 19:56 UTC (closing_5min)
+        java.time.Instant t = java.time.LocalDateTime.of(2026, 5, 12, 19, 56)
+                .atZone(java.time.ZoneOffset.UTC).toInstant();
+        assertEquals(1.10, BreakdownFmt.timeOfDayWeight(t), 0.001);
+    }
+
+    @Test
+    void todWeightPreMarket() {
+        // 07:00 ET = 11:00 UTC (pre_market)
+        java.time.Instant t = java.time.LocalDateTime.of(2026, 5, 12, 11, 0)
+                .atZone(java.time.ZoneOffset.UTC).toInstant();
+        assertEquals(0.95, BreakdownFmt.timeOfDayWeight(t), 0.001);
+    }
+
+    @Test
+    void todWeightOvernight() {
+        // 02:00 ET = 06:00 UTC (overnight)
+        java.time.Instant t = java.time.LocalDateTime.of(2026, 5, 12, 6, 0)
+                .atZone(java.time.ZoneOffset.UTC).toInstant();
+        assertEquals(0.80, BreakdownFmt.timeOfDayWeight(t), 0.001);
+    }
+
     @Test
     void phaseSpanUnbounded() {
         java.time.Instant preMarket = java.time.LocalDateTime.of(2026, 5, 12, 11, 0)
