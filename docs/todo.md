@@ -75,6 +75,40 @@ Everything that must be **solid before the 10–12 hr overnight relaunch** (the 
    - `order_to_trade_phrase` on cluster scorers: when ratio is ∞ (0 fills), pre-render as `"no fills against N posted orders"` → kills the stilted "order-to-trade ratio of infinite" phrasing (9/163 narratives). *(~20 min combined)*
 - [ ] **A4. Worker restart** before kicking the relaunch — `TimeInBookDriftScorer` + the lifetime-baseline upsert don't exist in the running JVM (worker started at 01:46:36Z, before commit `509e525`). Schema is auto-applied on worker start, so `daily_lifetime_by_symbol` gets created automatically. *(~30 sec)*
 
+### 🚩 Round 2 — pre-overnight fixes (kicked off ~2 AM EDT 2026-05-29)
+
+After the first overnight relaunch ran 2026-05-28 morning + the all-day audit surfaced new findings, the dataset is being thrown out and a SECOND overnight rerun is queued with these additional fixes. All items below land between 18:00 EDT and 24:00 EDT 2026-05-28 with a 1-day end-to-end test before the full kick.
+
+- [ ] **R1. AttributionVerifier "split between A and B" false-positive** — observed in v7 Synth-05-13: prose "16 events split between post-cancel clusters and depth contractions" generated three (subject=QQQ, count=16, scorer=X) tuples for both X={post_cancel_cluster, liquidity_withdrawal} when the model meant "16 *distributed* between." *Fix*: track consumed count positions in `AttributionVerifier.extractClaims` — each count attributes to ONLY the closest noun. Implementation: per-count "used" set; once a noun consumes a count, subsequent nouns scanning back skip it. ~30 min + a regression test for "X events split between A and B."
+
+- [ ] **R2 / option A. Per-symbol cap on selection** — currently `SelectTopEventsActivityImpl` selects within-scorer percentile-rank, no per-symbol limit. Result: TQQQ dominates 20+ events on heavy days, synthesis becomes "the TQQQ paragraph." *Fix*: after per-scorer selection produces ~90-170 candidates, apply `MAX_EVENTS_PER_SYMBOL=8` filter — keep top-N per symbol by score. *Impact*: forces symbol diversity in the LLM-facing set; SYNTHESIZE prose breadth improves materially. *Test*: re-run select for one day, verify no symbol has >8 events selected, total drop is small (~5-10%). ~45 min.
+
+- [ ] **R3 / option B. Per-scorer floor 1 → 3** — `SelectTopEventsActivityImpl` clamps `round(0.05 × event_count)` to `[1, 30]`. Floor=1 means a scorer that fires only 6 events for the day gets 1 selected. *Fix*: floor=3 so rare-but-interesting patterns (time_in_book_drift, halt) are guaranteed at least 3 events. *Impact*: cross-scorer diversity in the dataset. ~10 min.
+
+- [ ] **R4 / option C. Halt scoring linear → log10** — `HaltScorer` currently `score = halt_duration_seconds`. A 4h halt scores 14,400, a 5min halt scores 300 — ratio 48×. So selection over-represents marathon halts (1-2 multi-hour halts) at the expense of multiple short-but-interesting halts. *Fix*: `score = log10(halt_duration_seconds)`. Same orderings within typical durations; less extreme bias. *Impact*: better halt mix. ~10 min.
+
+- [ ] **R5 / option D. Extend AttributionVerifier to AggregateWeek** — current `AggregateWeekActivityImpl` uses the 3-arg `SynthesisVerifier.verify()` (no attribution check). Same misattribution class exists at the week tier when prose says "TQQQ had X events this week" against per-week aggregates. *Fix*: aggregate by_symbol_by_scorer + by_symbol totals across the week's days; pass to the new 5-arg overload. ~60 min.
+
+- [ ] **R6. End-to-end test on 1 day** before committing to overnight — Score → Narrate → Interpret → Synth → AggregateWeek with ALL of R1-R5 applied. Validate no regressions + new behaviors fire correctly. ~40 min.
+
+- [ ] **R7. Build single overnight script** covering 14 days (05-08 + 05-11..05-15 + 05-18..05-22 + 05-26 + 05-27). Includes pre-fetched pcaps for 05-26/27. Chronological with interleaved weekly aggregates. ~20 min.
+
+### Scoring system — post-launch improvements (parked, NOT for tonight)
+
+Discussion 2026-05-28 surfaced these. Not blocking launch but worth implementing post-launch when there's data history to validate against:
+
+- [ ] **E. Time-of-day diversity in selection** — currently no time-of-day weighting; selection can cluster in the first 5 min (open volatility) and miss midday + close patterns. Implementation: bucket events into session phases (pre_market / early_session / midday / afternoon / late_session) and enforce min-per-bucket. Risk: medium — could under-select genuine open-driven days. Needs cross-day baseline to tune. Punt.
+
+- [ ] **F. Cross-scorer score normalization** — currently per-scorer percentile rank for selection. Each scorer's score is in different units (halt=seconds, large_trade=log10($), pattern=log10(shares)×count). Can't directly compare a halt's "0.95 percentile" to a sweep's "0.95 percentile" in terms of *importance to the day*. Implementation: a z-score / robust-rank normalization across scorers, then global top-N. Big refactor: ~3-4 hours, touches selection, the API's "interesting" ranking, all downstream. Punt to post-launch.
+
+- [ ] **G. Time-of-day weight in scoring (not just selection)** — events at open/close get heavier weight in the score itself. Subtler than (E); a weighting factor on `score *= time_weight(ts)`. Same risks as E. Punt.
+
+- [ ] **H. Per-symbol tier weighting** — a halt on AAPL ranks higher than a halt on a micro-cap, by definition. Implementation: tier classification (mega/large/mid/small/micro from prev_close × shares_outstanding) and a multiplier on scorer scores. Needs shares-outstanding data (we don't have it cleanly). Punt.
+
+- [ ] **I. Audit each scorer's score formula by hand** — sort top-20 per scorer per day, confirm a trader would flag those. Tier 3 in the existing "Hardcode audit." Document why each formula was picked. Punt.
+
+- [ ] **J. Make scorer thresholds data-driven** — Tier 2 in the existing "Hardcode audit." The 12 magic numbers across the 7 intraday scorers. Migration to `scorer_config` table. Independent project; ~half a day. Punt.
+
 **📋 Tier B — Calendar rollup hierarchy, optional but recommended (~1.5 hr):**
 
 These don't materially affect the relaunch outcome (dormant until enough data accumulates) but get the calendar fractal *done* while we're context-loaded on the rollup design, so when the data arrives there's no human intervention needed. Per `tiered-baselines-design.md` §8 + the calendar reasoning (July 1 = Q3 start; first quarterly fires automatically when 13 weeklies exist ≈ Sept 30; first yearly fires ~Q3 2027).
@@ -182,6 +216,11 @@ Surfaced auditing the full 5-day backfill (05-18→05-22). One actionable item (
 - [x] **✅ Number misattribution in SYNTHESIZE — FIXED 2026-05-28 via structural AttributionVerifier** (commit `bfa3da3`). The bug: prose said "TQQQ which recorded ten distinct order-deletion events" when TQQQ actually had 20 liquidity_withdrawals; "10" passed the existing verifier because it was in the haystack (as the day's halt count), but the (TQQQ, 10, liquidity_withdrawal) triple did not match data. **Fix**: new `AttributionVerifier` class extracts (subject, count, scorer-type) triples from prose via a longest-first noun-phrase regex + bounded-window subject/count lookup; each triple checked against the activity-supplied by_symbol_by_scorer truth map. Three claim shapes covered (subject-led / verb-led / possessive); digit + word-form numerals via the existing `GroundingVerifier.cardinalWordNumbersIn`. Maps populated in `SynthesizeDayActivityImpl.computeDayAggregates` via out-params and passed to the new 5-arg `SynthesisVerifier.verify()` overload — NOT exposed in the LLM-facing JSON (band-aid avoidance per project structural-fix discipline). PROMPT_VERSION bumped synthesize-v6 → v7. 15 unit tests. Reverted earlier same-day attempts (the prompt-instruction + JSON-only band-aids) recorded for posterity in `SynthesizeDayActivityImpl` javadoc.
 
    *Out of scope, separate todo*: multi-symbol attribution ("DGP, TQQQ, and QQQ collectively generated 49"), AggregateWeek/Quarter/Year attribution (would need period-aggregated truth maps — same pattern, deferred).
+- [ ] **AttributionVerifier false-positive on "split between A and B" pattern.** Observed 2026-05-28 in v7 Synth-05-13: prose "QQQ logged 16 events split between post-cancel clusters and depth contractions" generated 3 claim tuples — (QQQ, 16, generic-total) ✓, (QQQ, 16, post_cancel_cluster) ✗, (QQQ, 16, liquidity_withdrawal) ✗. The model meant "16 distributed between X and Y," not "16 of each." Root cause: `AttributionVerifier.extractClaims` walks each noun-match in order, looking backward for the nearest count — a count that's the nearest for multiple subsequent nouns (with no closer count in between) gets re-attributed.
+
+   *Fix*: track consumed count positions; only the noun CLOSEST to a given count gets the claim. Implementation: after extracting (count_pos, ...) for a noun, mark count_pos as consumed; subsequent nouns must find a different count or skip. Or simpler: when same count's used twice, attribute only to the noun nearest to the count by character distance. ~30 min of refactoring + a test case for "split between."
+
+   *Workaround until fixed*: retry-3x usually produces alternative phrasings that don't use "split between." Days where all 3 attempts use the pattern stay verifier_passed=false (hidden by API). Observed rate so far: 1/8 days hit this pattern through 3 retries. Acceptable transient cost; fix before Saturday's overnight is doable but not blocking.
 - [ ] **Derived-sum verification gap (verifier-uncatchable, prompt-tractable).** Observed 2026-05-28 in v6 05-11 synthesis: "DGP, TQQQ, and QQQ collectively generated 49 of the session's 168 recorded events" — the sum (14+21+14=49) is mathematically correct but "49" not in haystack as a single token. The model is doing valid journalistic arithmetic; the verifier can only check raw presence. *Fix path*: add common derived totals to the synthesis haystack (sum of top 3 by_symbol counts, sum of by_scorer counts, etc.) — a few lines in `SynthesizeDayActivityImpl`. Or constrain the prompt to cite raw counts only. Low priority — model gets it right when it derives but verifier rejects; user-facing impact is only the verifier_passed=false → hidden by API.
 - [ ] **🚩 DESCRIBE/selected_events FK orphaning — DATA-INTEGRITY ISSUE.** Found 2026-05-28 during 05-12 INTERPRET audit, but spans the dataset:
 
