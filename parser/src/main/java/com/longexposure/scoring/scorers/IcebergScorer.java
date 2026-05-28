@@ -202,6 +202,8 @@ public final class IcebergScorer implements EventScorer {
 
         // ─── derived fields (DETECT enrichment, 2026-05-22) ──────────────
         breakdown.put("duration_seconds",       BreakdownFmt.round(durationSec, 1));
+        // Pluralization-safe phrasing for prose (see LiquidityWithdrawalScorer).
+        breakdown.put("duration_humanized",     BreakdownFmt.durationSecHumanized(Math.round(durationSec)));
         breakdown.put("notional_dollars",       BreakdownFmt.formatDollars(notionalDollars));
         breakdown.put("notional_per_fill",      BreakdownFmt.formatDollars(notionalDollars / run.size()));
         breakdown.put("inter_fill_seconds_avg", BreakdownFmt.round(durationSec / run.size(), 2));

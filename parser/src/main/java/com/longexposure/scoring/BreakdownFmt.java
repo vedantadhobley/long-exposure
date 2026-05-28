@@ -67,6 +67,41 @@ public final class BreakdownFmt {
         return durationNanos(seconds * 1_000_000_000L);
     }
 
+    /**
+     * Render a duration in seconds as a HUMAN-readable phrase with proper
+     * pluralization: "1 second", "2 seconds", "1 minute 5 seconds", "1 hour
+     * 30 minutes". Distinct from {@link #durationSec} which produces the
+     * abbreviated form ("1h 30m"). Use this for fields the LLM should
+     * surface in prose directly — eliminates the "1 seconds" failure mode
+     * observed 2026-05-28 (IWM liquidity_withdrawal).
+     *
+     * <p>Unit rules: seconds for &lt; 60 s; "{m}m {s}s" → "{M} minute(s)
+     * {S} second(s)" for &lt; 1 h; "{H} hour(s) {M} minute(s)" for ≥ 1 h.
+     * Singular form when count == 1; plural otherwise. The 0-component
+     * units are dropped ("5 minutes" not "5 minutes 0 seconds").
+     */
+    public static String durationSecHumanized(final long seconds) {
+        if (seconds < 0) return "unknown duration";
+        if (seconds < 60) {
+            return pluralize(seconds, "second");
+        }
+        if (seconds < 3600) {
+            long mins = seconds / 60;
+            long secs = seconds % 60;
+            if (secs == 0) return pluralize(mins, "minute");
+            return pluralize(mins, "minute") + " " + pluralize(secs, "second");
+        }
+        long hours = seconds / 3600;
+        long mins = (seconds % 3600) / 60;
+        if (mins == 0) return pluralize(hours, "hour");
+        return pluralize(hours, "hour") + " " + pluralize(mins, "minute");
+    }
+
+    /** "{n} {unit}" + 's' suffix when n != 1. Pure formatter. */
+    private static String pluralize(final long n, final String unit) {
+        return n + " " + unit + (n == 1 ? "" : "s");
+    }
+
     // ─── ET timestamps ───────────────────────────────────────────────────────
 
     /**

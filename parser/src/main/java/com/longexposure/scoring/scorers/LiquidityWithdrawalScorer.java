@@ -159,6 +159,10 @@ public final class LiquidityWithdrawalScorer implements EventScorer {
         // add). distinct_levels-derived fields are deferred until the
         // scorer is extended to join order_lifecycle for the level lookup.
         breakdown.put("duration_seconds",      BreakdownFmt.round(durationSec, 2));
+        // Pluralization-safe phrasing for prose. Eliminates "1 seconds"
+        // (observed 2026-05-28 IWM audit). Rounded to whole seconds since
+        // sub-second resolution isn't meaningful in journalist prose.
+        breakdown.put("duration_humanized",    BreakdownFmt.durationSecHumanized(Math.round(durationSec)));
         breakdown.put("burst_intensity_class",
                 durationSec < 1.0   ? "sub_second" :
                 durationSec < 10.0  ? "brief" :
