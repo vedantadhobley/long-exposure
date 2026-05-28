@@ -101,6 +101,24 @@ After the first overnight relaunch ran 2026-05-28 morning + the all-day audit su
 
 After Round 2 (R1-R7) shipped + the 05-13 1-day test passed, continuing structural improvements before the overnight kickoff. All items below are "no band-aid" fixes: data-layer or shared-utility extractions, never prompt-rule patches. Implementation order picked for low risk + high leverage; 1-day test gate before the overnight.
 
+**🚨 Tomorrow's checkpoint — read this first if you come back to a half-finished state:**
+
+The dataset state on disk: **stale relative to all Round 2 + Round 3 fixes.** All Round 2 changes (R1-R7 commits `8c3a3ee` through `d9841fb` + FK relink `d13fc52`) require re-Score; all Round 3 changes (commits `adafcb8` onward) require re-Score + re-Narrate; all 05-13 + 05-12 partial-test data is fresh but only those two days.
+
+Overnight rerun **planned for a WEEK** (week-of-05-18, 5 days: 05-18→05-22) — NOT the original 12-day plan. Reason: traded 2-week coverage for thoroughness on the implementations.
+
+Where we left off:
+  - Phase 6 in flight: 05-12 Score done; Narrate kicked, then Interp + Synth chain pending
+  - Phases 7/7b/7c/7d/7e/7f/9-A/9b queued (see below)
+  - Phase 8 (PipelineWorkflow) replaces all `scripts/rerun-dataset-*.sh` scripts
+  - Phase 8 test on 05-12 is the gate before the overnight kick
+
+**Score-formula audit (Phase 9c) findings 2026-05-28 19:00 EDT:**
+  - All scorers except **sweep** look sensible (top events match "obviously top" intuition).
+  - **sweep formula `log10($notional) × distinct_levels` is over-indexed on level count**: 05-12 audit shows a $42K LDOS sweep across 13 levels scoring 60.1, beating a $458K CSX sweep across 9 levels scoring 50.95. Level multiplier dominates notional.
+  - Cross-scorer normalization (F) PUNTED — score ranges differ by 4 orders of magnitude across scorers but within-scorer percentile rank sidesteps that. No clear cross-scorer miss-cases. Revisit post-launch if a real journalistic gap emerges.
+  - **Added Phase 7f: SweepScorer formula** — change to `log10($notional) + log10(distinct_levels)` (additive in log space) so both contribute without dominating. ~10 min.
+
 - [x] **✅ Phase 1. AggregateQuarter + AggregateYear attribution** (commit `adafcb8`). Mirror of R5 at higher rollup tiers. Extracted `PeriodAttributionMaps.load(periodStart, periodEndExclusive, outMaps, outTotals)` as a shared static utility — all three rollup tiers (week/quarter/year) now use the same SQL. PROMPT_VERSIONs bumped to v3-attribution-verifier-2026-05-28. Dormant tonight (week-of-05-25 has only 2 days; gates closed) but structurally complete.
 
 - [x] **✅ Phase 2. Multi-symbol AttributionVerifier** (commit `04e75d7`). Detects "X, Y, and Z collectively/together/combined/jointly N events" via `MULTI_SYMBOL_TRIGGERS` set + `extractMultiSymbolClaims`. Sums per-symbol counts across the listed subjects; consumed-count tracking ensures the count isn't re-claimed by the single-symbol pass. 4 new tests cover Oxford-comma, "together" with scorer-specific noun, mismatch detection, consumed-count protection.
@@ -111,25 +129,34 @@ After Round 2 (R1-R7) shipped + the 05-13 1-day test passed, continuing structur
 
 - [x] **✅ Phase 5. Pattern-name mislabel verifier** (commit `9f2724c`). See above.
 
-- [ ] **Phase 6. 1-day test on 05-12** (in progress, partial validation already: Score completed with R2/R3/R4 visible + halt_reason_label + duration_humanized populated correctly). Continue through Narrate → Interpret → Synth and inspect.
+- [ ] **Phase 6. 1-day test on 05-12** (in progress, partial validation already: Score completed with R2/R3/R4 visible + halt_reason_label + duration_humanized populated correctly). Narrate-05-12 kicked at ~19:00 EDT. Continues through Interp + Synth. Phase 6 final-audit gate before Phase 8 build.
 
 - [ ] **Phase 7. Compound phase-label stitch in DESCRIBE prose.** Observed 2026-05-28 GMRS halt: *"The halt began in pre-market to midday"* — model glued `halt_start_phase_label="in pre-market trading"` + `halt_end_phase_label="around midday"` without a connector verb. Same structural-data-layer pattern as Phase 3 (halt_reason_label) and Phase 4 (duration_humanized): pre-compute a `halt_phase_span_label` field in HaltScorer that combines the two grammatically ("starting in pre-market and resuming around midday" / "lasting through midday from pre-market trading" / etc., depending on phase combination). INTERPRET/DESCRIBE prompts read the unified field; no prompt rule about "don't glue phase labels" needed. ~20 min.
 
+- [ ] **Phase 7b. Background heartbeat daemon in LLM activities.** The heartbeat-timeout fix from earlier today (commit `15af21f` bumped heartbeat 1→5 min on SynthesizeDay + AggregateWeek workflow stubs) is a band-aid that's still in place. The PROPER fix is a background thread inside each LLM-bearing activity that calls `actx.heartbeat()` every 30 sec while the blocking LLM HTTP call runs — same pattern as `MaterializeOrderLifecycleActivityImpl`. After this lands, the heartbeat timeout can drop back to 1 min as a real liveness signal. Apply to: SynthesizeDayActivityImpl, AggregateWeekActivityImpl, AggregateQuarterActivityImpl, AggregateYearActivityImpl. ~30 min.
+
+- [ ] **Phase 7c. Time-of-day weight in scoring (option G).** Events at the open + close get more market attention; the scoring formula should reflect this. Implementation: a `BreakdownFmt.timeOfDayWeight(ts)` multiplier (pre_market: 0.85, opening_5min: 1.20, early_session: 1.05, midday: 0.95, late_session: 1.10, closing_5min: 1.15). Applied uniformly across all scorers via `score = baseScore × timeOfDayWeight(ts)`. The within-scorer percentile selection then surfaces more open/close events. ~30 min.
+
+- [ ] **Phase 7d. Time-of-day diversity in selection (option E).** Currently selection can cluster events in the first 5 min (open volatility) and miss midday/close patterns. Implementation: bucket selected events into session phases (pre_market / early_session / midday / afternoon / late_session) and enforce min-per-bucket on the final 90-170 selected set (e.g. min=10 events per non-empty bucket). Risk: medium — could under-select genuine open-driven days. ~75 min.
+
+- [ ] **Phase 7e. TimeInBookDrift baseline gate `MIN_BASELINE_DAYS` 3 → 5.** Observed 2026-05-28 audit: OVT 5,748× drift on 3-day baseline = numerically correct but statistically noisy. Bumping to 5 days delays first-emission but stabilizes the median. ~5 min.
+
+- [ ] **Phase 7f. SweepScorer formula rebalance.** Audit finding 2026-05-28: current `log10($notional) × distinct_levels` over-weights level count. Change to `log10($notional) + log10(distinct_levels)` (additive in log space) so both notional and level count contribute without dominating. Validates against the LDOS-vs-CSX miscalibration. ~10 min + observe top-10 sweeps on the re-Scored data.
+
 - [ ] **Phase 8. PipelineWorkflow — unified entry point for cron + ad-hoc + backfill.** *Generalizes* the current entry points (cron-driven DailyPipelineWorkflow, ad-hoc `temporal workflow start`, and the shell rerun scripts) into a single workflow that takes a list of dates + options. Replaces `rerun-dataset-v3.sh` (committed but never run). Auto-detects:
    - **Cascade**: from the date list, derives touched weeks/quarters/years; cascade-fires the rollup workflows (idempotent via content_hash so no-op when unchanged)
-   - **Parallelization**: Phase A (Download → Parse → Materialize → Score → Refresh → Select; all non-LLM) of day N+1 starts in parallel with Phase B (Narrate → Interp → Synth; LLM-serialized) of day N. Uses Temporal `Async.function` + `Promise.thenCompose` to chain. Bounded by Phase A backpressure (Postgres memory) and Phase B LLM mutex (Semaphore 2). Estimated saving: ~4 hours over the 12-day overnight.
+   - **Parallelization**: Phase A (Download → Parse → Materialize → Score → Refresh → Select; all non-LLM) of day N+1 starts in parallel with Phase B (Narrate → Interp → Synth; LLM-serialized) of day N. Uses Temporal `Async.function` + `Promise.thenCompose` to chain. Bounded by Phase A backpressure (Postgres memory) and Phase B LLM mutex (Semaphore 2). Estimated saving: ~4 hours over a 12-day overnight; less over a 5-day week.
    - **Skip-when-unchanged**: each downstream activity's content_hash skip applies. Running on already-done dates is effectively a no-op cost.
 
    Cron schedule consolidates to: `PipelineWorkflow.run(PipelineInput(dates=[yesterday-placeholder], pollUntilReady=true, ...))` — same code path as a 12-day backfill, just dates.size()==1. The existing DailyPipelineWorkflow becomes the per-day primitive (child of PipelineWorkflow).
 
    ~2-3 hours. The right shape; replaces all three rerun-dataset-*.sh scripts.
 
-- [ ] **Phase 9. Inter-day scorer INTERPRET** (decision needed before implementing). Currently `volume_deviation` + `time_in_book_drift` events skip INTERPRET — `TradeWindow.query()`'s ±60-sec framing isn't meaningful for whole-day metrics. Options:
-   - **(a) Different INTERPRET shape for inter-day events**: instead of a trade-window query, read the day's intraday volume curve / order-lifetime curve summary + the baseline window summary. The catalog already has interpretive material for "today's volume vs the trailing median" and "today's order lifetime regime shift vs the baseline". INTERPRET prose could read: "TDIC's 26.4× surge built through midday with sustained volume in 11:00-13:00 ET vs the baseline's open-weighted distribution". ~90 min: new TradeWindow.daySummary() method + InterpretEventActivityImpl branches on scorerId. Verifier check unchanged (same haystack rules).
-   - **(b) DESCRIBE-only is fine for v1**: the inter-day events DO contribute to SYNTHESIZE/AGGREGATE via the DESCRIBE-fallback path. The per-event drill-down UI just shows one paragraph instead of two for these events. Document as known limitation.
-   - **(c) Hybrid**: implement (a) for time_in_book_drift only (more interesting + has narrative arc), DESCRIBE-only for volume_deviation. ~45 min.
+- [ ] **Phase 9-A. Inter-day scorer INTERPRET — implement for both scorers.** Currently `volume_deviation` + `time_in_book_drift` events skip INTERPRET (`TradeWindow.query()`'s ±60-sec framing isn't meaningful for whole-day metrics). Implementation: new `TradeWindow.daySummary(date, symbol)` method reads the day's intraday volume + order-lifetime curve summary; InterpretEventActivityImpl branches on `scorerId IN ('volume_deviation', 'time_in_book_drift')` to use the day-summary query instead of the ±60-sec window. Verifier rules unchanged (same haystack grounding). Catalog has interpretive material for both — "volume built through midday" / "lifetime regime shift began at 09:35 ET and persisted through morning". ~90 min.
 
-   *User has expressed openness to implementing this tonight*. Pending discussion on which option.
+- [ ] **Phase 9b. DESCRIBE-side pattern-mislabel check.** Mirror of Phase 5 (INTERPRET) for DESCRIBE. Reuses `AttributionVerifier.extractScorerNounIds`. Allowed-scorer set: event's own scorer_id ∪ co_occurring keys. Plumbed via a new 5-arg `GroundingVerifier.verify(prose, blueprint, breakdown, scorerId, allowedSet)` overload; back-compat 3-arg form preserved. ~15 min.
+
+- [x] **✅ Phase 9c. Score formula sanity audit — DONE 2026-05-28 19:00 EDT.** Audit output captured at top of this section ("Tomorrow's checkpoint"). Cross-scorer normalization (F) PUNTED; sweep-formula fix surfaced as Phase 7f.
 
 ### Scoring system — post-launch improvements (parked, NOT for tonight)
 
