@@ -56,8 +56,14 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
     private static final String MODEL_ID = System.getenv()
             .getOrDefault("LLAMA_MODEL", "Qwen3.5-122B-A10B");
 
-    /** Bumped when the prompt changes. */
-    private static final String PROMPT_VERSION = "aggregate-v5-streak-bound-2026-05-27";
+    /**
+     * Bumped when the prompt changes — and on verifier changes that invalidate
+     * prior verdicts. v6 (2026-05-28) extends grounding to cardinal word-form
+     * numerals via the shared {@code GroundingVerifier.cardinalWordNumbersIn};
+     * see {@link SynthesizeDayActivityImpl}'s PROMPT_VERSION comment for the
+     * full rationale.
+     */
+    private static final String PROMPT_VERSION = "aggregate-v6-cardinal-word-form-2026-05-28";
 
     /**
      * Prior weekly rollups passed as week-over-week trend context. Set to 13 =

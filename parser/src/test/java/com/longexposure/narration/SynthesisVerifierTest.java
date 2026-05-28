@@ -74,4 +74,92 @@ class SynthesisVerifierTest {
         assertFalse(t.contains("ETF"), "ETF is an acronym, excluded: " + t);
         assertFalse(t.contains("BRK."), "must not split BRK.B into BRK.: " + t);
     }
+
+    // ─── Cardinal word-form numerals (2026-05-28 fix) ───────────────────────
+
+    /** A grounded word-form count ("six halts" with 6 in haystack) passes. */
+    @Test
+    void groundedWordFormCountPasses() {
+        SynthesisVerifier v = new SynthesisVerifier();
+        SynthesisVerifier.Result r = v.verify(
+                "AAPL absorbed six pre-market halts.",
+                Set.of("AAPL"),
+                "{\"by_scorer\":{\"halt\":6}}");
+        assertTrue(r.passed(), "word-form 'six' should ground against haystack '6': " + r.mismatches());
+    }
+
+    /** An ungrounded word-form count is flagged (the original bug). */
+    @Test
+    void ungroundedWordFormCountIsFlagged() {
+        SynthesisVerifier v = new SynthesisVerifier();
+        SynthesisVerifier.Result r = v.verify(
+                // 05-12 reproducer: synthesis said "six liquidity withdrawals"
+                // when 14 actually occurred.
+                "QQQ saw its order book compressed by six liquidity withdrawals.",
+                Set.of("QQQ"),
+                "{\"by_scorer\":{\"liquidity_withdrawal\":14}}");
+        assertFalse(r.passed(), "ungrounded 'six' (haystack only has 14) must be flagged");
+        assertTrue(r.mismatches().stream().anyMatch(m -> m.contains("word-form \"6\"")),
+                "mismatch should cite the canonical form: " + r.mismatches());
+    }
+
+    /** Word-form on both sides matches: "eight events" prose vs "eight events" haystack. */
+    @Test
+    void wordFormOnBothSidesMatches() {
+        SynthesisVerifier v = new SynthesisVerifier();
+        SynthesisVerifier.Result r = v.verify(
+                "ten events anchored the day.",
+                Set.of(),
+                "An interpretation mentioned ten events on the day.");
+        assertTrue(r.passed(), "prose 'ten' should ground against haystack 'ten': " + r.mismatches());
+    }
+
+    /** Word "two" in prose grounds against digit "2" in haystack (the cross-form case). */
+    @Test
+    void crossFormWordToDigitMatches() {
+        SynthesisVerifier v = new SynthesisVerifier();
+        SynthesisVerifier.Result r = v.verify(
+                "Two co-occurring layering events appeared.",
+                Set.of(),
+                "{\"layering\":{\"count\":2}}");
+        assertTrue(r.passed(), "prose 'Two' should match haystack '2': " + r.mismatches());
+    }
+
+    /** Decade words ("twenty", "thirty") work too. */
+    @Test
+    void decadeWordsHandled() {
+        SynthesisVerifier v = new SynthesisVerifier();
+        // grounded
+        assertTrue(v.verify("Thirty events fired.", Set.of(), "{\"count\":30}").passed());
+        // ungrounded
+        assertFalse(v.verify("Thirty events fired.", Set.of(), "{\"count\":25}").passed());
+    }
+
+    /** "hundred" / "thousand" handled. */
+    @Test
+    void hundredAndThousandHandled() {
+        SynthesisVerifier v = new SynthesisVerifier();
+        assertTrue(v.verify("over one hundred orders posted.", Set.of(),
+                "{\"orders\":100}").passed());
+    }
+
+    /** Word boundaries — "ten" in "often" / "listen" must NOT match. */
+    @Test
+    void wordBoundaryIsolatesNumerals() {
+        SynthesisVerifier v = new SynthesisVerifier();
+        SynthesisVerifier.Result r = v.verify(
+                "Often heard, listen carefully to the rotten outcome.",
+                Set.of(),
+                "{}");
+        // No numerals to check — should pass since regex won't match "ten" inside "often"/"listen"/"rotten".
+        assertTrue(r.passed(), "must not extract 'ten' from inside 'often'/'listen'/'rotten': " + r.mismatches());
+    }
+
+    /** No-fills phrasing ("zero fills") grounds against digit "0". */
+    @Test
+    void zeroWordFormHandled() {
+        SynthesisVerifier v = new SynthesisVerifier();
+        assertTrue(v.verify("Zero fills against the posted orders.", Set.of(),
+                "{\"fills\":0}").passed());
+    }
 }

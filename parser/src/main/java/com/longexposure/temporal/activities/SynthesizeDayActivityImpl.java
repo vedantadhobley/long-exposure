@@ -50,8 +50,27 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
     private static final String MODEL_ID = System.getenv()
             .getOrDefault("LLAMA_MODEL", "Qwen3.5-122B-A10B");
 
-    /** Bumped when prompt changes. */
-    private static final String PROMPT_VERSION = "synthesize-v5-holistic-revert-v4-example";
+    /**
+     * Bumped when prompt changes — also bumped on verifier changes that
+     * invalidate prior verdicts. v6 (2026-05-28) extends grounding to
+     * cardinal word-form numerals ("six halts" / "ten layering"). The 05-12
+     * audit found 5/5 word-form counts in that day's synthesis were wrong
+     * (eight/ten/six/four/three vs actual 14/12/14/5/4) and bypassed
+     * verification entirely because the regex was digit-only. Bumping the
+     * version invalidates existing content-hash → forces re-run with the
+     * new verifier in place. See `GroundingVerifier.cardinalWordNumbersIn`.
+     *
+     * <p>v7 was prototyped but reverted same day — added by_scorer_by_symbol
+     * to the day-aggregates haystack + an "ATTRIBUTING COUNTS" prompt
+     * section. The prompt section was prompt-engineering band-aid (cf.
+     * the project's principle: structural fixes only); the JSON addition
+     * alone would actually have made misattribution slightly worse
+     * (verifier checks number-presence, not attribution, so a wider
+     * haystack means more misattributions pass). Real fix for symbol-
+     * attributed claim correctness is a structural attribution verifier —
+     * tracked in docs/todo.md, post-launch.
+     */
+    private static final String PROMPT_VERSION = "synthesize-v6-cardinal-word-form-2026-05-28";
 
     /** Max LLM attempts per day — re-roll on verifier failure (temp 1.0 gives variance). */
     private static final int MAX_LLM_ATTEMPTS = 3;

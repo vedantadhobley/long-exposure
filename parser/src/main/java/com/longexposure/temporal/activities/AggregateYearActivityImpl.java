@@ -39,7 +39,7 @@ public final class AggregateYearActivityImpl implements AggregateYearActivity {
     private static final String MODEL_ID = System.getenv()
             .getOrDefault("LLAMA_MODEL", "Qwen3.5-122B-A10B");
 
-    private static final String PROMPT_VERSION = "aggregate-year-v1-2026-05-28";
+    private static final String PROMPT_VERSION = "aggregate-year-v2-cardinal-word-form-2026-05-28";
 
     /** Quarterly rollups needed in the year before the LLM call fires. */
     private static final int MIN_QUARTERS_FOR_YEAR = 2;

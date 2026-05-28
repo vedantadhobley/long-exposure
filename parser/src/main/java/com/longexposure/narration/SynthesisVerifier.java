@@ -87,12 +87,21 @@ public final class SynthesisVerifier {
      *
      * <p>Word-boundary-anchored. {@code manipul\w*} catches manipulation /
      * manipulator / manipulate; {@code spoof\w*} catches spoof / spoofing /
-     * spoofed; {@code gam(ing|ed)} catches gaming / gamed without flagging
-     * benign "game". {@code illegal}, {@code fake} are literal.
+     * spoofed; {@code illegal}, {@code fake} are literal.
+     *
+     * <p><b>Removed 2026-05-28</b>: {@code gam(?:ing|ed)} was originally
+     * included to catch "gaming the system" / "gaming the book". But it
+     * false-positives on "gaming stocks" / "gaming sector" — legitimate
+     * sector references for DraftKings (DKNG), Roblox, etc. Observed
+     * 2026-05-28 on 05-11 synthesis: "iceberg orders masking volume in
+     * gaming stocks like DKNG" — sector use, not manipulation, but flagged
+     * by the regex and re-rolled 3× without resolution. Dropped. "gaming
+     * the system" is rare enough in finance prose that defensive prompt
+     * language ("describe shape, not intent") is sufficient.
      */
     private static final Pattern INTENT_WORDS = Pattern.compile(
             "\\b(?:manipul\\w*|spoof\\w*|front[- ]?run\\w*|wash[- ]?trad\\w*|"
-                    + "gam(?:ing|ed)|illegal\\w*|fake\\w*)\\b",
+                    + "illegal\\w*|fake\\w*)\\b",
             Pattern.CASE_INSENSITIVE);
 
     public SynthesisVerifier() {}
@@ -157,15 +166,18 @@ public final class SynthesisVerifier {
         }
 
         // ─── Number grounding check ─────────────────────────────────────────
-        Set<String> haystackNums = GroundingVerifier.canonicalNumbersIn(numberHaystack);
-        Set<String> proseNums    = GroundingVerifier.canonicalNumbersIn(prose);
+        Set<String> haystackNums     = GroundingVerifier.canonicalNumbersIn(numberHaystack);
+        Set<String> haystackWordNums = GroundingVerifier.cardinalWordNumbersIn(numberHaystack);
+        Set<String> proseNums        = GroundingVerifier.canonicalNumbersIn(prose);
+        Set<String> proseWordNums    = GroundingVerifier.cardinalWordNumbersIn(prose);
 
-        int numbersChecked = proseNums.size();
+        int numbersChecked = proseNums.size() + proseWordNums.size();
         for (String n : proseNums) {
             if (n.length() < 2) continue;                       // single-digit noise
             if (n.equals("2026") || n.equals("2025")) continue; // year tokens
 
-            if (haystackNums.contains(n)) continue;
+            if (haystackNums.contains(n))     continue;
+            if (haystackWordNums.contains(n)) continue;
 
             // Try precision-rounded equivalence — same logic as
             // InterpretationVerifier. Numbers ≥ 10 get d=0/1/2/3/4 rounds in
@@ -173,6 +185,20 @@ public final class SynthesisVerifier {
             if (precisionEquivalent(n, haystackNums)) continue;
 
             mismatches.add("prose number \"" + n
+                    + "\" not found in narrations / interpretations / day_aggregates");
+        }
+
+        // Cardinal word-form numerals in prose ("six halts", "ten layering")
+        // must also ground. No length filter — even single-digit word-forms
+        // ("five", "six") are unambiguous and the exact failure mode we
+        // observed 2026-05-28: 05-12 daily synthesis had 5 wrong word-form
+        // counts ("eight"/"ten"/"six"/"four"/"three") that bypassed
+        // verification entirely. Counts are integers (no rounding tolerance
+        // needed); skip precisionEquivalent.
+        for (String wn : proseWordNums) {
+            if (haystackNums.contains(wn))     continue;
+            if (haystackWordNums.contains(wn)) continue;
+            mismatches.add("prose cardinal word-form \"" + wn
                     + "\" not found in narrations / interpretations / day_aggregates");
         }
 

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -69,6 +70,60 @@ public final class GroundingVerifier {
     /** Numbers we don't care about — common in prose but never narratable claims. */
     private static final Set<String> BORING_NUMBERS = Set.of("2026", "2025");
 
+    /**
+     * Cardinal word-form numerals → canonical digit-string form. Single-word
+     * coverage only; composite forms ("twenty-five", "one hundred and fifty")
+     * are intentionally NOT supported because finance prose overwhelmingly
+     * uses digit form for any count not in {one..twenty, decade-words}.
+     *
+     * <p>Why this exists: the verifier's number-extraction regex
+     * ({@link #NUMBER_RE}) is digit-only, so prose like "eight events"
+     * extracted zero numbers and silently passed verification regardless
+     * of whether eight is grounded. Observed 2026-05-28 in 05-12 daily
+     * synthesis: "eight TQQQ events" (actually 14), "ten DGP layering"
+     * (actually 12), "six QQQ withdrawals" (actually 14), "four IWM
+     * post_cancel" (actually 5), "three IWM sweeps" (actually 4) —
+     * five wrong counts in one paragraph, all bypassing the verifier.
+     */
+    private static final Map<String, String> WORD_NUMBERS;
+    static {
+        Map<String, String> m = new HashMap<>();
+        m.put("zero", "0");
+        m.put("one", "1"); m.put("two", "2"); m.put("three", "3");
+        m.put("four", "4"); m.put("five", "5"); m.put("six", "6");
+        m.put("seven", "7"); m.put("eight", "8"); m.put("nine", "9");
+        m.put("ten", "10");
+        m.put("eleven", "11"); m.put("twelve", "12"); m.put("thirteen", "13");
+        m.put("fourteen", "14"); m.put("fifteen", "15"); m.put("sixteen", "16");
+        m.put("seventeen", "17"); m.put("eighteen", "18"); m.put("nineteen", "19");
+        m.put("twenty", "20"); m.put("thirty", "30"); m.put("forty", "40");
+        m.put("fifty", "50"); m.put("sixty", "60"); m.put("seventy", "70");
+        m.put("eighty", "80"); m.put("ninety", "90");
+        m.put("hundred", "100"); m.put("thousand", "1000");
+        m.put("dozen", "12");
+        WORD_NUMBERS = Map.copyOf(m);
+    }
+
+    private static final Pattern WORD_NUMBER_RE = Pattern.compile(
+            "\\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|"
+                    + "eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
+                    + "eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|"
+                    + "eighty|ninety|hundred|thousand|dozen)\\b",
+            Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Composite "{unit} {magnitude}" word-numerals — handles "one hundred",
+     * "two thousand", "fifteen hundred". Captured as a SINGLE token so the
+     * unit ("one") doesn't get double-counted as a standalone numeral.
+     * Composite range covers 1..19 × {hundred, thousand}; tens-with-units
+     * like "twenty-five" still aren't supported (rare in finance prose).
+     */
+    private static final Pattern COMPOSITE_WORD_NUMBER_RE = Pattern.compile(
+            "\\b(one|two|three|four|five|six|seven|eight|nine|ten|"
+                    + "eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
+                    + "eighteen|nineteen)\\s+(hundred|thousand)\\b",
+            Pattern.CASE_INSENSITIVE);
+
     public GroundingVerifier() {}
 
     /**
@@ -100,7 +155,8 @@ public final class GroundingVerifier {
         // happen to look like numbers (e.g. parts of IDs).
         String haystack = haystack(blueprint, breakdown);
         Set<String> haystackCanonical = canonicalNumbersIn(haystack);
-        Set<String> proseNumbers = extractNumbers(prose);
+        Set<String> haystackWordNums  = cardinalWordNumbersIn(haystack);
+        Set<String> proseNumbers      = extractNumbers(prose);
         for (String n : proseNumbers) {
             if (n.length() < MIN_LENGTH_TO_CHECK) continue;
             if (BORING_NUMBERS.contains(n)) continue;
@@ -108,6 +164,9 @@ public final class GroundingVerifier {
             // Try numeric-equivalent match first
             String canonical = canonicalize(n);
             if (canonical != null && haystackCanonical.contains(canonical)) continue;
+            // Word-form in haystack maps to digit form ("three" in breakdown → "3"),
+            // so prose "3" should also accept that.
+            if (canonical != null && haystackWordNums.contains(canonical)) continue;
 
             // Fallback: substring match on the raw haystack (catches numbers
             // embedded in strings the regex didn't pick up, e.g. inside a
@@ -118,6 +177,19 @@ public final class GroundingVerifier {
 
             mismatches.add("prose contains number \"" + n + "\" (canonical \"" + canonical
                     + "\") not found in blueprint or breakdown");
+        }
+
+        // Layer 2b: cardinal word-form numerals in prose ("three", "ten") must
+        // also ground. No length filter — word-form is unambiguous, and
+        // single-digit word-form like "five" is exactly the case we need to
+        // catch (DESCRIBE renders breakdown counts in word form, e.g. "three
+        // sweep events" from co_occurring.during_event.sweep.count="3").
+        Set<String> proseWordNums = cardinalWordNumbersIn(prose);
+        for (String wn : proseWordNums) {
+            if (haystackCanonical.contains(wn)) continue;
+            if (haystackWordNums.contains(wn))  continue;
+            mismatches.add("prose cardinal word-form \"" + wn
+                    + "\" not found in blueprint or breakdown");
         }
 
         // Layer 3: the event's own symbol must appear literally in the
@@ -156,7 +228,7 @@ public final class GroundingVerifier {
         }
 
         boolean passed = mismatches.isEmpty();
-        return new Result(passed, mismatches, proseNumbers.size());
+        return new Result(passed, mismatches, proseNumbers.size() + proseWordNums.size());
     }
 
     /**
@@ -277,6 +349,45 @@ public final class GroundingVerifier {
         while (m.find()) {
             String c = canonicalize(m.group());
             if (c != null) out.add(c);
+        }
+        return out;
+    }
+
+    /**
+     * Extract every cardinal word-form numeral ("five", "ten", "thirty") from
+     * the text and return each in canonical digit-string form ("5", "10",
+     * "30"). Case-insensitive. Single-word coverage only.
+     *
+     * <p>Separate from {@link #canonicalNumbersIn} (which is digit-only) so
+     * verifiers can apply different filtering to each — word-form numerals
+     * always get checked (no length-based skip), digit-form numerals keep
+     * the {@code length < MIN_LENGTH_TO_CHECK} filter to ignore spurious
+     * single-digit matches.
+     */
+    public static Set<String> cardinalWordNumbersIn(final String text) {
+        Set<String> out = new HashSet<>();
+        if (text == null) return out;
+
+        // Pre-pass: composite "{unit} {hundred|thousand}". Compute the product,
+        // add to the result, and mask the matched span so the inner unit word
+        // isn't re-extracted as a standalone numeral in the next pass.
+        StringBuilder masked = new StringBuilder(text);
+        Matcher cm = COMPOSITE_WORD_NUMBER_RE.matcher(text);
+        while (cm.find()) {
+            String unit = WORD_NUMBERS.get(cm.group(1).toLowerCase());
+            String mag  = WORD_NUMBERS.get(cm.group(2).toLowerCase());
+            if (unit != null && mag != null) {
+                int product = Integer.parseInt(unit) * Integer.parseInt(mag);
+                out.add(String.valueOf(product));
+                for (int i = cm.start(); i < cm.end(); i++) masked.setCharAt(i, ' ');
+            }
+        }
+
+        // Standalone pass on the masked text.
+        Matcher m = WORD_NUMBER_RE.matcher(masked.toString());
+        while (m.find()) {
+            String wn = WORD_NUMBERS.get(m.group().toLowerCase());
+            if (wn != null) out.add(wn);
         }
         return out;
     }

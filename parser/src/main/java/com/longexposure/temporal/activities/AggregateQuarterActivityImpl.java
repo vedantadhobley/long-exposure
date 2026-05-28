@@ -44,7 +44,7 @@ public final class AggregateQuarterActivityImpl implements AggregateQuarterActiv
     private static final String MODEL_ID = System.getenv()
             .getOrDefault("LLAMA_MODEL", "Qwen3.5-122B-A10B");
 
-    private static final String PROMPT_VERSION = "aggregate-quarter-v1-2026-05-28";
+    private static final String PROMPT_VERSION = "aggregate-quarter-v2-cardinal-word-form-2026-05-28";
 
     /**
      * Minimum weekly rollups in the quarter before the activity does an LLM

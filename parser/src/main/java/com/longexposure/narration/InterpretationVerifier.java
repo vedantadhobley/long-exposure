@@ -49,8 +49,11 @@ public final class InterpretationVerifier {
      * would add the same check if it ever did).
      */
     private static final java.util.regex.Pattern INTENT_WORDS = java.util.regex.Pattern.compile(
+            // gam(ing|ed) dropped 2026-05-28 — false-positives on "gaming
+            // stocks" / "gaming sector" (DKNG, Roblox); see SynthesisVerifier
+            // for full rationale.
             "\\b(?:manipul\\w*|spoof\\w*|front[- ]?run\\w*|wash[- ]?trad\\w*|"
-                    + "gam(?:ing|ed)|illegal\\w*|fake\\w*)\\b",
+                    + "illegal\\w*|fake\\w*)\\b",
             java.util.regex.Pattern.CASE_INSENSITIVE);
 
     public InterpretationVerifier() {}
@@ -88,15 +91,31 @@ public final class InterpretationVerifier {
         // exceeds that.
         Set<String> haystackRoundedForms = precisionRoundedForms(haystackNums);
 
-        Set<String> proseNums = GroundingVerifier.canonicalNumbersIn(prose);
-        int numbersChecked = proseNums.size();
+        Set<String> haystackWordNums = GroundingVerifier.cardinalWordNumbersIn(haystackBuf.toString());
+        Set<String> proseNums        = GroundingVerifier.canonicalNumbersIn(prose);
+        Set<String> proseWordNums    = GroundingVerifier.cardinalWordNumbersIn(prose);
+        int numbersChecked = proseNums.size() + proseWordNums.size();
         for (String n : proseNums) {
             if (n.length() < 2) continue;                                // single-digit noise
             if (n.equals("2026") || n.equals("2025")) continue;          // year tokens
             if (haystackNums.contains(n))         continue;              // direct match
+            if (haystackWordNums.contains(n))     continue;              // word-form haystack match
             if (haystackRoundedForms.contains(n)) continue;              // rounded-form match
 
             mismatches.add("prose contains number \"" + n
+                    + "\" not found in breakdown or surrounding-window summaries");
+        }
+
+        // Cardinal word-form numerals in prose must also ground. No length
+        // filter — INTERPRET prose commonly renders small breakdown counts in
+        // word form ("two co-occurring layering events" from co_occurring.
+        // during_event.layering.count=2). Same failure-mode mitigation as in
+        // SynthesisVerifier — confirmed 2026-05-28 audit found word-form
+        // counts bypassing verification across all three layers.
+        for (String wn : proseWordNums) {
+            if (haystackNums.contains(wn))     continue;
+            if (haystackWordNums.contains(wn)) continue;
+            mismatches.add("prose cardinal word-form \"" + wn
                     + "\" not found in breakdown or surrounding-window summaries");
         }
 
