@@ -212,7 +212,14 @@ public final class IcebergScorer implements EventScorer {
             double[] gaps = new double[run.size() - 1];
             for (int i = 1; i < run.size(); i++) gaps[i - 1] = run.get(i).tsNanos - run.get(i - 1).tsNanos;
             double cadenceCv = com.longexposure.analytics.Analytics.coefficientOfVariation(gaps);
-            if (!Double.isNaN(cadenceCv)) breakdown.put("refill_cadence_cv", BreakdownFmt.round(cadenceCv, 3));
+            if (!Double.isNaN(cadenceCv)) {
+                breakdown.put("refill_cadence_cv", BreakdownFmt.round(cadenceCv, 3));
+                // Anchored label so the prose has vocabulary ("metronomic" /
+                // "regular" / "irregular" / "erratic") instead of bare "CV 2.57"
+                // — same pattern as burstiness_class / ofi_class.
+                String cls = com.longexposure.analytics.Analytics.refillCadenceClass(cadenceCv);
+                if (cls != null) breakdown.put("refill_cadence_class", cls);
+            }
         }
         breakdown.put("fill_size_uniformity",
                 cv < 0.05 ? "very_uniform" :

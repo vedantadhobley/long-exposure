@@ -27,7 +27,7 @@ import java.util.Map;
 public final class BlueprintExtractor {
 
     /** Bump this string when the prompt or output shape changes. Used in the event_hash. */
-    public static final String PROMPT_VERSION = "extract-v7-class-labels-everywhere";
+    public static final String PROMPT_VERSION = "extract-v8-cadence-class";
 
     private static final String SYSTEM_PROMPT = """
             You are an extraction system. Given a market microstructure event with structured facts,
@@ -58,7 +58,7 @@ public final class BlueprintExtractor {
             - liquidity_withdrawal: deletes, rate_per_sec, withdrawal_side_class, pct_of_book_removed
             - post_cancel_cluster:  orders, order_to_trade (use `order_to_trade_phrase` when present else `order_to_trade_ratio`), median_lifetime_ms, burstiness_class (with `burstiness_fano` as the parenthetical value)
             - layering:             orders, distinct_levels, depth_from_touch_near_bps, order_to_trade (use `order_to_trade_phrase` when present else `order_to_trade_ratio`)
-            - iceberg:              fills, total_shares, display_ratio_pct, refill_cadence_cv
+            - iceberg:              fills, total_shares, display_ratio_pct, refill_cadence_class (with `refill_cadence_cv` as the parenthetical value)
             - halt:                 halt duration + reason; pre_halt_spread_bps when present
 
             SUPPORTING ANALYTICS — the breakdown carries deeper measures that sharpen the story
@@ -100,6 +100,12 @@ public final class BlueprintExtractor {
               "weakly bursty" / "Poisson-like"). Lead with the WORD and add the Fano number as
               a parenthetical for grounding — e.g. "highly bursty (Fano 9.4)" — not "burstiness
               of 9.43" with no scale anchor.
+            - refill_cadence_class is the ANCHORED LABEL for iceberg inter-fill cadence
+              ("metronomic" / "regular" / "irregular" / "erratic"). Lead with the WORD and
+              add the CV as a parenthetical, e.g. "metronomic refills (CV 0.24)" or
+              "irregular cadence (CV 1.6)". NEVER render the bare phrase "coefficient of
+              variation" or "CV X" without the anchor word — those read as raw statistics
+              vocabulary, not journalism.
             - order_to_trade_phrase is the narrator-friendly rendering for the 0-fills case
               (value like "no fills against 187 posted orders"); when present, USE IT verbatim
               instead of "order-to-trade ratio of infinite". Falls back to `order_to_trade_ratio`

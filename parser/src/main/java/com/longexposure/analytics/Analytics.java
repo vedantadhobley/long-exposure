@@ -353,6 +353,22 @@ public final class Analytics {
         return "balanced";
     }
 
+    /**
+     * Anchored class label for a refill-cadence CV (iceberg inter-fill gap
+     * variability). Low CV = same gap between every refill (machine-worked
+     * reserve); high CV = irregular timing. Bands tuned for inter-fill
+     * coefficients-of-variation observed empirically on the 2-week dataset.
+     *
+     * <p>Returns {@code null} for NaN.
+     */
+    public static String refillCadenceClass(final double cv) {
+        if (Double.isNaN(cv)) return null;
+        if (cv < 0.3) return "metronomic";
+        if (cv < 1.0) return "regular";
+        if (cv < 2.0) return "irregular";
+        return "erratic";
+    }
+
     // ─── signed-flow / impact (IEX-slice approximations — narrate with that caveat) ──
 
     /** Order-flow imbalance: net signed displayed-size change ∈ [−1, 1]; +1 = all bid-side accumulation. */
