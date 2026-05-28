@@ -49,7 +49,7 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
             .getOrDefault("LLAMA_MODEL", "Qwen3.5-122B-A10B");
 
     /** Bumped when the prompt changes; invalidates the cache. */
-    private static final String PROMPT_VERSION = "interpret-v8-derived-reversion";
+    private static final String PROMPT_VERSION = "interpret-v9-supporting-analytics";
 
     /** Half-window for the surrounding trade context. */
     private static final long WINDOW_SECONDS = 60L;
@@ -96,6 +96,29 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
             claim intent ("the trader was X-ing", "this was spoofing"), or
             speculate about causes outside the wire data (news, off-exchange
             activity, FOMC, earnings).
+
+            SUPPORTING ANALYTICS — the breakdown carries deeper measures that often
+            sharpen the sequential / causal story you're telling. Use them when the
+            context they describe is genuinely what the observation is about; do not
+            list mechanically. Most useful for interpretation specifically:
+              - pre_event_ofi: the book's directional lean BEFORE the event. Negative =
+                sell-side accumulating; positive = buy-side. "OFI ran 0.42 negative in
+                the seconds before — sell pressure was already building".
+              - window_realized_vol_bps: surrounding-window volatility context.
+                "realized vol ran N bps in the window, well above the day's baseline".
+              - self_excitation (Hawkes branching): when > 0.6, "the burst cascaded —
+                N% of orders triggered by prior arrivals" is a causal observation
+                INTERPRET can make that DESCRIBE cannot.
+              - post_event_reversion_pct + pre_to_post_vwap_move_bps (the derived
+                block already attached to the prompt): "price reverted N% of the
+                in-event move" / "VWAP moved N bps from pre to post". Use to
+                distinguish transient impact from informed flow.
+              - book_depth_imbalance: directional skew of the book at event-time
+                ("the book was 3:1 skewed to the bid before the print").
+
+            For the slice-fragile measures (window_vpin, window_kyle_lambda,
+            window_jump_ratio), only mention if the narrative truly needs them, and
+            always with the "on IEX" qualifier.
 
             EMPTY-WINDOW CASE: when both surrounding windows are empty or quiet,
             state that explicitly — "the pattern appears in isolation" is a valid

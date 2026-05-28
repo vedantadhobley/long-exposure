@@ -27,7 +27,7 @@ import java.util.Map;
 public final class BlueprintExtractor {
 
     /** Bump this string when the prompt or output shape changes. Used in the event_hash. */
-    public static final String PROMPT_VERSION = "extract-v5-anchored-jargon";
+    public static final String PROMPT_VERSION = "extract-v6-supporting-analytics-anchored";
 
     private static final String SYSTEM_PROMPT = """
             You are an extraction system. Given a market microstructure event with structured facts,
@@ -61,12 +61,23 @@ public final class BlueprintExtractor {
             - iceberg:              fills, total_shares, display_ratio_pct, refill_cadence_cv
             - halt:                 halt duration + reason; pre_halt_spread_bps when present
 
-            SUPPORTING ANALYTICS — the breakdown also carries deeper measures (window_realized_vol_bps,
-            window_vpin, window_jump_ratio, self_excitation, arrival_autocorr, book_depth_imbalance,
-            volume_regime_shift, depth_recovery_pct, pre_event_ofi, …). Weave in AT MOST ONE if it
-            sharpens the story; do NOT list them mechanically — a paragraph that recites every metric
-            reads like a CSV, not journalism. window_vpin / window_kyle_lambda are IEX-slice
-            approximations (render "on IEX" if used).
+            SUPPORTING ANALYTICS — the breakdown carries deeper measures that sharpen the story
+            when relevant. Weave in 1-2 when they meaningfully add context — never list mechanically.
+            A paragraph that recites every metric reads like a CSV, not journalism; a paragraph
+            with a single defining number and a sharpening context-metric reads like a journalist.
+            The most useful supporting metric varies by scorer:
+            - sweep:                   pre_event_ofi (was directional flow primed?), window_realized_vol_bps (was the surrounding window volatile?), book_depth_imbalance (was the book skewed pre-event?)
+            - large_trade:             pre_event_ofi (informed flow signature?), window_realized_vol_bps
+            - post_cancel_cluster:     self_excitation (cascading triggers vs independent), arrival_autocorr (machine-paced cadence vs random), book_depth_imbalance
+            - layering:                self_excitation, arrival_autocorr, book_depth_imbalance
+            - iceberg:                 arrival_autocorr (regular refill cadence?), book_depth_imbalance
+            - liquidity_withdrawal:    book_depth_imbalance (was the withdrawal asymmetric?), pre_event_ofi
+            - halt:                    pre_event_ofi (was the book bracing before the suspension?)
+            - volume_deviation:        volume_regime_shift (sustained step shift vs one-day spike)
+
+            Slice-fragile (window_vpin, window_kyle_lambda, window_jump_ratio) are IEX-slice
+            approximations. Use only when the narrative truly needs them, and always with the
+            "on IEX" qualifier.
 
             The `what_happened` phrase NAMES THE EVENT TYPE (from "Event type:") and is INDEPENDENT
             of which number leads — never let a leading notional value relabel a sweep as a "block
@@ -97,6 +108,34 @@ public final class BlueprintExtractor {
               depth_from_touch_near_bps/far_bps → "the layered band sat N-M bps off the touch";
               pre_halt_spread_bps → "the spread was N bps when trading halted";
               pct_of_book_removed → "pulled N% of displayed depth".
+            - pre_event_ofi ∈ [−1, +1] is the SIGNED order-flow imbalance in the seconds
+              before the event. Negative = sell-side accumulation; positive = buy-side. Render
+              the SIGN as direction, the magnitude as strength: "OFI ran 0.42 negative before
+              the sweep — sell pressure was already accumulating" or "the book leaned heavily
+              to the bid (OFI 0.6) ahead of the print". When |OFI| < 0.1, the book was roughly
+              balanced; in that case the metric is uninformative and skip it.
+            - window_realized_vol_bps is the surrounding-window realized volatility in basis
+              points. Render as "realized vol ran N bps in the window" or context-anchored
+              ("the surrounding minute carried N bps of vol, well above the day's baseline").
+            - self_excitation ∈ [0, 1] is the Hawkes branching-ratio estimate: fraction of
+              orders triggered by prior orders. > 0.6 = "the burst self-excited — N% of orders
+              triggered by prior arrivals" (cascading shape); 0.3-0.6 = "moderate self-
+              excitation"; near zero = "arrivals were largely independent". When near zero,
+              omit (no signal).
+              When > 0.6 and arrival_autocorr is also high, the cadence was both cascading
+              AND machine-paced — say so.
+            - arrival_autocorr ∈ [−1, +1] is the lag-1 autocorrelation of inter-arrival gaps.
+              > 0.5 = "machine-paced (autocorr 0.7)" — a fixed-beat algo. Between −0.2 and
+              +0.2 = "near-Poisson arrivals (autocorr ~0)" or omit. Highly negative is rare
+              and not worth rendering.
+            - book_depth_imbalance ∈ [−1, +1] is displayed depth ratio at event-time (positive
+              = bid-side heavier). Render as "the book was N:1 skewed to the [bid/ask]" or
+              the directional reading ("displayed depth was concentrated on the bid side").
+              When |imbalance| < 0.1, the book was roughly balanced — omit.
+            - volume_regime_shift is the CUSUM-style detector of a SUSTAINED step in a
+              symbol's trailing-window volume. Use it to distinguish "today was a one-day
+              spike" from "today marks a regime shift": "the surge was a sustained step, not
+              a one-day spike" when the shift is high; "an isolated one-day spike" otherwise.
             """;
 
     private final LlamaClient llama;
