@@ -19,10 +19,19 @@ public final class AggregateWeekWorkflowImpl implements AggregateWeekWorkflow {
                     // Dispatch on the narration task queue (shares the JVM-wide
                     // LLM concurrency cap with DESCRIBE / INTERPRET / SYNTHESIZE).
                     .setTaskQueue(DailyPipelineWorkflow.NARRATION_TASK_QUEUE)
-                    // Tiny prompt (~1-2K tokens) + ~500-token completion — fast.
-                    // 5 min start-to-close is generous headroom.
-                    .setStartToCloseTimeout(Duration.ofMinutes(5))
-                    .setHeartbeatTimeout(Duration.ofMinutes(1))
+                    // 10 min, not 5 — same reasoning as SynthesizeDayWorkflowImpl.
+                    // The activity does up to MAX_LLM_ATTEMPTS=3 verifier-driven
+                    // retries × ~90s LLM call each ≈ 4.5 min; a single transient
+                    // verifier rejection on attempt 1 eats all the headroom under
+                    // a 5-min cap. AggregateQuarter/Year were already 10 min from
+                    // their first build — propagating the same value here.
+                    .setStartToCloseTimeout(Duration.ofMinutes(10))
+                    // 5 min, not 1 — same heartbeat-timeout bug as
+                    // SynthesizeDayWorkflowImpl. The activity does a blocking
+                    // LLM HTTP call per attempt (~30-90s) with no heartbeat
+                    // during the wait; a 1-min cap kills it before the LLM
+                    // returns. Propagating the 5-min fix here too.
+                    .setHeartbeatTimeout(Duration.ofMinutes(5))
                     .setRetryOptions(RetryOptions.newBuilder()
                             .setInitialInterval(Duration.ofSeconds(15))
                             .setMaximumAttempts(2)
