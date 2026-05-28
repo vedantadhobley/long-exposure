@@ -184,9 +184,16 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
             // expensive part. interpretation_hash folds in breakdown + window
             // summaries + prompt version, so if a verified interpretation exists
             // for these exact inputs we reuse it and skip the LLM.
+            //
+            // FK re-link on cache hit (2026-05-28 evening): re-scoring a day
+            // generates new selected_ids; the cached row's selected_id then
+            // points at a deleted selected_events row. Update the existing
+            // row's FK to the current selected_id so the API join surfaces it.
+            // Same fix pattern as NarrateEventActivityImpl.
             byte[] hash = computeHash(row.scorerId, row.breakdown, preJson, postJson);
             if (NarrateEventActivityImpl.verifiedExists(conn, "interpretations", "interpretation_hash", hash)) {
-                LOG.info("interpret skip (cached)  selected_id={} scorer={} symbol={}",
+                relinkInterpretation(conn, hash, selectedId);
+                LOG.info("interpret skip (cached, relinked)  selected_id={} scorer={} symbol={}",
                         selectedId, row.scorerId, row.symbol);
                 return 1;
             }
@@ -407,6 +414,22 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
             st.setString(12, MODEL_ID);
             st.setBoolean(13, verify.passed());
             st.setString(14, verifierNotes.toString());
+            st.executeUpdate();
+        }
+    }
+
+    /**
+     * On cache hit, refresh the row's FK to point at the current selected_id.
+     * Same shape as {@code NarrateEventActivityImpl.relinkNarrative}; see
+     * that comment for the FK orphaning rationale.
+     */
+    private static void relinkInterpretation(final Connection conn, final byte[] hash,
+                                              final long currentSelectedId) throws Exception {
+        String sql = "UPDATE interpretations SET selected_id = ? "
+                   + "WHERE interpretation_hash = ? AND verifier_passed = true";
+        try (PreparedStatement st = conn.prepareStatement(sql)) {
+            st.setLong(1, currentSelectedId);
+            st.setBytes(2, hash);
             st.executeUpdate();
         }
     }

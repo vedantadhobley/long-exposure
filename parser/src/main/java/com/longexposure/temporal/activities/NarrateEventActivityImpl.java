@@ -62,10 +62,19 @@ public final class NarrateEventActivityImpl implements NarrateEventActivity {
             // prompt versions); if a verified narrative already exists for these
             // exact inputs, reuse it and skip the 2 LLM calls. Makes re-scoring /
             // backfill cheap — only genuinely new or changed events hit the LLM.
-            // (Storage upsert is unchanged; this just avoids the compute.)
+            //
+            // FK orphaning fix (2026-05-28 evening): re-scoring a day deletes +
+            // re-inserts selected_events with new BIGSERIAL selected_ids. The
+            // cached narrative row's selected_id then points at a deleted
+            // selected_events row, so the API's join returns nothing for the
+            // new selected_id. Before this fix the cache hit was a no-op
+            // write — frontend showed no narration. Now we UPDATE the row's
+            // selected_id to point at the current selected_events row. Same
+            // content, fresh FK.
             byte[] eventHash = pipeline.eventHash(in);
             if (verifiedExists(conn, "narratives", "event_hash", eventHash)) {
-                LOG.info("narrate skip (cached)  selected_id={} scorer={} symbol={}",
+                relinkNarrative(conn, eventHash, selectedId);
+                LOG.info("narrate skip (cached, relinked)  selected_id={} scorer={} symbol={}",
                         selectedId, in.scorerId(), in.symbol());
                 return 1;
             }
@@ -185,6 +194,29 @@ public final class NarrateEventActivityImpl implements NarrateEventActivity {
             try (ResultSet rs = st.executeQuery()) {
                 return rs.next();
             }
+        }
+    }
+
+    /**
+     * Update cached narrative rows' {@code selected_id} to point at the
+     * current selected_events row. The narrative content is unchanged (same
+     * event_hash means same breakdown means same prose); only the FK reference
+     * is refreshed. Without this, re-scoring leaves the cached row pointing at
+     * a deleted selected_events row — frontend joins fail.
+     *
+     * <p>Updates ALL rows matching this event_hash (there can be multiple from
+     * past re-runs that all share content). The API picks latest-by-created_at
+     * elsewhere; here we just ensure at least one row anchors at the current
+     * selected_id.
+     */
+    private static void relinkNarrative(final Connection conn, final byte[] eventHash,
+                                        final long currentSelectedId) throws Exception {
+        String sql = "UPDATE narratives SET selected_id = ? "
+                   + "WHERE event_hash = ? AND verifier_passed = true";
+        try (PreparedStatement st = conn.prepareStatement(sql)) {
+            st.setLong(1, currentSelectedId);
+            st.setBytes(2, eventHash);
+            st.executeUpdate();
         }
     }
 
