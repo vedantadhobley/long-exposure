@@ -324,6 +324,35 @@ public final class Analytics {
         return "Poisson-like";
     }
 
+    /**
+     * Anchored direction label for an order-flow-imbalance value in [−1, +1].
+     * Positive = buy-side accumulation; negative = sell-side. Magnitudes below
+     * 0.1 are informationally close to a balanced book — render as "balanced"
+     * (or omit upstream, per the framing rule).
+     *
+     * <p>Returns {@code null} for NaN.
+     */
+    public static String ofiClass(final double ofi) {
+        if (Double.isNaN(ofi)) return null;
+        if (ofi > 0.1)  return "buyer-leaning";
+        if (ofi < -0.1) return "seller-leaning";
+        return "balanced";
+    }
+
+    /**
+     * Anchored direction label for a displayed-depth imbalance value in
+     * [−1, +1]. Positive = bid-side heavier; negative = ask-side heavier;
+     * |·| &lt; 0.1 = roughly balanced book.
+     *
+     * <p>Returns {@code null} for NaN.
+     */
+    public static String depthImbalanceClass(final double imb) {
+        if (Double.isNaN(imb)) return null;
+        if (imb > 0.1)  return "bid-skewed";
+        if (imb < -0.1) return "ask-skewed";
+        return "balanced";
+    }
+
     // ─── signed-flow / impact (IEX-slice approximations — narrate with that caveat) ──
 
     /** Order-flow imbalance: net signed displayed-size change ∈ [−1, 1]; +1 = all bid-side accumulation. */

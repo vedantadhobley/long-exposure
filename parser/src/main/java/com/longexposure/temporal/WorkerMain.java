@@ -16,6 +16,8 @@ import com.longexposure.temporal.activities.InterpretEventActivityImpl;
 import com.longexposure.temporal.activities.NarrateEventActivityImpl;
 import com.longexposure.temporal.activities.SynthesizeDayActivityImpl;
 import com.longexposure.temporal.activities.AggregateWeekActivityImpl;
+import com.longexposure.temporal.activities.AggregateQuarterActivityImpl;
+import com.longexposure.temporal.activities.AggregateYearActivityImpl;
 import com.longexposure.temporal.activities.RecordValidationActivityImpl;
 import com.longexposure.temporal.activities.RefreshBaselinesActivityImpl;
 import com.longexposure.temporal.activities.RefreshSymbolMetadataActivityImpl;
@@ -33,6 +35,8 @@ import com.longexposure.temporal.workflows.InterpretWorkflowImpl;
 import com.longexposure.temporal.workflows.NarrateWorkflowImpl;
 import com.longexposure.temporal.workflows.SynthesizeDayWorkflowImpl;
 import com.longexposure.temporal.workflows.AggregateWeekWorkflowImpl;
+import com.longexposure.temporal.workflows.AggregateQuarterWorkflowImpl;
+import com.longexposure.temporal.workflows.AggregateYearWorkflowImpl;
 import com.longexposure.temporal.workflows.ParseWorkflowImpl;
 import com.longexposure.temporal.workflows.RefreshSymbolsWorkflow;
 import com.longexposure.temporal.workflows.RefreshSymbolsWorkflowImpl;
@@ -113,6 +117,8 @@ public final class WorkerMain {
                 InterpretWorkflowImpl.class,
                 SynthesizeDayWorkflowImpl.class,
                 AggregateWeekWorkflowImpl.class,
+                AggregateQuarterWorkflowImpl.class,
+                AggregateYearWorkflowImpl.class,
                 CleanupWorkflowImpl.class,
                 RefreshSymbolsWorkflowImpl.class);
         worker.registerActivitiesImplementations(
@@ -153,7 +159,9 @@ public final class WorkerMain {
                 new NarrateEventActivityImpl(),
                 new InterpretEventActivityImpl(),
                 new SynthesizeDayActivityImpl(),
-                new AggregateWeekActivityImpl());
+                new AggregateWeekActivityImpl(),
+                new AggregateQuarterActivityImpl(),
+                new AggregateYearActivityImpl());
 
         factory.start();
         LOG.info("workers started  main_queue={} narration_queue={} narration_concurrency=2",

@@ -27,7 +27,7 @@ import java.util.Map;
 public final class BlueprintExtractor {
 
     /** Bump this string when the prompt or output shape changes. Used in the event_hash. */
-    public static final String PROMPT_VERSION = "extract-v6-supporting-analytics-anchored";
+    public static final String PROMPT_VERSION = "extract-v7-class-labels-everywhere";
 
     private static final String SYSTEM_PROMPT = """
             You are an extraction system. Given a market microstructure event with structured facts,
@@ -108,12 +108,11 @@ public final class BlueprintExtractor {
               depth_from_touch_near_bps/far_bps → "the layered band sat N-M bps off the touch";
               pre_halt_spread_bps → "the spread was N bps when trading halted";
               pct_of_book_removed → "pulled N% of displayed depth".
-            - pre_event_ofi ∈ [−1, +1] is the SIGNED order-flow imbalance in the seconds
-              before the event. Negative = sell-side accumulation; positive = buy-side. Render
-              the SIGN as direction, the magnitude as strength: "OFI ran 0.42 negative before
-              the sweep — sell pressure was already accumulating" or "the book leaned heavily
-              to the bid (OFI 0.6) ahead of the print". When |OFI| < 0.1, the book was roughly
-              balanced; in that case the metric is uninformative and skip it.
+            - pre_event_ofi_class is the ANCHORED LABEL ("buyer-leaning"/"seller-leaning"/
+              "balanced") for the OFI value. Lead with the WORD and add the bare value as
+              parenthetical, e.g. "the book was seller-leaning (OFI −0.42) before the sweep"
+              or "buyer-leaning (OFI 0.6) ahead of the print". When pre_event_ofi_class is
+              "balanced", the book was roughly even — skip the metric (no signal).
             - window_realized_vol_bps is the surrounding-window realized volatility in basis
               points. Render as "realized vol ran N bps in the window" or context-anchored
               ("the surrounding minute carried N bps of vol, well above the day's baseline").
@@ -128,10 +127,11 @@ public final class BlueprintExtractor {
               > 0.5 = "machine-paced (autocorr 0.7)" — a fixed-beat algo. Between −0.2 and
               +0.2 = "near-Poisson arrivals (autocorr ~0)" or omit. Highly negative is rare
               and not worth rendering.
-            - book_depth_imbalance ∈ [−1, +1] is displayed depth ratio at event-time (positive
-              = bid-side heavier). Render as "the book was N:1 skewed to the [bid/ask]" or
-              the directional reading ("displayed depth was concentrated on the bid side").
-              When |imbalance| < 0.1, the book was roughly balanced — omit.
+            - book_depth_imbalance_class is the ANCHORED LABEL ("bid-skewed"/"ask-skewed"/
+              "balanced") for the displayed-depth ratio at event-time. Lead with the WORD
+              and add the bare value as parenthetical: "the book was bid-skewed (imbalance
+              0.43)" or "displayed depth was ask-skewed before the print". When the class
+              is "balanced", skip the metric.
             - volume_regime_shift is the CUSUM-style detector of a SUSTAINED step in a
               symbol's trailing-window volume. Use it to distinguish "today was a one-day
               spike" from "today marks a regime shift": "the surge was a sustained step, not

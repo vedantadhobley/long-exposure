@@ -733,6 +733,47 @@ CREATE TABLE IF NOT EXISTS weekly_aggregate (
 -- content_hash added 2026-05-26 for the recompute-daily skip; ALTER so existing DBs pick it up.
 ALTER TABLE weekly_aggregate ADD COLUMN IF NOT EXISTS content_hash BYTEA;
 
+-- ─── Quarterly rollup (Tier B1, 2026-05-28) ──────────────────────────────────
+-- Same shape as weekly_aggregate, one level up: reads the quarter's ≤13 weekly
+-- rollups + the prior ~4 quarterly rollups (year-over-quarter trend context).
+-- Recompute-on-week-finalize via DailyPipelineWorkflow's chain — sits dormant
+-- (gated on weekly_count >= MIN_WEEKS_FOR_QUARTER inside the activity) until
+-- enough weekly history accumulates (~Sept 30 first fire under the current
+-- launch timeline; see tiered-baselines-design.md §8.1). Content-addressed
+-- via the standard SHA256(inputs + prompt + model) skip.
+CREATE TABLE IF NOT EXISTS quarterly_aggregate (
+    quarter_start      DATE        PRIMARY KEY,   -- first day of the calendar quarter
+    quarter_end        DATE        NOT NULL,       -- last day actually covered
+    aggregate_text     TEXT        NOT NULL,
+    weeks_considered   INTEGER     NOT NULL,
+    quarter_aggregates JSONB       NOT NULL,       -- rolled-up totals across the quarter
+    model_id           TEXT        NOT NULL,
+    prompt_version     TEXT        NOT NULL,
+    verifier_passed    BOOLEAN     NOT NULL,
+    verifier_notes     JSONB,
+    content_hash       BYTEA,                      -- SHA256(weekly rollups + prior quarters + prompt + model)
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ─── Yearly rollup (Tier B2, 2026-05-28) ─────────────────────────────────────
+-- Same shape one level up again: reads the year's ≤4 quarterly rollups + prior
+-- yearly rollups for multi-year trend. Sits dormant until ≥2 quarterly rollups
+-- exist (~Q3 2027 under the current timeline). The capstone "year in IEX
+-- microstructure" retrospective.
+CREATE TABLE IF NOT EXISTS yearly_aggregate (
+    year_start          DATE        PRIMARY KEY,
+    year_end            DATE        NOT NULL,
+    aggregate_text      TEXT        NOT NULL,
+    quarters_considered INTEGER     NOT NULL,
+    year_aggregates     JSONB       NOT NULL,
+    model_id            TEXT        NOT NULL,
+    prompt_version      TEXT        NOT NULL,
+    verifier_passed     BOOLEAN     NOT NULL,
+    verifier_notes      JSONB,
+    content_hash        BYTEA,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 
 -- ─── TimescaleDB compression ─────────────────────────────────────────────────
 -- Compression is REQUIRED for production — without it the host disk fills up

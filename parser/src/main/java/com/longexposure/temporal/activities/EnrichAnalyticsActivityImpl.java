@@ -276,7 +276,13 @@ public final class EnrichAnalyticsActivityImpl implements EnrichAnalyticsActivit
                     double ofi = Analytics.orderFlowImbalance(
                             rs.getLong("bid_added"), rs.getLong("bid_removed"),
                             rs.getLong("ask_added"), rs.getLong("ask_removed"));
-                    if (!Double.isNaN(ofi)) add.put("pre_event_ofi", BreakdownFmt.round(ofi, 2));
+                    if (!Double.isNaN(ofi)) {
+                        add.put("pre_event_ofi", BreakdownFmt.round(ofi, 2));
+                        // Anchored direction label so the prose has buyer-leaning /
+                        // seller-leaning / balanced vocabulary instead of bare 0.42.
+                        String cls = Analytics.ofiClass(ofi);
+                        if (cls != null) add.put("pre_event_ofi_class", cls);
+                    }
                 }
             }
         }
@@ -447,7 +453,14 @@ public final class EnrichAnalyticsActivityImpl implements EnrichAnalyticsActivit
     private static void putDepthImbalance(final ObjectNode add, final BookSnapshotEngine.Snapshot s) {
         if (s == null || !s.captured()) return;
         long tb = s.totalBidSize(), ta = s.totalAskSize();
-        if (tb + ta > 0) add.put("book_depth_imbalance", BreakdownFmt.round((tb - ta) / (double) (tb + ta), 2));
+        if (tb + ta > 0) {
+            double imb = (tb - ta) / (double) (tb + ta);
+            add.put("book_depth_imbalance", BreakdownFmt.round(imb, 2));
+            // Anchored direction label (bid-skewed / ask-skewed / balanced) so the
+            // prose has vocabulary instead of having to interpret the bare ratio.
+            String cls = Analytics.depthImbalanceClass(imb);
+            if (cls != null) add.put("book_depth_imbalance_class", cls);
+        }
     }
 
     private List<Selected> loadSelected(final Connection conn, final LocalDate date) throws Exception {

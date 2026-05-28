@@ -136,6 +136,15 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
     private final AggregateWeekWorkflow aggregateChild = Workflow.newChildWorkflowStub(
             AggregateWeekWorkflow.class, childOptions("aggregate"));
 
+    // Tier B: quarterly + yearly rollups (sit dormant until enough data
+    // accumulates — both activities return 0 without an LLM call when the
+    // gate isn't met, so the wiring is free until that threshold).
+    private final AggregateQuarterWorkflow aggregateQuarterChild = Workflow.newChildWorkflowStub(
+            AggregateQuarterWorkflow.class, childOptions("aggregate-quarter"));
+
+    private final AggregateYearWorkflow aggregateYearChild = Workflow.newChildWorkflowStub(
+            AggregateYearWorkflow.class, childOptions("aggregate-year"));
+
     private final CleanupWorkflow cleanupChild = Workflow.newChildWorkflowStub(
             CleanupWorkflow.class, childOptions("cleanup"));
 
@@ -257,6 +266,22 @@ public final class DailyPipelineWorkflowImpl implements DailyPipelineWorkflow {
                 aggregateChild.run(date);
             } catch (ChildWorkflowFailure cwf) {
                 LOG.warn("aggregate child failed (pipeline continues)  date={} err={}",
+                        date, cwf.getMessage());
+            }
+            // Quarterly + yearly rollups — both sit dormant (return 0) until
+            // enough lower-tier rollups accumulate, so the wiring is free.
+            // They share the LLM 2-slot cap with the rest of the narration
+            // chain — only one LLM call at a time, sequenced after weekly.
+            try {
+                aggregateQuarterChild.run(date);
+            } catch (ChildWorkflowFailure cwf) {
+                LOG.warn("aggregate-quarter child failed (pipeline continues)  date={} err={}",
+                        date, cwf.getMessage());
+            }
+            try {
+                aggregateYearChild.run(date);
+            } catch (ChildWorkflowFailure cwf) {
+                LOG.warn("aggregate-year child failed (pipeline continues)  date={} err={}",
                         date, cwf.getMessage());
             }
             // Compress the day's chunks now so disk stays lean.

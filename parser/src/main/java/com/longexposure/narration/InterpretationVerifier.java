@@ -39,6 +39,20 @@ import java.util.Set;
  */
 public final class InterpretationVerifier {
 
+    /**
+     * Intent-claim denylist (same regex family as {@link SynthesisVerifier}). The
+     * INTERPRET prompt already forbids intent attribution ("the trader was
+     * X-ing", "this was spoofing"), but the verifier didn't previously check —
+     * a model leak would have passed. Empirically clean on 2026-05-22 (0/160
+     * leaks), but defense-in-depth is cheap and consistent across the three
+     * verifier tiers (DESCRIBE has no intent leaks observed either; that tier
+     * would add the same check if it ever did).
+     */
+    private static final java.util.regex.Pattern INTENT_WORDS = java.util.regex.Pattern.compile(
+            "\\b(?:manipul\\w*|spoof\\w*|front[- ]?run\\w*|wash[- ]?trad\\w*|"
+                    + "gam(?:ing|ed)|illegal|fake)\\b",
+            java.util.regex.Pattern.CASE_INSENSITIVE);
+
     public InterpretationVerifier() {}
 
     /**
@@ -120,6 +134,15 @@ public final class InterpretationVerifier {
                     }
                 }
             }
+        }
+
+        // ─── Intent-claim denylist (same path as SynthesisVerifier) ─────────
+        java.util.regex.Matcher dm = INTENT_WORDS.matcher(prose);
+        java.util.HashSet<String> intentHits = new java.util.HashSet<>();
+        while (dm.find()) intentHits.add(dm.group().toLowerCase());
+        for (String hit : intentHits) {
+            mismatches.add("prose contains intent-claim word \"" + hit
+                    + "\" — pattern-catalog rule: describe shape, not intent");
         }
 
         return new Result(mismatches.isEmpty(), mismatches, numbersChecked);
