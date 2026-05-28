@@ -26,11 +26,14 @@ run_stage () {
     # block until terminal
     while true; do
         local status
+        # JSON output returns the full enum: WORKFLOW_EXECUTION_STATUS_COMPLETED
+        # etc. — strip the prefix to compare against the short form.
         status=$(docker exec long-exposure-dev-temporal temporal workflow describe \
-            -w "$wfid" --output json 2>/dev/null | grep -m1 '"status"' | sed 's/.*"status": "//; s/",.*//')
+            -w "$wfid" --output json 2>/dev/null | grep -m1 '"status"' \
+            | sed 's/.*"status": "WORKFLOW_EXECUTION_STATUS_//; s/",.*//')
         case "$status" in
-            "Completed") echo "$(date) ${type} → Completed" | tee -a "$LOG"; return 0 ;;
-            "Failed"|"Terminated"|"TimedOut"|"Canceled")
+            "COMPLETED") echo "$(date) ${type} → Completed" | tee -a "$LOG"; return 0 ;;
+            "FAILED"|"TERMINATED"|"TIMED_OUT"|"CANCELED")
                 echo "$(date) ${type} → ${status}" | tee -a "$LOG"
                 docker exec long-exposure-dev-temporal temporal workflow show -w "$wfid" --output table 2>&1 | tail -20 | tee -a "$LOG"
                 return 1 ;;
