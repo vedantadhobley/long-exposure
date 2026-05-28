@@ -237,8 +237,17 @@ public final class EnrichAnalyticsActivityImpl implements EnrichAnalyticsActivit
             long posts = countIn(conn, "orders_add",      e.symbol, e.ts, e.tsEnd);
             long fills = countIn(conn, "orders_executed", e.symbol, e.ts, e.tsEnd);
             double otr = Analytics.orderToTradeRatio(posts, fills);
-            if (Double.isInfinite(otr))        add.put("order_to_trade_ratio", "infinite (0 fills)");
-            else if (!Double.isNaN(otr))       add.put("order_to_trade_ratio", BreakdownFmt.round(otr, 1));
+            if (Double.isInfinite(otr)) {
+                add.put("order_to_trade_ratio", "infinite (0 fills)");
+                // Anchored narrator-friendly phrasing for the ∞ case, so the
+                // prose reads "no fills against 187 posted orders" instead of
+                // "order-to-trade ratio of infinite" (9/163 narrations on
+                // 05-22). The bare ratio field is kept for verifier grounding.
+                add.put("order_to_trade_phrase",
+                        "no fills against " + BreakdownFmt.formatCount(posts) + " posted orders");
+            } else if (!Double.isNaN(otr)) {
+                add.put("order_to_trade_ratio", BreakdownFmt.round(otr, 1));
+            }
             add.put("window_orders_posted", BreakdownFmt.formatCount(posts));
             add.put("window_orders_filled", BreakdownFmt.formatCount(fills));
         }

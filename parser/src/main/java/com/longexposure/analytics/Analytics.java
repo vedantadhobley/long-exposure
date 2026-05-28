@@ -307,6 +307,23 @@ public final class Analytics {
         return Math.min(0.999, 1.0 - 1.0 / Math.sqrt(fano));
     }
 
+    /**
+     * Map a Fano factor to a human-readable class label, so the LLM has an
+     * anchored phrase to lead with (and falls back to the bare number only as
+     * a parenthetical). The bands match the standard burstiness interpretation:
+     * Fano = 1 ≡ Poisson-random arrivals; &gt;1 = overdispersed (clustered);
+     * &lt;1 = underdispersed (regular / machine-paced).
+     *
+     * <p>Returns {@code null} if Fano is NaN (caller skips the field).
+     */
+    public static String fanoClass(final double fano) {
+        if (Double.isNaN(fano)) return null;
+        if (fano > 5.0) return "highly bursty";
+        if (fano > 2.0) return "moderately bursty";
+        if (fano > 1.0) return "weakly bursty";
+        return "Poisson-like";
+    }
+
     // ─── signed-flow / impact (IEX-slice approximations — narrate with that caveat) ──
 
     /** Order-flow imbalance: net signed displayed-size change ∈ [−1, 1]; +1 = all bid-side accumulation. */

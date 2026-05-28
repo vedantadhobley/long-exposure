@@ -27,7 +27,7 @@ import java.util.Map;
 public final class BlueprintExtractor {
 
     /** Bump this string when the prompt or output shape changes. Used in the event_hash. */
-    public static final String PROMPT_VERSION = "extract-v4-full-analytics";
+    public static final String PROMPT_VERSION = "extract-v5-anchored-jargon";
 
     private static final String SYSTEM_PROMPT = """
             You are an extraction system. Given a market microstructure event with structured facts,
@@ -56,8 +56,8 @@ public final class BlueprintExtractor {
             - large_trade:          notional_dollars, pct_of_baseline_volume
             - volume_deviation:     deviation_x, percentile_rank
             - liquidity_withdrawal: deletes, rate_per_sec, withdrawal_side_class, pct_of_book_removed
-            - post_cancel_cluster:  orders, order_to_trade_ratio, median_lifetime_ms, burstiness_fano
-            - layering:             orders, distinct_levels, depth_from_touch_near_bps, order_to_trade_ratio
+            - post_cancel_cluster:  orders, order_to_trade (use `order_to_trade_phrase` when present else `order_to_trade_ratio`), median_lifetime_ms, burstiness_class (with `burstiness_fano` as the parenthetical value)
+            - layering:             orders, distinct_levels, depth_from_touch_near_bps, order_to_trade (use `order_to_trade_phrase` when present else `order_to_trade_ratio`)
             - iceberg:              fills, total_shares, display_ratio_pct, refill_cadence_cv
             - halt:                 halt duration + reason; pre_halt_spread_bps when present
 
@@ -85,6 +85,14 @@ public final class BlueprintExtractor {
               intent. (Categorical key_numbers carry the label text as their value.)
             - slippage_direction is CATEGORICAL ("up"/"down"/"flat"); pair it with slippage_bps
               (e.g. "walked 11.0 bps up across N levels").
+            - burstiness_class is the ANCHORED LABEL ("highly bursty" / "moderately bursty" /
+              "weakly bursty" / "Poisson-like"). Lead with the WORD and add the Fano number as
+              a parenthetical for grounding — e.g. "highly bursty (Fano 9.4)" — not "burstiness
+              of 9.43" with no scale anchor.
+            - order_to_trade_phrase is the narrator-friendly rendering for the 0-fills case
+              (value like "no fills against 187 posted orders"); when present, USE IT verbatim
+              instead of "order-to-trade ratio of infinite". Falls back to `order_to_trade_ratio`
+              for finite values.
             - book-state stats (present only when the symbol had a live IEX book):
               depth_from_touch_near_bps/far_bps → "the layered band sat N-M bps off the touch";
               pre_halt_spread_bps → "the spread was N bps when trading halted";

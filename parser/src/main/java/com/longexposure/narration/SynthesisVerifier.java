@@ -75,6 +75,26 @@ public final class SynthesisVerifier {
             "USD", "GMT", "API", "DPLS", "TOPS", "DEEP"
     );
 
+    /**
+     * Words that imply <em>intent</em>. Explicitly forbidden by the
+     * SYNTHESIZE + AGGREGATE prompts (the pattern-catalog rule: describe
+     * shape, not intent), but the verifier didn't previously check. Observed
+     * leak 2026-05-22: a synthesis paragraph contained
+     * <em>"active, fleeting order-book manipulation across leveraged
+     * vehicles"</em> — passed verifier because it had no number / ticker
+     * mismatch. The retry mechanism re-rolls at temp variance and clears on
+     * the next attempt almost every time, so a denylist reject is cheap.
+     *
+     * <p>Word-boundary-anchored. {@code manipul\w*} catches manipulation /
+     * manipulator / manipulate; {@code spoof\w*} catches spoof / spoofing /
+     * spoofed; {@code gam(ing|ed)} catches gaming / gamed without flagging
+     * benign "game". {@code illegal}, {@code fake} are literal.
+     */
+    private static final Pattern INTENT_WORDS = Pattern.compile(
+            "\\b(?:manipul\\w*|spoof\\w*|front[- ]?run\\w*|wash[- ]?trad\\w*|"
+                    + "gam(?:ing|ed)|illegal|fake)\\b",
+            Pattern.CASE_INSENSITIVE);
+
     public SynthesisVerifier() {}
 
     /**
@@ -154,6 +174,21 @@ public final class SynthesisVerifier {
 
             mismatches.add("prose number \"" + n
                     + "\" not found in narrations / interpretations / day_aggregates");
+        }
+
+        // ─── Intent-claim denylist ──────────────────────────────────────────
+        // The SYNTHESIZE + AGGREGATE prompts already say "do not speculate
+        // about intent", but the 2026-05-22 synthesis leaked
+        // "active, fleeting order-book manipulation across leveraged vehicles"
+        // — verifier passed because it only checks numbers + tickers. Pure-
+        // prose denylist; no haystack. A hit triggers the standard verifier-
+        // driven retry (3 attempts, temp variance) which clears the leak.
+        Matcher dm = INTENT_WORDS.matcher(prose);
+        Set<String> intentHits = new HashSet<>();
+        while (dm.find()) intentHits.add(dm.group().toLowerCase());
+        for (String hit : intentHits) {
+            mismatches.add("prose contains intent-claim word \"" + hit
+                    + "\" — pattern-catalog rule: describe shape, not intent");
         }
 
         return new Result(mismatches.isEmpty(), mismatches, proseTickers.size(), numbersChecked);

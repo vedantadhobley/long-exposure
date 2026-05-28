@@ -59,8 +59,14 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
     /** Bumped when the prompt changes. */
     private static final String PROMPT_VERSION = "aggregate-v5-streak-bound-2026-05-27";
 
-    /** Prior weekly rollups passed as week-over-week trend context (§4.3). Tunable. */
-    private static final int PRIOR_WEEKS = 8;
+    /**
+     * Prior weekly rollups passed as week-over-week trend context. Set to 13 =
+     * one full calendar quarter, so the weekly trend horizon naturally matches
+     * the quarterly tier above it (per `tiered-baselines-design.md` §8.1).
+     * No runtime change until ≥9 prior weeks exist in the dataset; future-
+     * proofs the widening that §8 calls for.
+     */
+    private static final int PRIOR_WEEKS = 13;
 
     /** Max LLM attempts per week — re-roll on verifier failure (temp 1.0 gives variance). */
     private static final int MAX_LLM_ATTEMPTS = 3;

@@ -226,7 +226,14 @@ public final class LayeringScorer implements EventScorer {
         for (int i = 0; i < cluster.size(); i++) addNanos[i] = cluster.get(i).addNanos;
         double fano = com.longexposure.analytics.Analytics.fanoFactor(
                 addNanos, Math.max(2, Math.min(50, cluster.size() / 5)));
-        if (!Double.isNaN(fano)) breakdown.put("burstiness_fano", BreakdownFmt.round(fano, 2));
+        if (!Double.isNaN(fano)) {
+            breakdown.put("burstiness_fano", BreakdownFmt.round(fano, 2));
+            // See PostCancelClusterScorer — anchored label so the narration
+            // leads with the word and the bare Fano number reads as a
+            // parenthetical ("highly bursty (Fano 9.4)").
+            String cls = com.longexposure.analytics.Analytics.fanoClass(fano);
+            if (cls != null) breakdown.put("burstiness_class", cls);
+        }
         double selfExc = com.longexposure.analytics.Analytics.branchingRatioFromFano(fano);
         if (!Double.isNaN(selfExc)) breakdown.put("self_excitation", BreakdownFmt.round(selfExc, 2));
         if (addNanos.length >= 4) {
