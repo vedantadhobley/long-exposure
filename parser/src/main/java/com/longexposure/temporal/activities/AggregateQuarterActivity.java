@@ -32,6 +32,9 @@ public interface AggregateQuarterActivity {
      * {@code anyDateInQuarter}. Returns 1 on successful upsert or content-hash
      * skip; 0 when not enough weekly history (dormant).
      */
-    @ActivityMethod
+    // Explicit name: defaults to the capitalized method name ("Aggregate"),
+    // which would collide with AggregateWeekActivity + AggregateYearActivity
+    // (same method name across all three interfaces).
+    @ActivityMethod(name = "AggregateQuarter")
     long aggregate(LocalDate anyDateInQuarter);
 }

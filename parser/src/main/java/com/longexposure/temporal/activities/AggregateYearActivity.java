@@ -20,6 +20,8 @@ import java.time.LocalDate;
 @ActivityInterface
 public interface AggregateYearActivity {
 
-    @ActivityMethod
+    // Explicit name — collides with AggregateWeek + AggregateQuarter otherwise
+    // (all three use the same `aggregate(LocalDate)` method signature).
+    @ActivityMethod(name = "AggregateYear")
     long aggregate(LocalDate anyDateInYear);
 }
