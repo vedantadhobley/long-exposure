@@ -145,6 +145,13 @@ public final class AttributionVerifier {
      * first ordering (built from {@link #NOUN_TO_SCORER} + {@link #GENERIC_NOUNS}
      * sorted by length descending) ensures "iceberg pattern" matches before
      * "iceberg". Case-insensitive.
+     *
+     * <p><b>Hyphen/space equivalence</b> (2026-05-28 evening): finance prose
+     * commonly hyphenates compound nouns ("depth-contraction", "order-deletion"
+     * etc.). The vocabulary is stored space-separated ("depth contraction");
+     * the regex is built so each inter-word whitespace can match a hyphen OR
+     * whitespace. Without this, prose like "QQQ saw four depth-contraction
+     * events" extracted no claim because the noun didn't match.
      */
     private static final Pattern NOUN_RE;
     static {
@@ -155,11 +162,45 @@ public final class AttributionVerifier {
         StringBuilder sb = new StringBuilder("\\b(");
         for (int i = 0; i < nouns.size(); i++) {
             if (i > 0) sb.append('|');
-            // Escape any regex-special chars in the phrase (e.g. hyphens).
-            sb.append(Pattern.quote(nouns.get(i)));
+            sb.append(toFlexNounRegex(nouns.get(i)));
         }
         sb.append(")\\b");
         NOUN_RE = Pattern.compile(sb.toString(), Pattern.CASE_INSENSITIVE);
+    }
+
+    /**
+     * Convert a space-separated noun phrase into a regex alternation that
+     * matches the same phrase with EITHER a hyphen or whitespace between
+     * each pair of words. Each word is regex-quoted; inter-word boundaries
+     * use {@code [\s\-]+}.
+     *
+     * <p>Examples:
+     * <ul>
+     *   <li>"halt" → "\Qhalt\E"
+     *   <li>"depth contraction" → "\Qdepth\E[\s\-]+\Qcontraction\E"
+     *   <li>"order deletion event" →
+     *       "\Qorder\E[\s\-]+\Qdeletion\E[\s\-]+\Qevent\E"
+     * </ul>
+     */
+    private static String toFlexNounRegex(final String phrase) {
+        String[] words = phrase.split("\\s+");
+        if (words.length == 1) return Pattern.quote(words[0]);
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < words.length; i++) {
+            if (i > 0) out.append("[\\s\\-]+");
+            out.append(Pattern.quote(words[i]));
+        }
+        return out.toString();
+    }
+
+    /**
+     * Map the prose noun-phrase match back to a key in {@link #NOUN_TO_SCORER}
+     * by normalizing internal whitespace/hyphens to single spaces. This lets
+     * "depth-contraction" find scorer_id liquidity_withdrawal even though the
+     * key is "depth contraction".
+     */
+    private static String canonicalizeNoun(final String matched) {
+        return matched.toLowerCase().replaceAll("[\\s\\-]+", " ").trim();
     }
 
     /** Ticker shape — same as {@link SynthesisVerifier#TICKER_RE}. */
@@ -270,7 +311,9 @@ public final class AttributionVerifier {
             int nounStart = nm.start();
             int nounEnd   = nm.end();
             String nounPhrase = nm.group(1);
-            String scorerId   = NOUN_TO_SCORER.get(nounPhrase.toLowerCase());
+            // canonicalize: lowercase + collapse [\s\-]+ → single space, so
+            // "depth-contraction" maps to the "depth contraction" map key.
+            String scorerId   = NOUN_TO_SCORER.get(canonicalizeNoun(nounPhrase));
 
             // Subject-led + possessive: look backward, skipping any count
             // positions already consumed by earlier nouns.

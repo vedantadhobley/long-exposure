@@ -242,6 +242,21 @@ class AttributionVerifierTest {
         assertTrue(r.passed(), "split-between should pass: " + r.mismatches());
     }
 
+    /** Hyphenated noun phrases ("depth-contraction", "post-cancel cluster")
+     *  match the same scorer as the spaced form. */
+    @Test
+    void hyphenatedNounMatchesSpacedScorerKey() {
+        AttributionVerifier v = new AttributionVerifier();
+        List<AttributionVerifier.AttributedClaim> claims = v.extractClaims(
+                "QQQ saw four depth-contraction events in the first hour.");
+        assertEquals(1, claims.size());
+        AttributionVerifier.AttributedClaim c = claims.get(0);
+        assertEquals("QQQ", c.subject());
+        assertEquals(4, c.count());
+        assertEquals("liquidity_withdrawal", c.scorerId(),
+                "hyphenated 'depth-contraction' should resolve to liquidity_withdrawal");
+    }
+
     /** A different count next to each noun → each gets its own claim
      *  (the consumed-tracking shouldn't BLOCK genuine multi-claim prose). */
     @Test
