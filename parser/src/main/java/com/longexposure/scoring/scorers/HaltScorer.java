@@ -148,10 +148,17 @@ public final class HaltScorer implements EventScorer {
         ref.put("ts_nanos", haltNanos);
         sourceRefs.add(ref);
 
-        // Score = duration in seconds. Unbounded halts (no resume in the
-        // window) score 0 for now — they're visible but ranked low until
-        // we figure out the right policy.
-        double score = (durationS != null) ? durationS.doubleValue() : 0.0;
+        // Score = log10(duration_seconds + 1). Linear duration over-weighted
+        // marathon halts: a 4 h halt scored 48× a 5 min halt's score, so
+        // selection chose 1-2 multi-hour halts at the expense of multiple
+        // short-but-interesting halts. Log compresses the ratio: 4 h vs
+        // 5 min becomes 4.2 vs 2.5 (≈1.7× ratio), keeping ordinal order
+        // intact while letting selection see a mix of durations.
+        // The +1 prevents log10(0) for instantaneous-end halts. Unbounded
+        // halts (no resume in the window) still score 0 — they're visible
+        // but ranked low until we figure out the right policy.
+        // 2026-05-28 evening (R4 / option C).
+        double score = (durationS != null) ? Math.log10(durationS.doubleValue() + 1.0) : 0.0;
 
         return new ScoredEvent(
                 ctx.tradingDate(),

@@ -40,13 +40,32 @@ public final class SelectTopEventsActivityImpl implements SelectTopEventsActivit
      * the few hardcoded knobs the project deliberately retains.
      */
     private static final double PERCENTILE_TOP    = 0.05;   // top 5% by rank
-    private static final int    PER_SCORER_FLOOR  = 1;      // never drop a scorer's top
+    /**
+     * Per-scorer floor on the selection budget. v2 (2026-05-28 evening,
+     * Round 2 pre-overnight): bumped from 1 → 3 so rare-but-interesting
+     * patterns (time_in_book_drift, halt) are guaranteed a meaningful set
+     * of events even on slow days for that scorer. Floor=1 meant a scorer
+     * that fired only 6 events for the day got 1 selected — one isolated
+     * event reads as anomaly noise rather than a representative pattern.
+     */
+    private static final int    PER_SCORER_FLOOR  = 3;
     private static final int    PER_SCORER_CEILING = 30;    // never let a scorer dominate
+    /**
+     * Per-symbol cap on the FINAL selected set. Without this, heavy-flow
+     * symbols (TQQQ at 20+ events on dramatic days) dominate the LLM-facing
+     * set → SYNTHESIZE becomes "the TQQQ paragraph" rather than a day-level
+     * theme. v1 (2026-05-28 evening): 8 events per symbol per day,
+     * keep-by-score-desc, applied AFTER the per-scorer budget pass. Net
+     * effect: top symbols cap at 8 events; symbols at ≤8 are unaffected.
+     * Validated on 05-13: TQQQ drops from ~20 selected to 8, total selected
+     * drops ~5-10% (the displaced events leave room for symbol diversity).
+     */
+    private static final int    PER_SYMBOL_CAP    = 8;
 
     @Override
     public long selectTopEvents(final LocalDate tradingDate) {
-        LOG.info("select start  date={} percentile_top={} floor={} ceiling={}",
-                tradingDate, PERCENTILE_TOP, PER_SCORER_FLOOR, PER_SCORER_CEILING);
+        LOG.info("select start  date={} percentile_top={} floor={} ceiling={} per_symbol_cap={}",
+                tradingDate, PERCENTILE_TOP, PER_SCORER_FLOOR, PER_SCORER_CEILING, PER_SYMBOL_CAP);
 
         long total;
         try (Connection conn = openConnection()) {
@@ -109,10 +128,29 @@ public final class SelectTopEventsActivityImpl implements SelectTopEventsActivit
                            GREATEST(?, LEAST(?, CEIL(? * scorer_count)::int)) AS scorer_budget
                     FROM ranked
                 ),
-                qualifying AS (
+                scorer_qualifying AS (
+                    -- Stage 1: events that survived per-scorer ranking.
                     SELECT *
                     FROM budgeted
                     WHERE rk <= scorer_budget
+                ),
+                symbol_ranked AS (
+                    -- Stage 2: within the per-scorer survivors, also rank
+                    -- per-symbol BY SCORE desc. This is "of TQQQ's events
+                    -- that passed the per-scorer cut, which are its top
+                    -- N by score?" — the per-symbol cap then keeps only
+                    -- those N.
+                    SELECT *,
+                           row_number() OVER (
+                               PARTITION BY symbol
+                               ORDER BY score DESC, ts
+                           ) AS symbol_rk
+                    FROM scorer_qualifying
+                ),
+                qualifying AS (
+                    SELECT *
+                    FROM symbol_ranked
+                    WHERE symbol_rk <= ?
                 )
                 INSERT INTO selected_events (
                     event_id, trading_date, symbol, ts, ts_end, scorer_id,
@@ -128,6 +166,7 @@ public final class SelectTopEventsActivityImpl implements SelectTopEventsActivit
             st.setInt(2, PER_SCORER_FLOOR);
             st.setInt(3, PER_SCORER_CEILING);
             st.setDouble(4, PERCENTILE_TOP);
+            st.setInt(5, PER_SYMBOL_CAP);
             return st.executeLargeUpdate();
         }
     }
