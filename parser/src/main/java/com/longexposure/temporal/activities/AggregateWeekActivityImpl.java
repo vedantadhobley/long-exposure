@@ -219,7 +219,7 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             actx.heartbeat("attribution_maps");
             Map<String, Map<String, Integer>> weekBySymbolByScorer = new HashMap<>();
             Map<String, Integer> weekBySymbolTotal = new HashMap<>();
-            loadWeekTruthMaps(conn, weekStart, weekEndExclusive,
+            PeriodAttributionMaps.load(conn, weekStart, weekEndExclusive,
                     weekBySymbolByScorer, weekBySymbolTotal);
 
             actx.heartbeat("prompt");
@@ -267,45 +267,6 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             return 1;
         } catch (Exception e) {
             throw new RuntimeException("aggregate failed for week_start=" + weekStart, e);
-        }
-    }
-
-    /**
-     * Load week-aggregated attribution truth maps from {@code selected_events}.
-     * Sums per-(symbol, scorer) counts across the week's days; the verifier
-     * uses these to validate (subject, count, scorer-type) claim tuples
-     * extracted from the rollup prose.
-     *
-     * <p>Out-params: populates {@code outBySymbolScorer} and
-     * {@code outBySymbolTotal}, mirroring the per-day pattern in
-     * {@link SynthesizeDayActivityImpl#computeDayAggregates}.
-     */
-    private void loadWeekTruthMaps(final Connection conn,
-                                    final LocalDate weekStart,
-                                    final LocalDate weekEndExclusive,
-                                    final Map<String, Map<String, Integer>> outBySymbolScorer,
-                                    final Map<String, Integer> outBySymbolTotal) throws Exception {
-        String sql = """
-                SELECT symbol, scorer_id, COUNT(*) AS cnt
-                FROM selected_events
-                WHERE trading_date >= ? AND trading_date < ?
-                  AND symbol IS NOT NULL
-                GROUP BY symbol, scorer_id
-                """;
-        try (PreparedStatement st = conn.prepareStatement(sql)) {
-            st.setObject(1, weekStart);
-            st.setObject(2, weekEndExclusive);
-            try (ResultSet rs = st.executeQuery()) {
-                while (rs.next()) {
-                    String symbol = rs.getString(1);
-                    String scorerId = rs.getString(2);
-                    int cnt = rs.getInt(3);
-                    outBySymbolScorer
-                            .computeIfAbsent(symbol, k -> new TreeMap<>())
-                            .merge(scorerId, cnt, Integer::sum);
-                    outBySymbolTotal.merge(symbol, cnt, Integer::sum);
-                }
-            }
         }
     }
 

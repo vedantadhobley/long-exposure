@@ -23,8 +23,10 @@ import java.sql.ResultSet;
 import java.time.LocalDate;
 import java.time.Month;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -44,7 +46,14 @@ public final class AggregateQuarterActivityImpl implements AggregateQuarterActiv
     private static final String MODEL_ID = System.getenv()
             .getOrDefault("LLAMA_MODEL", "Qwen3.5-122B-A10B");
 
-    private static final String PROMPT_VERSION = "aggregate-quarter-v2-cardinal-word-form-2026-05-28";
+    /**
+     * v3 (2026-05-28 evening) wires the structural AttributionVerifier at the
+     * quarter tier: quarter-aggregated by_symbol_by_scorer + by_symbol_total
+     * maps from PeriodAttributionMaps.load(). Mirror of the same fix at the
+     * week tier (AggregateWeekActivityImpl v7). v2 added word-form numeral
+     * grounding.
+     */
+    private static final String PROMPT_VERSION = "aggregate-quarter-v3-attribution-verifier-2026-05-28";
 
     /**
      * Minimum weekly rollups in the quarter before the activity does an LLM
@@ -146,6 +155,19 @@ public final class AggregateQuarterActivityImpl implements AggregateQuarterActiv
                 haystack.append(p.aggregateText).append('\n');
             }
 
+            // Quarter-aggregated attribution truth maps — same shape as the
+            // week-tier maps in AggregateWeekActivityImpl.loadWeekTruthMaps,
+            // summed across the quarter's ~65 trading days. Used by
+            // AttributionVerifier (via SynthesisVerifier 5-arg verify) to
+            // catch quarter-scope misattribution like "TQQQ had X events this
+            // quarter" against actual cross-day sums. Period-level mirror of
+            // R5 from earlier this evening.
+            actx.heartbeat("attribution_maps");
+            Map<String, Map<String, Integer>> quarterBySymbolByScorer = new HashMap<>();
+            Map<String, Integer> quarterBySymbolTotal = new HashMap<>();
+            PeriodAttributionMaps.load(conn, quarterStart, quarterEnd.plusDays(1),
+                    quarterBySymbolByScorer, quarterBySymbolTotal);
+
             actx.heartbeat("prompt");
             String userPrompt = buildUserPrompt(quarterStart, quarterEnd, quarterAggregates, weeks, priors);
 
@@ -161,7 +183,8 @@ public final class AggregateQuarterActivityImpl implements AggregateQuarterActiv
                 long llmT0 = System.nanoTime();
                 aggregate = llama.chat(SYSTEM_PROMPT, userPrompt, SamplingParams.AGGREGATE).trim();
                 llmElapsedMs = (System.nanoTime() - llmT0) / 1_000_000L;
-                verify = verifier.verify(aggregate, tickers, haystack.toString());
+                verify = verifier.verify(aggregate, tickers, haystack.toString(),
+                        quarterBySymbolByScorer, quarterBySymbolTotal);
                 int claimedStreak = maxStreakQuartersClaimed(aggregate);
                 streakOk = claimedStreak <= allowedStreak;
                 if (verify.passed() && streakOk) {

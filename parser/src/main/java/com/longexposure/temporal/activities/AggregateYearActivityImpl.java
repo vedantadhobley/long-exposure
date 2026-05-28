@@ -23,8 +23,10 @@ import java.sql.ResultSet;
 import java.time.LocalDate;
 import java.time.Month;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -39,7 +41,8 @@ public final class AggregateYearActivityImpl implements AggregateYearActivity {
     private static final String MODEL_ID = System.getenv()
             .getOrDefault("LLAMA_MODEL", "Qwen3.5-122B-A10B");
 
-    private static final String PROMPT_VERSION = "aggregate-year-v2-cardinal-word-form-2026-05-28";
+    /** v3 (2026-05-28 evening) wires AttributionVerifier; see AggregateQuarterActivityImpl. */
+    private static final String PROMPT_VERSION = "aggregate-year-v3-attribution-verifier-2026-05-28";
 
     /** Quarterly rollups needed in the year before the LLM call fires. */
     private static final int MIN_QUARTERS_FOR_YEAR = 2;
@@ -124,6 +127,16 @@ public final class AggregateYearActivityImpl implements AggregateYearActivity {
                 haystack.append(p.aggregateText).append('\n');
             }
 
+            // Year-aggregated attribution truth maps. Year covers ~250
+            // trading days; the SQL group-by stays small (~2-3K rows even
+            // for the busiest dataset) so the cost is negligible vs the
+            // LLM call. Mirror of the week + quarter tier fixes.
+            actx.heartbeat("attribution_maps");
+            Map<String, Map<String, Integer>> yearBySymbolByScorer = new HashMap<>();
+            Map<String, Integer> yearBySymbolTotal = new HashMap<>();
+            PeriodAttributionMaps.load(conn, yearStart, yearEnd.plusDays(1),
+                    yearBySymbolByScorer, yearBySymbolTotal);
+
             actx.heartbeat("prompt");
             String userPrompt = buildUserPrompt(yearStart, yearEnd, yearAggregates, quarters, priors);
 
@@ -139,7 +152,8 @@ public final class AggregateYearActivityImpl implements AggregateYearActivity {
                 long llmT0 = System.nanoTime();
                 aggregate = llama.chat(SYSTEM_PROMPT, userPrompt, SamplingParams.AGGREGATE).trim();
                 llmElapsedMs = (System.nanoTime() - llmT0) / 1_000_000L;
-                verify = verifier.verify(aggregate, tickers, haystack.toString());
+                verify = verifier.verify(aggregate, tickers, haystack.toString(),
+                        yearBySymbolByScorer, yearBySymbolTotal);
                 int claimedStreak = maxStreakYearsClaimed(aggregate);
                 streakOk = claimedStreak <= allowedStreak;
                 if (verify.passed() && streakOk) {
