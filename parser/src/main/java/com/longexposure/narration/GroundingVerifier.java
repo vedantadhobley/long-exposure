@@ -129,7 +129,22 @@ public final class GroundingVerifier {
     /**
      * @return result detailing pass/fail + the specific mismatches found.
      */
+    /**
+     * Backward-compatible 3-arg form — runs all checks EXCEPT pattern-name
+     * mislabel (no scorer_id available). Used by VerifierBackfill and any
+     * caller that doesn't have the scorer_id handy.
+     */
     public Result verify(final String prose, final JsonNode blueprint, final JsonNode breakdown) {
+        return verify(prose, blueprint, breakdown, null);
+    }
+
+    /**
+     * Verify with pattern-name mislabel check.
+     * @param scorerId  the event's canonical scorer_id (e.g. {@code "layering"});
+     *                  {@code null} skips the pattern-name mislabel check
+     */
+    public Result verify(final String prose, final JsonNode blueprint, final JsonNode breakdown,
+                         final String scorerId) {
         List<String> mismatches = new ArrayList<>();
 
         // Layer 1: every key_number.source_field must exist in breakdown.
@@ -223,6 +238,28 @@ public final class GroundingVerifier {
                 if (proseLeading != null && !companyNamesAgree(proseLeading, bdCompany)) {
                     mismatches.add("prose company near \"(" + eventSymbol + ")\" "
                             + "does not match breakdown company_name \"" + bdCompany + "\"");
+                }
+            }
+        }
+
+        // Pattern-name mislabel check (Phase 9b — mirror of the
+        // InterpretationVerifier check). Allowed scorer-noun mentions:
+        // event's own scorer_id + any scorer_id in
+        // breakdown.co_occurring.during_event keys. Anything else is a
+        // misclassification. Skipped when scorerId is null (3-arg form).
+        if (scorerId != null && !scorerId.isEmpty()) {
+            java.util.Set<String> allowedScorers = new java.util.HashSet<>();
+            allowedScorers.add(scorerId);
+            JsonNode coOccurDuringEvent = breakdown.path("co_occurring").path("during_event");
+            if (coOccurDuringEvent.isObject()) {
+                java.util.Iterator<String> it = coOccurDuringEvent.fieldNames();
+                while (it.hasNext()) allowedScorers.add(it.next());
+            }
+            for (String s : AttributionVerifier.extractScorerNounIds(prose)) {
+                if (!allowedScorers.contains(s)) {
+                    mismatches.add("prose names scorer pattern \"" + s
+                            + "\" not in event's own scorer (" + scorerId
+                            + ") or co_occurring scorers (" + allowedScorers + ")");
                 }
             }
         }

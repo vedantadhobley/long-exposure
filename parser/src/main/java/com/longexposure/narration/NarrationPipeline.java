@@ -83,7 +83,7 @@ public final class NarrationPipeline {
                 throw new RuntimeException("render failed for selected_id=" + input.selectedId(), e);
             }
             prose = rendered.stitched();
-            verify = verifier.verify(prose, blueprint, input.breakdown());
+            verify = verifier.verify(prose, blueprint, input.breakdown(), input.scorerId());
             if (verify.passed()) {
                 if (attempt > 1) {
                     LOG.info("verifier passed on retry  selected_id={} scorer={} symbol={} attempt={}",
