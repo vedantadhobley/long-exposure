@@ -110,7 +110,7 @@ Bootstrap problem: on day-1-live we have zero history in DB, so every baseline i
 
 ## Days 20–21 — Temporal + API
 
-> **✅ done (2026-05-13, extended through 2026-05-27).** 13 workflows / 24 activities on the daily-pipeline task queue. **Note:** there is no FastAPI in this repo — the HTTP API moved to vedanta-systems' unified Express service (decided 2026-05-10, `decisions.md`); this repo ships only the worker.
+> **✅ done (2026-05-13, extended through 2026-05-28).** 15 workflows / 26 activities on the daily-pipeline task queue. Full calendar rollup hierarchy (week → quarter → year) wired in 2026-05-28; quarterly + yearly tiers sit dormant until enough data accumulates. **Note:** there is no FastAPI in this repo — the HTTP API moved to vedanta-systems' unified Express service (decided 2026-05-10, `decisions.md`); this repo ships only the worker.
 
 - [x] `Main.java` → `WorkerMain.start()` Temporal worker registration (replaces the Day-1 stub)
 - [x] Workflow + activity classes — full layout in `docs/temporal-design.md`

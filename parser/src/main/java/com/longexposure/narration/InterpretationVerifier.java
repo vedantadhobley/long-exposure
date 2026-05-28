@@ -50,7 +50,7 @@ public final class InterpretationVerifier {
      */
     private static final java.util.regex.Pattern INTENT_WORDS = java.util.regex.Pattern.compile(
             "\\b(?:manipul\\w*|spoof\\w*|front[- ]?run\\w*|wash[- ]?trad\\w*|"
-                    + "gam(?:ing|ed)|illegal|fake)\\b",
+                    + "gam(?:ing|ed)|illegal\\w*|fake\\w*)\\b",
             java.util.regex.Pattern.CASE_INSENSITIVE);
 
     public InterpretationVerifier() {}

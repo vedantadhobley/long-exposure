@@ -611,16 +611,24 @@ So the only real disk decision is the *wire re-score window*, unchanged by this
 design. (This supersedes the framing that "retention = 2 weeks" bounds the
 rollups — it bounds only the wire substrate.)
 
-### 8.5 Build phasing (post-launch)
+### 8.5 Build phasing
 
-1. **Widen the weekly prior-window** `PRIOR_WEEKS` 8 → 13 (one constant; the
-   weekly trend horizon becomes a quarter). Cheap.
-2. **`AggregateQuarterActivity` + `AggregateQuarterWorkflow`** — a near-verbatim
+> ✅ **Steps 1–3 + 5 SHIPPED 2026-05-28** as the pre-overnight Tier A2 + Tier B
+> (commits `e5b1c36` + `d4e357c`). CascadeAggregate (step 4) remains
+> post-launch. The dormant gates are validated: a 1-day test on 2026-05-22
+> exercised both new workflows and confirmed each returns 0 in <1 sec when
+> their gates (weekly_count ≥ 8 / quarterly_count ≥ 2) aren't met.
+
+1. ✅ **Weekly prior-window** `PRIOR_WEEKS` 8 → 13 (Tier A2). Cheap.
+2. ✅ **`AggregateQuarterActivity` + `AggregateQuarterWorkflow`** — near-verbatim
    mirror of `AggregateWeek`: reads the quarter's ≤13 weekly rollups + prior 4
    quarters, content-addressed (`quarterly_aggregate.content_hash`), recompute
-   on week-finalize. New `quarterly_aggregate` table.
-3. **`AggregateYearActivity` + `AggregateYearWorkflow`** — same mirror, reads 4
-   quarters; recompute on quarter-finalize. New `yearly_aggregate` table.
+   on week-finalize. `quarterly_aggregate` table in schema.sql. Gated by
+   `MIN_WEEKS_FOR_QUARTER=8` so first non-dormant fire is ~Sept 30 under the
+   current launch timeline.
+3. ✅ **`AggregateYearActivity` + `AggregateYearWorkflow`** — same mirror, reads
+   4 quarters; gated by `MIN_QUARTERS_FOR_YEAR=2`. `yearly_aggregate` table in
+   schema.sql. Dormant until ~Q3 2027 first non-dormant fire.
 4. **`CascadeAggregate(fromDate)`** driver (§8.2) — wired as the tail of the
    backfill path (`rerun-dataset.sh` / a backfill workflow), not the nightly
    path. The nightly path keeps touching only the current period at each tier.

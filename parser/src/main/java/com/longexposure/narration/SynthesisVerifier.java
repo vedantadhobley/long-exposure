@@ -92,7 +92,7 @@ public final class SynthesisVerifier {
      */
     private static final Pattern INTENT_WORDS = Pattern.compile(
             "\\b(?:manipul\\w*|spoof\\w*|front[- ]?run\\w*|wash[- ]?trad\\w*|"
-                    + "gam(?:ing|ed)|illegal|fake)\\b",
+                    + "gam(?:ing|ed)|illegal\\w*|fake\\w*)\\b",
             Pattern.CASE_INSENSITIVE);
 
     public SynthesisVerifier() {}

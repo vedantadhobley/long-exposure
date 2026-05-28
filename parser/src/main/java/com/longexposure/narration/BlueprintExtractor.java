@@ -27,7 +27,7 @@ import java.util.Map;
 public final class BlueprintExtractor {
 
     /** Bump this string when the prompt or output shape changes. Used in the event_hash. */
-    public static final String PROMPT_VERSION = "extract-v8-cadence-class";
+    public static final String PROMPT_VERSION = "extract-v9-deletes-disambiguation";
 
     private static final String SYSTEM_PROMPT = """
             You are an extraction system. Given a market microstructure event with structured facts,
@@ -114,6 +114,11 @@ public final class BlueprintExtractor {
               depth_from_touch_near_bps/far_bps → "the layered band sat N-M bps off the touch";
               pre_halt_spread_bps → "the spread was N bps when trading halted";
               pct_of_book_removed → "pulled N% of displayed depth".
+            - co_occurring `sum_deletes` (under liquidity_withdrawal) is a COUNT OF
+              CANCELLED ORDERS, not a share count. Render as "N deletes" / "cancelled
+              N orders" / "removed N orders" — NEVER as "N shares". (The layering and
+              post_cancel_cluster co_occurring blocks carry both `sum_orders` and
+              `sum_total_shares` separately, so for those, distinguish the two.)
             - pre_event_ofi_class is the ANCHORED LABEL ("buyer-leaning"/"seller-leaning"/
               "balanced") for the OFI value. Lead with the WORD and add the bare value as
               parenthetical, e.g. "the book was seller-leaning (OFI −0.42) before the sweep"

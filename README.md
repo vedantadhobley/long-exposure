@@ -399,7 +399,7 @@ DailyPipelineWorkflow
   └── CleanupWorkflow       (delete .pcap.gz + week-aligned 2-week retention sweep)
 ```
 
-Each phase is its own child workflow, independently invokable for replay or backfill. The four LLM-bearing phases (DESCRIBE / INTERPRET / SYNTHESIZE / AGGREGATE) are strictly sequential — they share `llama-large.joi`'s 2 GPU slots, so only one LLM workflow runs at a time. Per-activity retries, heartbeats, and start-to-close timeouts. Full layout including all 24 activities + their retry policies in [`docs/temporal-design.md`](docs/temporal-design.md).
+Each phase is its own child workflow, independently invokable for replay or backfill. The LLM-bearing phases (DESCRIBE / INTERPRET / SYNTHESIZE / AGGREGATE — daily, weekly, quarterly, yearly) are strictly sequential — they share `llama-large.joi`'s 2 GPU slots, so only one LLM workflow runs at a time. The quarterly + yearly rollups sit dormant (return 0 without an LLM call) until enough lower-tier rollups accumulate. Per-activity retries, heartbeats, and start-to-close timeouts. Full layout including all 26 activities + their retry policies in [`docs/temporal-design.md`](docs/temporal-design.md).
 
 Ancillary workflows on the same task queue:
 
@@ -469,7 +469,7 @@ The original 22-day plan compressed substantially. Current state (2026-05-27):
 
 ✅ **Storage** (2026-05-12). 13 wire-format hypertables, `order_lifecycle` derived hypertable for sub-second PostCancel/Layering scans, 7 standard tables, `daily_volume_by_symbol` continuous aggregate. End-to-end: 364 M rows ingested in 35:07 (~174 K rows/sec) via JDBC `COPY`.
 
-✅ **Temporal pipeline** (2026-05-13, extended through 2026-05-27). 13 workflows on the daily-pipeline task queue, 24 activities. Per-activity retry policies, heartbeats, start-to-close timeouts. Idempotent on pipeline_run with pre-clean by trading_date.
+✅ **Temporal pipeline** (2026-05-13, extended through 2026-05-28). 15 workflows on the daily-pipeline task queue, 26 activities. Per-activity retry policies, heartbeats, start-to-close timeouts. Idempotent on pipeline_run with pre-clean by trading_date. The full calendar rollup hierarchy (week → quarter → year) is wired into the daily pipeline; quarterly + yearly tiers sit dormant until enough lower-tier rollups accumulate.
 
 ✅ **Scoring + selection** (2026-05-16, extended through 2026-05-27). 9 scorers — 7 intraday (halt, large_trade, sweep, post_cancel_cluster, layering, iceberg, liquidity_withdrawal) + 2 inter-day (`volume_deviation` 2026-05-25; `time_in_book_drift` 2026-05-27 reading a durable `daily_lifetime_by_symbol` baseline) — implementing push-model `EventScorer`. Selection via within-scorer percentile rank → ~90–170 narratable events per trading day. A shared pure-function `com.longexposure.analytics.Analytics` layer + post-select `EnrichAnalyticsActivity` (windowed + book-replay) feeds genuinely sophisticated grounded metrics into every breakdown — order-to-trade ratio, OFI, slippage + reversion, effective spread, realized vol, burstiness, depth-imbalance, % of book removed + recovery, iceberg display-ratio, robust-z/percentile, HHI/entropy, and slice-caveated VPIN/Kyle's-λ. See [`docs/analytics-catalog.md`](docs/analytics-catalog.md).
 

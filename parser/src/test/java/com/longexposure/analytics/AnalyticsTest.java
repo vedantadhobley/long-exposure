@@ -3,6 +3,7 @@ package com.longexposure.analytics;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Unit tests for the pure microstructure/statistical computations. */
@@ -194,5 +195,58 @@ class AnalyticsTest {
         assertEquals(2.0, Analytics.kylesLambda(new double[]{1, 2, 3}, new double[]{2, 4, 6}), 1e-9);
         assertTrue(Double.isNaN(Analytics.kylesLambda(new double[]{1, 2}, new double[]{1, 2, 3})));   // mismatched
         assertTrue(Double.isNaN(Analytics.kylesLambda(new double[]{1, 1, 1}, new double[]{1, 2, 3}))); // zero var
+    }
+
+    // ─── Class-label helpers (anchored vocabulary for prose; added 2026-05-28) ──
+
+    @Test
+    void fanoClass_bands() {
+        assertEquals("highly bursty",     Analytics.fanoClass(10.0));
+        assertEquals("highly bursty",     Analytics.fanoClass(5.01));
+        assertEquals("moderately bursty", Analytics.fanoClass(3.0));
+        assertEquals("moderately bursty", Analytics.fanoClass(2.01));
+        assertEquals("weakly bursty",     Analytics.fanoClass(1.5));
+        assertEquals("weakly bursty",     Analytics.fanoClass(1.01));
+        assertEquals("Poisson-like",      Analytics.fanoClass(1.0));        // exactly 1 = Poisson
+        assertEquals("Poisson-like",      Analytics.fanoClass(0.5));        // underdispersed
+        assertEquals("Poisson-like",      Analytics.fanoClass(0.0));
+        assertNull(Analytics.fanoClass(Double.NaN));
+    }
+
+    @Test
+    void ofiClass_directionAndBalanced() {
+        assertEquals("buyer-leaning",  Analytics.ofiClass(0.5));
+        assertEquals("buyer-leaning",  Analytics.ofiClass(0.11));
+        assertEquals("balanced",       Analytics.ofiClass(0.10));            // boundary: not > 0.1
+        assertEquals("balanced",       Analytics.ofiClass(0.0));
+        assertEquals("balanced",       Analytics.ofiClass(-0.10));           // boundary: not < -0.1
+        assertEquals("seller-leaning", Analytics.ofiClass(-0.11));
+        assertEquals("seller-leaning", Analytics.ofiClass(-1.0));
+        assertNull(Analytics.ofiClass(Double.NaN));
+    }
+
+    @Test
+    void depthImbalanceClass_sideAndBalanced() {
+        assertEquals("bid-skewed", Analytics.depthImbalanceClass(0.4));
+        assertEquals("bid-skewed", Analytics.depthImbalanceClass(0.11));
+        assertEquals("balanced",   Analytics.depthImbalanceClass(0.10));
+        assertEquals("balanced",   Analytics.depthImbalanceClass(0.0));
+        assertEquals("balanced",   Analytics.depthImbalanceClass(-0.10));
+        assertEquals("ask-skewed", Analytics.depthImbalanceClass(-0.11));
+        assertEquals("ask-skewed", Analytics.depthImbalanceClass(-0.9));
+        assertNull(Analytics.depthImbalanceClass(Double.NaN));
+    }
+
+    @Test
+    void refillCadenceClass_bands() {
+        assertEquals("metronomic", Analytics.refillCadenceClass(0.0));      // identical gaps
+        assertEquals("metronomic", Analytics.refillCadenceClass(0.29));
+        assertEquals("regular",    Analytics.refillCadenceClass(0.3));      // boundary: not < 0.3
+        assertEquals("regular",    Analytics.refillCadenceClass(0.99));
+        assertEquals("irregular",  Analytics.refillCadenceClass(1.0));      // boundary
+        assertEquals("irregular",  Analytics.refillCadenceClass(1.99));
+        assertEquals("erratic",    Analytics.refillCadenceClass(2.0));      // boundary: not < 2.0
+        assertEquals("erratic",    Analytics.refillCadenceClass(5.0));
+        assertNull(Analytics.refillCadenceClass(Double.NaN));
     }
 }
