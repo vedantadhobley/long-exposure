@@ -735,6 +735,30 @@ public final class AttributionVerifier {
     }
 
     /**
+     * Extract every scorer_id mentioned in the prose via the scorer-noun
+     * vocabulary. "TQQQ saw layering activity then a post-cancel cluster"
+     * returns {layering, post_cancel_cluster}. Generic event nouns
+     * ("events", "incidents") don't map to a scorer and are omitted.
+     *
+     * <p>Public for reuse by other verifiers (e.g. INTERPRET / DESCRIBE) that
+     * need to detect pattern-name mislabels: if prose names a scorer not in
+     * (event's own scorer_id ∪ co_occurring scorer_ids), the model has
+     * misclassified the event type. Observed 2026-05-28 audit: AKBA
+     * layering INTERPRET ended "…leaving the liquidity withdrawal in
+     * isolation" — wrong scorer-noun for a layering event.
+     */
+    public static Set<String> extractScorerNounIds(final String prose) {
+        Set<String> out = new HashSet<>();
+        if (prose == null || prose.isEmpty()) return out;
+        Matcher m = NOUN_RE.matcher(prose);
+        while (m.find()) {
+            String scorerId = NOUN_TO_SCORER.get(canonicalizeNoun(m.group(1)));
+            if (scorerId != null) out.add(scorerId);
+        }
+        return out;
+    }
+
+    /**
      * Result of an attribution verification pass.
      *
      * @param passed         true if no mismatches

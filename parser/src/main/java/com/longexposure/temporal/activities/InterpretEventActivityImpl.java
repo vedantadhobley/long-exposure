@@ -49,7 +49,15 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
             .getOrDefault("LLAMA_MODEL", "Qwen3.5-122B-A10B");
 
     /** Bumped when the prompt changes; invalidates the cache. */
-    private static final String PROMPT_VERSION = "interpret-v9-supporting-analytics";
+    /**
+     * v10 (2026-05-28 evening) — verifier-only bump: adds the pattern-name
+     * mislabel check via the new InterpretationVerifier 6-arg verify
+     * overload that takes the event's scorer_id. The catalog vocabulary
+     * (AttributionVerifier.NOUN_TO_SCORER) is reused to identify mentioned
+     * scorers; mismatches against (event's scorer_id ∪ co_occurring keys)
+     * are flagged. Prompt text unchanged.
+     */
+    private static final String PROMPT_VERSION = "interpret-v10-pattern-mislabel-verifier-2026-05-28";
 
     /** Half-window for the surrounding trade context. */
     private static final long WINDOW_SECONDS = 60L;
@@ -214,7 +222,7 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
                 long llmT0 = System.nanoTime();
                 interpretation = llama.chat(SYSTEM_PROMPT, userPrompt, SamplingParams.RENDER).trim();
                 llmElapsedMs = (System.nanoTime() - llmT0) / 1_000_000L;
-                verify = verifier.verify(interpretation, row.breakdown, preJson, postJson, row.symbol);
+                verify = verifier.verify(interpretation, row.breakdown, preJson, postJson, row.symbol, row.scorerId);
                 if (verify.passed()) {
                     if (attempt > 1) {
                         LOG.info("interpret verifier passed on retry  selected_id={} symbol={} attempt={}",

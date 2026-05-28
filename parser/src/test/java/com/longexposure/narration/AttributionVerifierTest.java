@@ -300,6 +300,41 @@ class AttributionVerifierTest {
         assertTrue(r.passed(), "single-symbol pass must not re-claim consumed 49: " + r.mismatches());
     }
 
+    // ─── Scorer-noun ID extraction (used by INTERPRET pattern-mislabel check) ─
+
+    /** Single scorer mention. */
+    @Test
+    void extractScorerNounIdsSingle() {
+        java.util.Set<String> ids = AttributionVerifier.extractScorerNounIds(
+                "TQQQ saw layering events through the morning.");
+        assertEquals(java.util.Set.of("layering"), ids);
+    }
+
+    /** Multi-noun prose surfaces multiple scorer_ids. */
+    @Test
+    void extractScorerNounIdsMultiple() {
+        java.util.Set<String> ids = AttributionVerifier.extractScorerNounIds(
+                "QQQ had iceberg orders followed by post-cancel clusters and a halt.");
+        assertEquals(java.util.Set.of("iceberg", "post_cancel_cluster", "halt"), ids);
+    }
+
+    /** Generic event nouns ("events", "incidents") don't map to a scorer. */
+    @Test
+    void extractScorerNounIdsIgnoresGeneric() {
+        java.util.Set<String> ids = AttributionVerifier.extractScorerNounIds(
+                "AAPL had 5 events and 3 incidents.");
+        assertTrue(ids.isEmpty(), "generic event nouns shouldn't surface as scorers: " + ids);
+    }
+
+    /** Hyphen + space forms both resolve to the same scorer_id. */
+    @Test
+    void extractScorerNounIdsHyphenSpaceEquiv() {
+        java.util.Set<String> ids = AttributionVerifier.extractScorerNounIds(
+                "QQQ saw depth-contraction and depth contraction simultaneously.");
+        assertEquals(java.util.Set.of("liquidity_withdrawal"), ids,
+                "both hyphen and space forms collapse to same scorer_id: " + ids);
+    }
+
     /** Hyphenated noun phrases ("depth-contraction", "post-cancel cluster")
      *  match the same scorer as the spaced form. */
     @Test

@@ -59,6 +59,20 @@ public final class InterpretationVerifier {
     public InterpretationVerifier() {}
 
     /**
+     * Backward-compatible 5-arg form — runs all checks EXCEPT the
+     * pattern-name mislabel check (no scorer_id available). Used by
+     * VerifierBackfill and any caller that doesn't have the scorer_id
+     * conveniently in hand.
+     */
+    public Result verify(final String prose,
+                         final JsonNode breakdown,
+                         final JsonNode preSummary,
+                         final JsonNode postSummary,
+                         final String eventSymbol) {
+        return verify(prose, breakdown, preSummary, postSummary, eventSymbol, null);
+    }
+
+    /**
      * Verify an INTERPRET output against its grounding sources.
      *
      * @param prose         the LLM's interpretation prose (1-2 sentences)
@@ -66,12 +80,15 @@ public final class InterpretationVerifier {
      * @param preSummary    JSON form of the pre-event ±60-sec window summary
      * @param postSummary   JSON form of the post-event ±60-sec window summary
      * @param eventSymbol   the event's symbol (from {@code breakdown.symbol})
+     * @param scorerId      the event's canonical scorer_id (e.g. {@code "layering"});
+     *                      {@code null} skips the pattern-name mislabel check
      */
     public Result verify(final String prose,
                          final JsonNode breakdown,
                          final JsonNode preSummary,
                          final JsonNode postSummary,
-                         final String eventSymbol) {
+                         final String eventSymbol,
+                         final String scorerId) {
         List<String> mismatches = new ArrayList<>();
 
         // Number check: every numeric token in prose must canonicalize
@@ -162,6 +179,31 @@ public final class InterpretationVerifier {
         for (String hit : intentHits) {
             mismatches.add("prose contains intent-claim word \"" + hit
                     + "\" — pattern-catalog rule: describe shape, not intent");
+        }
+
+        // ─── Pattern-name mislabel check ────────────────────────────────────
+        // Catches the AKBA layering case (observed 2026-05-28 audit): prose
+        // ended "…leaving the liquidity withdrawal in isolation" on a
+        // layering event. The model named a DIFFERENT scorer's noun than
+        // the event actually was. Allowed scorer-noun mentions: the event's
+        // own scorer_id + any scorer_id present in the breakdown's
+        // co_occurring.during_event keys (legitimate references to nested
+        // events). All others = misclassification.
+        if (scorerId != null && !scorerId.isEmpty()) {
+            java.util.Set<String> allowedScorers = new java.util.HashSet<>();
+            allowedScorers.add(scorerId);
+            JsonNode coOccurDuringEvent = breakdown.path("co_occurring").path("during_event");
+            if (coOccurDuringEvent.isObject()) {
+                java.util.Iterator<String> it = coOccurDuringEvent.fieldNames();
+                while (it.hasNext()) allowedScorers.add(it.next());
+            }
+            for (String s : AttributionVerifier.extractScorerNounIds(prose)) {
+                if (!allowedScorers.contains(s)) {
+                    mismatches.add("prose names scorer pattern \"" + s
+                            + "\" not in event's own scorer (" + scorerId
+                            + ") or co_occurring scorers (" + allowedScorers + ")");
+                }
+            }
         }
 
         return new Result(mismatches.isEmpty(), mismatches, numbersChecked);
