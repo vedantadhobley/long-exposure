@@ -72,8 +72,17 @@ public final class TimeInBookDriftScorer implements EventScorer {
     /** Trailing calendar-day window the baseline median is computed over. */
     private static final int BASELINE_WINDOW_DAYS = 14;
 
-    /** Minimum prior days within the window for the median to be meaningful. */
-    private static final int MIN_BASELINE_DAYS = 3;
+    /**
+     * Minimum prior days within the window for the median to be meaningful.
+     * Bumped 3 → 5 (Phase 7e, 2026-05-28): the 3-day floor produced
+     * statistically noisy multiples on thin symbols (observed 05-15 OVT bond
+     * ETF scoring 5,748× drift on a 3-day baseline — arithmetically correct
+     * but the median was unstable). 5 days gives the baseline more
+     * stability without delaying first-emission much (the cagg + lifetime
+     * table accumulate from day 1; the scorer just waits for day 5 before
+     * trusting any drift signal for a given symbol).
+     */
+    private static final int MIN_BASELINE_DAYS = 5;
 
     /**
      * Floor on the BASELINE median lifetime. Anti divide-by-tiny: a symbol whose
