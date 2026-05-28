@@ -242,6 +242,64 @@ class AttributionVerifierTest {
         assertTrue(r.passed(), "split-between should pass: " + r.mismatches());
     }
 
+    // ─── Multi-symbol attribution (collectively / together / combined) ───
+    // The "DGP, TQQQ, and QQQ collectively generated 49 events" pattern: the
+    // count attributes to the SUM of the listed subjects, not to any single
+    // one.
+
+    /** Three-symbol with Oxford comma and trigger word. Sum check passes. */
+    @Test
+    void multiSymbolThreeWithOxfordComma() {
+        AttributionVerifier v = new AttributionVerifier();
+        AttributionVerifier.Result r = v.verify(
+                "DGP, TQQQ, and QQQ collectively generated 49 of the day's events.",
+                Map.of(),  // by_symbol_by_scorer empty for generic check
+                Map.of("DGP", 14, "TQQQ", 21, "QQQ", 14));   // 14+21+14 = 49
+        assertTrue(r.passed(), "DGP+TQQQ+QQQ sum (49) matches: " + r.mismatches());
+    }
+
+    /** Same shape but sum doesn't match → mismatch. */
+    @Test
+    void multiSymbolSumMismatchIsFlagged() {
+        AttributionVerifier v = new AttributionVerifier();
+        AttributionVerifier.Result r = v.verify(
+                "DGP, TQQQ, and QQQ collectively generated 49 events.",
+                Map.of(),
+                Map.of("DGP", 5, "TQQQ", 5, "QQQ", 5));   // sum=15, not 49
+        assertFalse(r.passed(), "15 ≠ 49 must be flagged");
+        assertTrue(r.mismatches().stream().anyMatch(m -> m.contains("multi-symbol")),
+                "should call out multi-symbol: " + r.mismatches());
+    }
+
+    /** Two-symbol with "and" / no comma + scorer-specific noun. */
+    @Test
+    void multiSymbolTwoTogether() {
+        AttributionVerifier v = new AttributionVerifier();
+        AttributionVerifier.Result r = v.verify(
+                "QQQ and TQQQ together produced 28 liquidity withdrawals.",
+                Map.of(
+                        "QQQ",  Map.of("liquidity_withdrawal", 14),
+                        "TQQQ", Map.of("liquidity_withdrawal", 14)),
+                Map.of("QQQ", 14, "TQQQ", 14));
+        assertTrue(r.passed(), "14+14=28 matches: " + r.mismatches());
+    }
+
+    /** Multi-symbol consumed-count protects single-symbol from re-claiming. */
+    @Test
+    void multiSymbolConsumesCountSingleDoesntRefire() {
+        AttributionVerifier v = new AttributionVerifier();
+        // If the consumed-count tracking didn't work, the 49 would also be
+        // attributed to TQQQ (single-symbol), generating a spurious (TQQQ, 49,
+        // events) claim. Truth map has TQQQ at 21 — that would mismatch and
+        // fail the verification. Should PASS because multi-symbol consumed
+        // the 49 first.
+        AttributionVerifier.Result r = v.verify(
+                "DGP, TQQQ, and QQQ collectively generated 49 events.",
+                Map.of(),
+                Map.of("DGP", 14, "TQQQ", 21, "QQQ", 14));
+        assertTrue(r.passed(), "single-symbol pass must not re-claim consumed 49: " + r.mismatches());
+    }
+
     /** Hyphenated noun phrases ("depth-contraction", "post-cancel cluster")
      *  match the same scorer as the spaced form. */
     @Test

@@ -227,13 +227,41 @@ public final class AttributionVerifier {
             "on", "for", "from", "across", "hit", "in", "by"
     );
 
+    /**
+     * Words that indicate a count attributes to the SUM of multiple listed
+     * subjects ("DGP, TQQQ, and QQQ collectively generated 49 events").
+     * Without this signal a count near multiple tickers would mis-attribute
+     * to just the nearest one; the {@link #extractMultiSymbolClaims} pass
+     * uses these triggers to identify list-style attribution.
+     */
+    private static final Set<String> MULTI_SYMBOL_TRIGGERS = Set.of(
+            "collectively", "together", "combined", "jointly"
+    );
+
     /** Window size: tokens to look back/forward when attributing. */
     private static final int LOOKBACK_TOKENS = 12;
+
+    /** Max tokens forward of a multi-symbol trigger to find count + noun. */
+    private static final int MULTI_LOOKFORWARD_TOKENS = 20;
+
+    /** Max tokens before a multi-symbol trigger to find the ticker list. */
+    private static final int MULTI_LOOKBACKWARD_TOKENS = 15;
 
     public AttributionVerifier() {}
 
     /**
      * Verify symbol-attributed count claims in the synthesis prose.
+     *
+     * <p>Runs TWO passes:
+     * <ol>
+     *   <li>Multi-symbol attribution: "X, Y, and Z collectively had N events"
+     *       — count compared against the SUM of per-symbol counts.
+     *   <li>Single-symbol attribution: "X had N events" — count compared
+     *       against the per-symbol count.
+     * </ol>
+     * Multi-symbol runs first so its count positions are consumed before the
+     * single-symbol pass — prevents "DGP, TQQQ, and QQQ collectively 49"
+     * from also generating (TQQQ, 49, generic) as a single-symbol claim.
      *
      * @param prose             the LLM's synthesis paragraph
      * @param bySymbolByScorer  per-symbol per-scorer count map (truth source)
@@ -245,7 +273,47 @@ public final class AttributionVerifier {
                          final Map<String, Map<String, Integer>> bySymbolByScorer,
                          final Map<String, Integer> bySymbolTotal) {
         List<String> mismatches = new ArrayList<>();
-        List<AttributedClaim> claims = extractClaims(prose);
+
+        // Pass 1: multi-symbol attribution (collectively / together / combined / jointly)
+        Set<Integer> consumedCountPositions = new HashSet<>();
+        List<MultiSymbolClaim> multiClaims = extractMultiSymbolClaims(prose, consumedCountPositions);
+
+        for (MultiSymbolClaim mc : multiClaims) {
+            int actualSum = 0;
+            List<String> unknownSymbols = new ArrayList<>();
+            for (String sym : mc.subjects) {
+                if (mc.scorerId == null) {
+                    Integer t = bySymbolTotal.get(sym);
+                    if (t == null) unknownSymbols.add(sym); else actualSum += t;
+                } else {
+                    Map<String, Integer> perScorer = bySymbolByScorer.get(sym);
+                    if (perScorer == null) {
+                        unknownSymbols.add(sym);
+                    } else {
+                        Integer a = perScorer.get(mc.scorerId);
+                        actualSum += (a == null) ? 0 : a;
+                    }
+                }
+            }
+            if (!unknownSymbols.isEmpty()) {
+                mismatches.add("multi-symbol attributed claim \"" + String.join(", ", mc.subjects)
+                        + " ... " + mc.countWord + " " + mc.nounMatch
+                        + "\" — symbols not in today's narrations: " + unknownSymbols);
+                continue;
+            }
+            if (actualSum != mc.count) {
+                mismatches.add("multi-symbol attributed claim \""
+                        + String.join(", ", mc.subjects) + " ... "
+                        + mc.countWord + " " + mc.nounMatch
+                        + "\" → expected sum of (" + String.join(", ", mc.subjects)
+                        + ") per " + (mc.scorerId == null ? "events" : mc.scorerId)
+                        + " — actual sum is " + actualSum + ", not " + mc.count);
+            }
+        }
+
+        // Pass 2: single-symbol attribution, with multi-pass consumed counts
+        // already excluded.
+        List<AttributedClaim> claims = extractClaimsWithConsumed(prose, consumedCountPositions);
 
         for (AttributedClaim c : claims) {
             int actual;
@@ -280,7 +348,7 @@ public final class AttributionVerifier {
             }
         }
 
-        return new Result(mismatches.isEmpty(), mismatches, claims.size());
+        return new Result(mismatches.isEmpty(), mismatches, claims.size() + multiClaims.size());
     }
 
     /**
@@ -299,12 +367,18 @@ public final class AttributionVerifier {
      * different count or no claim fires.
      */
     public List<AttributedClaim> extractClaims(final String prose) {
+        return extractClaimsWithConsumed(prose, new HashSet<>());
+    }
+
+    /**
+     * Same as {@link #extractClaims(String)} but allows the caller to seed
+     * the consumed-count-positions set — used internally by {@link #verify}
+     * to exclude counts already attributed by the multi-symbol pass.
+     */
+    List<AttributedClaim> extractClaimsWithConsumed(final String prose,
+                                                     final Set<Integer> consumedCountPositions) {
         List<AttributedClaim> out = new ArrayList<>();
         if (prose == null || prose.isEmpty()) return out;
-
-        // Walk the prose noun-by-noun in order. Track count positions consumed
-        // by earlier nouns; subsequent nouns must skip past consumed counts.
-        Set<Integer> consumedCountPositions = new HashSet<>();
 
         Matcher nm = NOUN_RE.matcher(prose);
         while (nm.find()) {
@@ -337,6 +411,162 @@ public final class AttributionVerifier {
         }
         return out;
     }
+
+    /**
+     * Extract multi-symbol attribution claims — prose patterns like
+     * "X, Y, and Z collectively generated N events" where the count
+     * attributes to the SUM of the listed subjects, not to any single one.
+     *
+     * <p>Algorithm:
+     * <ol>
+     *   <li>Scan prose for each MULTI_SYMBOL_TRIGGERS word.
+     *   <li>Look backward up to MULTI_LOOKBACKWARD_TOKENS tokens for a
+     *       comma-and-conjunction sequence of ≥2 tickers.
+     *   <li>Look forward up to MULTI_LOOKFORWARD_TOKENS tokens for a
+     *       count + scorer-noun.
+     *   <li>Mark the count position as consumed (added to the caller's set)
+     *       so the subsequent single-symbol pass doesn't re-claim it.
+     * </ol>
+     *
+     * <p>Public for testability; not part of the verify contract.
+     */
+    public List<MultiSymbolClaim> extractMultiSymbolClaims(
+            final String prose, final Set<Integer> consumedCountPositions) {
+        List<MultiSymbolClaim> out = new ArrayList<>();
+        if (prose == null || prose.isEmpty()) return out;
+
+        // Word-by-word scan to find trigger positions. Track absolute offsets
+        // so we can mark counts as consumed for the single-symbol pass.
+        List<TokenAt> tokens = tokenizeWithPositions(prose, 0);
+        for (int i = 0; i < tokens.size(); i++) {
+            String w = stripPunct(tokens.get(i).word).toLowerCase();
+            if (!MULTI_SYMBOL_TRIGGERS.contains(w)) continue;
+
+            // Look backward for ticker list within MULTI_LOOKBACKWARD_TOKENS.
+            List<String> subjects = collectTickerListBefore(tokens, i);
+            if (subjects.size() < 2) continue;   // need ≥2 tickers for multi-symbol
+
+            // Look forward for count + scorer-noun within MULTI_LOOKFORWARD_TOKENS.
+            CountAndNoun cn = findCountAndNounAfter(tokens, i, prose);
+            if (cn == null) continue;
+
+            consumedCountPositions.add(cn.countAbsolutePosition);
+            out.add(new MultiSymbolClaim(
+                    subjects, cn.count, cn.countWord, cn.scorerId, cn.nounMatch));
+        }
+        return out;
+    }
+
+    /**
+     * Collect a ticker list immediately before {@code triggerIdx}, walking
+     * backward through "ticker [, ticker]* [, and] ticker" structure. Returns
+     * an empty list if the look-back window doesn't reveal ≥2 tickers in a
+     * plausibly contiguous list.
+     */
+    private List<String> collectTickerListBefore(final List<TokenAt> tokens, final int triggerIdx) {
+        List<String> reversed = new ArrayList<>();
+        int limit = Math.max(0, triggerIdx - MULTI_LOOKBACKWARD_TOKENS);
+        // The token immediately before the trigger should be either a ticker
+        // (last item in the list, e.g. "QQQ collectively") or a generic word
+        // like "leveraged" / "ETFs". We allow up to 2 non-ticker tokens
+        // between trigger and last ticker (e.g. "QQQ each collectively").
+        int lastTickerIdx = -1;
+        for (int j = triggerIdx - 1; j >= limit && (triggerIdx - 1 - j) <= 2; j--) {
+            String t = stripPunctButKeepDot(tokens.get(j).word);
+            if (isTicker(t)) { lastTickerIdx = j; break; }
+        }
+        if (lastTickerIdx < 0) return List.of();
+
+        // Now walk backward from lastTickerIdx, collecting tickers separated
+        // by comma OR the conjunction "and". Stop at the first non-(ticker,
+        // and, ",")-shaped token.
+        reversed.add(stripPunctButKeepDot(tokens.get(lastTickerIdx).word));
+        boolean expectSeparator = true;   // next token back should be "," or "and"
+        for (int j = lastTickerIdx - 1; j >= limit; j--) {
+            String raw = tokens.get(j).word;
+            String t = stripPunctButKeepDot(raw);
+            String lower = stripPunct(raw).toLowerCase();
+            boolean rawHasComma = raw.contains(",");
+            if (expectSeparator) {
+                // Accept "and" / "&" as conjunctions; accept comma in the raw token.
+                if (lower.equals("and") || lower.equals("&") || rawHasComma) {
+                    expectSeparator = false;
+                    // If the token itself contains a comma but isn't only punctuation,
+                    // e.g. "TQQQ," — we already stripped it; the previous iteration
+                    // captured the ticker. Continue.
+                    if (rawHasComma && isTicker(t)) {
+                        reversed.add(t);
+                        expectSeparator = true;
+                    }
+                    continue;
+                }
+                // No separator → end of list.
+                break;
+            } else {
+                if (isTicker(t)) {
+                    reversed.add(t);
+                    expectSeparator = true;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Reverse to forward order.
+        List<String> out = new ArrayList<>(reversed.size());
+        for (int k = reversed.size() - 1; k >= 0; k--) out.add(reversed.get(k));
+        return out;
+    }
+
+    /**
+     * Look forward of {@code triggerIdx} for a count and a scorer-noun (or
+     * generic event noun). Returns the (count, noun, scorerId) tuple if
+     * found, else null.
+     */
+    private CountAndNoun findCountAndNounAfter(final List<TokenAt> tokens, final int triggerIdx,
+                                                final String prose) {
+        int limit = Math.min(tokens.size(), triggerIdx + 1 + MULTI_LOOKFORWARD_TOKENS);
+        // Find the first count token forward.
+        int countIdx = -1;
+        Integer count = null;
+        String countWord = null;
+        int countAbsPos = -1;
+        for (int j = triggerIdx + 1; j < limit; j++) {
+            Integer c = parseCount(stripPunct(tokens.get(j).word));
+            if (c != null) {
+                count = c;
+                countWord = stripPunct(tokens.get(j).word);
+                countIdx = j;
+                countAbsPos = tokens.get(j).absStart;
+                break;
+            }
+        }
+        if (count == null) return null;
+
+        // Then find the next noun forward of the count.
+        // Use NOUN_RE on the slice of prose after the count's end position to
+        // catch multi-word noun phrases.
+        int countEndAbs = countAbsPos + countWord.length();
+        int sliceEnd = Math.min(prose.length(), countEndAbs + 80);
+        String slice = prose.substring(countEndAbs, sliceEnd);
+        Matcher nm = NOUN_RE.matcher(slice);
+        if (!nm.find()) return null;
+        String nounPhrase = nm.group(1);
+        String scorerId = NOUN_TO_SCORER.get(canonicalizeNoun(nounPhrase));
+        return new CountAndNoun(count, countWord, countAbsPos, scorerId, nounPhrase);
+    }
+
+    /** Forward-lookup helper for multi-symbol claims. */
+    private record CountAndNoun(int count, String countWord, int countAbsolutePosition,
+                                 String scorerId, String nounMatch) {}
+
+    /**
+     * A claim that attributes a count to the SUM of multiple listed subjects.
+     * Mirrors {@link AttributedClaim} but with a list of subjects instead of
+     * a single one. {@code scorerId} is null for generic event nouns.
+     */
+    public record MultiSymbolClaim(List<String> subjects, int count, String countWord,
+                                    String scorerId, String nounMatch) {}
 
     /**
      * Look backward from {@code nounStart} for the nearest (count, subject)
