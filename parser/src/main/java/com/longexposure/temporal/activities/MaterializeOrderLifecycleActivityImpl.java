@@ -74,8 +74,16 @@ public final class MaterializeOrderLifecycleActivityImpl implements MaterializeO
             if (existing > 0) {
                 LOG.info("materialize skip  date={} reason=already_populated rows_present={}",
                         tradingDate, existing);
+                // Still refresh the per-symbol lifetime baseline. order_lifecycle
+                // is here but daily_lifetime_by_symbol might not be (e.g., the
+                // skip path was first reached on a day whose order_lifecycle
+                // pre-dated the TimeInBookDrift wiring). The upsert is
+                // idempotent + cheap (one GROUP BY over the existing rows).
+                currentStage.set("lifetime_baseline");
+                populateLifetimeBaseline(conn, tradingDate);
+                conn.commit();
                 long elapsedMs = (System.nanoTime() - t0) / 1_000_000L;
-                LOG.info("materialize done  date={} rows_written={} elapsed_ms={} (skipped)",
+                LOG.info("materialize done  date={} rows_written={} elapsed_ms={} (skipped, baseline refreshed)",
                         tradingDate, existing, elapsedMs);
                 return existing;
             }
