@@ -117,6 +117,19 @@ public final class HaltScorer implements EventScorer {
         ObjectMapper json = ctx.json();
         ObjectNode breakdown = json.createObjectNode();
         breakdown.put("halt_reason",       reason);
+        // Pre-formatted noun-phrase the LLM can use directly. When halt_reason
+        // is a known IEX/NMS code we render the documented kind; when it's
+        // missing/NA/null we emit the safe generic "trading halt" — never
+        // "regulatory" or "circuit-breaker" or "news halt", since we have no
+        // wire-data basis for those classifications.
+        //
+        // Why this is structural and not a prompt rule: the breakdown carries
+        // a pre-computed safe label; INTERPRET reads it verbatim instead of
+        // inferring from halt_reason="NA" (which leaked "regulatory
+        // suspension" on SSCP — observed 2026-05-28 audit). The data layer
+        // never carries the reason-specific qualifier when the reason is
+        // unknown, so the LLM has nothing to mis-elaborate.
+        breakdown.put("halt_reason_label", haltReasonLabel(reason));
         breakdown.put("halt_duration",     durationS != null ? BreakdownFmt.durationSec(durationS) : "unbounded");
         breakdown.put("halt_start_et",     BreakdownFmt.toEtTime(haltStart));
         if (haltEnd != null)   breakdown.put("halt_end_et", BreakdownFmt.toEtTime(haltEnd)); else breakdown.putNull("halt_end_et");
@@ -185,5 +198,44 @@ public final class HaltScorer implements EventScorer {
         if (seconds < BreakdownFmt.REGULAR_SESSION_SECONDS / 2) return "2h_to_half_session";
         if (seconds < BreakdownFmt.REGULAR_SESSION_SECONDS)    return "half_to_full_session";
         return "exceeds_full_session";
+    }
+
+    /**
+     * Pre-formatted noun-phrase for the halt classification. Reads the
+     * IEX/NMS code from {@code halt_reason} and returns a safe descriptive
+     * label the LLM can use verbatim. When the reason is missing/NA/null,
+     * returns the GENERIC label ({@code "trading halt"}) — never a
+     * reason-specific qualifier like "regulatory" or "circuit-breaker" or
+     * "news halt", because those classifications have no wire-data basis
+     * when the reason code itself is absent.
+     *
+     * <p>Why this is structural (not a prompt rule): INTERPRET / DESCRIBE
+     * prompts simply read this field; they have no way to invent a
+     * classification not in the data. The 05-12 SSCP audit observation
+     * ("this regulatory suspension on SSCP" with halt_reason="NA") becomes
+     * impossible by construction — the data carries the safe label.
+     *
+     * <p>Reason codes per IEX-TP TOPS 1.66 §6.5 + NMS practice. T1 = news
+     * pending; T2 = news dissemination; IPO1/2/3/D = IPO sub-states;
+     * MCB1/2/3 = market-wide circuit breaker tiers; "NA" = code not
+     * provided (older TOPS records / non-classified halts).
+     */
+    private static String haltReasonLabel(final String reason) {
+        if (reason == null) return "trading halt";
+        switch (reason.trim().toUpperCase()) {
+            case "T1":   return "news-pending halt";
+            case "T2":   return "news-dissemination halt";
+            case "IPO1": return "IPO opening-auction halt";
+            case "IPO2": return "IPO order-acceptance halt";
+            case "IPO3": return "IPO pre-launch halt";
+            case "IPOD": return "IPO deferred halt";
+            case "MCB1": return "market-wide circuit-breaker level-1 halt";
+            case "MCB2": return "market-wide circuit-breaker level-2 halt";
+            case "MCB3": return "market-wide circuit-breaker level-3 halt";
+            case "LUDP": return "LULD price-band halt";
+            case "":
+            case "NA":
+            default:     return "trading halt";
+        }
     }
 }
