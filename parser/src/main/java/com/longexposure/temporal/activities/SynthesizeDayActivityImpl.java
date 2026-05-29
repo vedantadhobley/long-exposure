@@ -73,7 +73,7 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
      * misattribution slightly worse. This v7 supersedes it via the
      * structural verifier approach.
      */
-    private static final String PROMPT_VERSION = "synthesize-v8-symbol-counts-2026-05-29";
+    private static final String PROMPT_VERSION = "synthesize-v9-counts-after-events-2026-05-29";
 
     /** Max LLM attempts per day — re-roll on verifier failure (temp 1.0 gives variance). */
     private static final int MAX_LLM_ATTEMPTS = 3;
@@ -342,15 +342,36 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
         sb.append("Trading date: ").append(tradingDate).append("\n\n");
         sb.append("DAY METADATA: ").append(dayAggregates.toString()).append("\n\n");
 
-        // v8 (2026-05-29): inject per-symbol truth counts so the model can
-        // copy them rather than count from prose. Eliminates the attribution
-        // failures observed on the 2026-05-29 overnight run (TQQQ "six
-        // liquidity withdrawals" when actual was 8, SPY "ten sweeps" when
-        // actual was 2, etc.). Same structural pattern as Phase 7
-        // halt_phase_span_label — give the model the right field instead of
-        // asking it to compute. The verifier still checks against the same
-        // truth maps so a model that ignores the table still gets caught.
-        sb.append("PER-SYMBOL COUNTS (truth — copy these EXACT counts when describing per-symbol activity):\n");
+        // PER-EVENT LIST first — provides context the model uses to identify
+        // themes, but its 150+ prose paragraphs would dominate attention if
+        // the truth table came after. v9 (2026-05-29) moves PER-SYMBOL COUNTS
+        // to AFTER this list, right before the closing instruction, so the
+        // model's recency bias works FOR us rather than against (v8 placed
+        // the table before; counts were ignored).
+        sb.append("PER-EVENT LIST (chronological, ").append(events.size()).append(" events):\n\n");
+        int idx = 0;
+        for (EventRow e : events) {
+            idx++;
+            String body = (e.interpretation != null && !e.interpretation.isBlank())
+                          ? e.interpretation.trim()
+                          : (e.narration != null ? e.narration.trim() : "(no narration)");
+            sb.append("[").append(idx).append("] ").append(e.scorerId)
+              .append(" · ").append(e.symbol == null ? "—" : e.symbol)
+              .append(" · ").append(com.longexposure.scoring.BreakdownFmt.toEtTime(e.ts.toInstant()))
+              .append(" ET — ").append(body).append("\n");
+        }
+        sb.append('\n');
+
+        // PER-SYMBOL COUNTS: the AUTHORITATIVE truth, placed immediately
+        // before the closing instruction so the model sees it most recently.
+        // The verifier checks count claims against the SAME maps used to
+        // build this table.
+        sb.append("════════════════════════════════════════════════════════════════════\n");
+        sb.append("PER-SYMBOL COUNTS — AUTHORITATIVE TRUTH FOR ALL COUNT CLAIMS\n");
+        sb.append("════════════════════════════════════════════════════════════════════\n");
+        sb.append("Every per-symbol count you cite MUST come from this table verbatim.\n");
+        sb.append("Do NOT count from the per-event list above — that produces errors.\n");
+        sb.append("Do NOT cite a symbol not in this table — it isn't in today's events.\n\n");
         // Order by total descending, then alphabetically — model attention bias
         // skews to top-of-list, so put the most-active symbols first.
         List<Map.Entry<String, Integer>> sortedSymbols =
@@ -365,7 +386,6 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
             Map<String, Integer> byScorer = bySymbolByScorer.get(symbol);
             sb.append("  ").append(symbol).append(": total=").append(total);
             if (byScorer != null && !byScorer.isEmpty()) {
-                // Per-scorer breakdown, sorted by count descending
                 List<Map.Entry<String, Integer>> ss = new ArrayList<>(byScorer.entrySet());
                 ss.sort((a, b) -> Integer.compare(b.getValue(), a.getValue()));
                 sb.append(" — ");
@@ -378,23 +398,14 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
             }
             sb.append('\n');
         }
-        sb.append('\n');
+        sb.append("════════════════════════════════════════════════════════════════════\n\n");
 
-        sb.append("PER-EVENT LIST (chronological, ").append(events.size()).append(" events):\n\n");
-        int idx = 0;
-        for (EventRow e : events) {
-            idx++;
-            String body = (e.interpretation != null && !e.interpretation.isBlank())
-                          ? e.interpretation.trim()
-                          : (e.narration != null ? e.narration.trim() : "(no narration)");
-            sb.append("[").append(idx).append("] ").append(e.scorerId)
-              .append(" · ").append(e.symbol == null ? "—" : e.symbol)
-              .append(" · ").append(com.longexposure.scoring.BreakdownFmt.toEtTime(e.ts.toInstant()))
-              .append(" ET — ").append(body).append("\n");
-        }
-        sb.append("\nNow write the day's themes paragraph (3-6 sentences, journalist register, "
-                + "ground every claim in the data above). When you cite per-symbol counts, "
-                + "use the EXACT numbers from PER-SYMBOL COUNTS above.");
+        sb.append("Now write the day's themes paragraph (3-6 sentences, journalist register).\n");
+        sb.append("Constraints:\n");
+        sb.append("  - Every numeric count claim must match PER-SYMBOL COUNTS above verbatim.\n");
+        sb.append("  - Every ticker mentioned must appear in PER-SYMBOL COUNTS above.\n");
+        sb.append("  - Do not introduce numbers from outside the inputs (no inventing).\n");
+        sb.append("  - Do not use the word 'manipulation' or other intent claims.\n");
         return sb.toString();
     }
 
