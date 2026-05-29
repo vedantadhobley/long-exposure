@@ -112,8 +112,8 @@ class PipelineWorkflowCascadeTest {
         // 2026-05-11 (Mon) through 2026-05-17 (Sun) — 5 weekdays
         java.util.List<LocalDate> out = PipelineWorkflowImpl.expandDates(
                 null,
-                new PipelineWorkflow.DateRange(
-                        LocalDate.of(2026, 5, 11), LocalDate.of(2026, 5, 17)));
+                List.of(new PipelineWorkflow.DateRange(
+                        LocalDate.of(2026, 5, 11), LocalDate.of(2026, 5, 17))));
         assertEquals(5, out.size());
         assertEquals(LocalDate.of(2026, 5, 11), out.get(0));   // Mon
         assertEquals(LocalDate.of(2026, 5, 15), out.get(4));   // Fri
@@ -124,8 +124,8 @@ class PipelineWorkflowCascadeTest {
         // dates [12, 13] + range [12..15] should produce 4 unique weekdays
         java.util.List<LocalDate> out = PipelineWorkflowImpl.expandDates(
                 List.of(LocalDate.of(2026, 5, 12), LocalDate.of(2026, 5, 13)),
-                new PipelineWorkflow.DateRange(
-                        LocalDate.of(2026, 5, 12), LocalDate.of(2026, 5, 15)));
+                List.of(new PipelineWorkflow.DateRange(
+                        LocalDate.of(2026, 5, 12), LocalDate.of(2026, 5, 15))));
         assertEquals(4, out.size());
     }
 
@@ -144,9 +144,38 @@ class PipelineWorkflowCascadeTest {
         // Swap from/to — should still expand correctly
         java.util.List<LocalDate> out = PipelineWorkflowImpl.expandDates(
                 null,
-                new PipelineWorkflow.DateRange(
-                        LocalDate.of(2026, 5, 15), LocalDate.of(2026, 5, 11)));
+                List.of(new PipelineWorkflow.DateRange(
+                        LocalDate.of(2026, 5, 15), LocalDate.of(2026, 5, 11))));
         assertEquals(5, out.size());
+    }
+
+    @Test
+    void expandDates_multipleRangesUnion() {
+        // Two non-overlapping ranges + an individual date should all union.
+        java.util.List<LocalDate> out = PipelineWorkflowImpl.expandDates(
+                List.of(LocalDate.of(2026, 5, 27)),  // Wed
+                List.of(
+                        new PipelineWorkflow.DateRange(
+                                LocalDate.of(2026, 5, 11), LocalDate.of(2026, 5, 15)),
+                        new PipelineWorkflow.DateRange(
+                                LocalDate.of(2026, 5, 18), LocalDate.of(2026, 5, 22))));
+        assertEquals(11, out.size(), "5 weekdays + 5 weekdays + 1 individual = 11");
+        assertEquals(LocalDate.of(2026, 5, 11), out.get(0));
+        assertEquals(LocalDate.of(2026, 5, 27), out.get(10));
+    }
+
+    @Test
+    void expandDates_overlappingRangesDedup() {
+        // Overlapping ranges should produce the union, not duplicates.
+        java.util.List<LocalDate> out = PipelineWorkflowImpl.expandDates(
+                null,
+                List.of(
+                        new PipelineWorkflow.DateRange(
+                                LocalDate.of(2026, 5, 11), LocalDate.of(2026, 5, 15)),
+                        new PipelineWorkflow.DateRange(
+                                LocalDate.of(2026, 5, 13), LocalDate.of(2026, 5, 18))));
+        // 11..15 (5 weekdays) ∪ 13..18 (4 weekdays) = 11..18 (6 weekdays)
+        assertEquals(6, out.size());
     }
 
     @Test

@@ -102,14 +102,14 @@ public interface PipelineWorkflow {
 
     record PipelineInput(
             List<LocalDate> dates,
-            DateRange       dateRange,
+            List<DateRange> dateRanges,
             boolean         pollUntilReady,
             boolean         forceReingest,
             boolean         runRetentionSweep,
             boolean         cascadeRollups,
             Mode            mode) {
 
-        /** Back-compat constructor — defaults mode to FULL_PIPELINE, no range. */
+        /** Back-compat constructor — defaults mode to FULL_PIPELINE, no ranges. */
         public PipelineInput(List<LocalDate> dates,
                               boolean pollUntilReady,
                               boolean forceReingest,
@@ -118,7 +118,7 @@ public interface PipelineWorkflow {
             this(dates, null, pollUntilReady, forceReingest, runRetentionSweep, cascadeRollups, Mode.FULL_PIPELINE);
         }
 
-        /** Back-compat constructor with mode but no range. */
+        /** Back-compat constructor with mode but no ranges. */
         public PipelineInput(List<LocalDate> dates,
                               boolean pollUntilReady,
                               boolean forceReingest,

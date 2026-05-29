@@ -23,20 +23,21 @@ public final class PipelineWorkflowImpl implements PipelineWorkflow {
         long t0 = System.currentTimeMillis();
         Mode mode = (input.mode() == null) ? Mode.FULL_PIPELINE : input.mode();
 
-        // Stage 1: expand dates + dateRange into an ordered, deduplicated,
-        // weekday-only list. Caller can pass either field or both (union).
+        // Stage 1: expand dates + dateRanges into an ordered, deduplicated,
+        // weekday-only list. Caller can pass any combination: individual
+        // dates, ranges, multiple ranges, or all three (union).
         java.util.List<LocalDate> effectiveDates = expandDates(
-                input.dates(), input.dateRange());
+                input.dates(), input.dateRanges());
         if (effectiveDates.isEmpty()) {
-            LOG.warn("pipeline start  no effective dates  dates={} dateRange={}",
-                    input.dates(), input.dateRange());
+            LOG.warn("pipeline start  no effective dates  dates={} dateRanges={}",
+                    input.dates(), input.dateRanges());
             return new PipelineResult(0, 0, 0, 0, System.currentTimeMillis() - t0);
         }
 
-        LOG.info("pipeline start  mode={} dates_count={} (from dates={} range={}) cascade={} forceReingest={} retentionSweep={}",
+        LOG.info("pipeline start  mode={} dates_count={} (from dates={} ranges={}) cascade={} forceReingest={} retentionSweep={}",
                 mode, effectiveDates.size(),
                 input.dates() == null ? 0 : input.dates().size(),
-                input.dateRange(),
+                input.dateRanges() == null ? 0 : input.dateRanges().size(),
                 input.cascadeRollups(), input.forceReingest(), input.runRetentionSweep());
 
         // Per-day work — dispatched by mode + size.
@@ -277,18 +278,21 @@ public final class PipelineWorkflowImpl implements PipelineWorkflow {
      */
     static java.util.List<LocalDate> expandDates(
             final java.util.List<LocalDate> explicit,
-            final PipelineWorkflow.DateRange range) {
+            final java.util.List<PipelineWorkflow.DateRange> ranges) {
         java.util.TreeSet<LocalDate> all = new java.util.TreeSet<>();
         if (explicit != null) {
             for (LocalDate d : explicit) {
                 if (d != null && isWeekday(d)) all.add(d);
             }
         }
-        if (range != null && range.from() != null && range.to() != null) {
-            LocalDate from = range.from(), to = range.to();
-            if (from.isAfter(to)) { LocalDate tmp = from; from = to; to = tmp; }
-            for (LocalDate d = from; !d.isAfter(to); d = d.plusDays(1)) {
-                if (isWeekday(d)) all.add(d);
+        if (ranges != null) {
+            for (PipelineWorkflow.DateRange range : ranges) {
+                if (range == null || range.from() == null || range.to() == null) continue;
+                LocalDate from = range.from(), to = range.to();
+                if (from.isAfter(to)) { LocalDate tmp = from; from = to; to = tmp; }
+                for (LocalDate d = from; !d.isAfter(to); d = d.plusDays(1)) {
+                    if (isWeekday(d)) all.add(d);
+                }
             }
         }
         return new java.util.ArrayList<>(all);
