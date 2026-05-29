@@ -207,4 +207,105 @@ final class GroundingVerifierTest {
         GroundingVerifier.Result r = new GroundingVerifier().verify(prose, blueprint, breakdown);
         assertTrue(r.passed(), "expected pass for Corp ↔ Corporation: " + r.mismatches());
     }
+
+    // ─── Phase 9b — pattern-name mislabel check (DESCRIBE side) ─────────
+    // Mirror of the InterpretationVerifier 6-arg form. Verifier flags
+    // when DESCRIBE prose names a scorer pattern that is neither the
+    // event's own scorer_id nor a co_occurring key on the breakdown.
+
+    @Test
+    void verify_passesWhenProseMentionsOwnScorerOnly() throws Exception {
+        JsonNode breakdown = JSON.readTree(
+                "{\"symbol\":\"IWM\",\"company_name\":\"iShares Russell 2000\"}");
+        JsonNode blueprint = JSON.readTree("{\"key_numbers\":[]}");
+        String prose = "iShares Russell 2000 (IWM) experienced a layering event across multiple levels.";
+        GroundingVerifier.Result r = new GroundingVerifier().verify(
+                prose, blueprint, breakdown, "layering");
+        assertTrue(r.passed(), "own scorer should pass: " + r.mismatches());
+    }
+
+    @Test
+    void verify_flagsWhenProseNamesUnrelatedScorer() throws Exception {
+        JsonNode breakdown = JSON.readTree(
+                "{\"symbol\":\"IWM\",\"company_name\":\"iShares Russell 2000\"}");
+        JsonNode blueprint = JSON.readTree("{\"key_numbers\":[]}");
+        // Event is layering; prose calls it a post-cancel cluster — misclassification.
+        String prose = "iShares Russell 2000 (IWM) experienced a post-cancel cluster across multiple levels.";
+        GroundingVerifier.Result r = new GroundingVerifier().verify(
+                prose, blueprint, breakdown, "layering");
+        assertFalse(r.passed(), "mislabeling layering as post_cancel_cluster should fail");
+        assertTrue(r.mismatches().stream().anyMatch(m -> m.contains("post_cancel_cluster")),
+                "mismatch should cite the misnamed scorer: " + r.mismatches());
+    }
+
+    @Test
+    void verify_passesWhenProseMentionsCoOccurringScorer() throws Exception {
+        // Event is liquidity_withdrawal with co_occurring post_cancel + layering;
+        // prose mentions both as supporting detail — allowed via co_occurring keys.
+        JsonNode breakdown = JSON.readTree("""
+                {
+                  "symbol": "IWM",
+                  "company_name": "iShares Russell 2000",
+                  "co_occurring": {
+                    "during_event": {
+                      "post_cancel_cluster": {"count": 28, "sum_orders": 3759},
+                      "layering": {"count": 6, "sum_orders": 187}
+                    }
+                  }
+                }""");
+        JsonNode blueprint = JSON.readTree("{\"key_numbers\":[]}");
+        String prose = "iShares Russell 2000 (IWM) saw a liquidity withdrawal alongside "
+                     + "28 post-cancel clusters and 6 layering events during the same window.";
+        GroundingVerifier.Result r = new GroundingVerifier().verify(
+                prose, blueprint, breakdown, "liquidity_withdrawal");
+        assertTrue(r.passed(), "co_occurring scorers should be allowed: " + r.mismatches());
+    }
+
+    @Test
+    void verify_flagsScorerNotInOwnNorCoOccurring() throws Exception {
+        // Event is liquidity_withdrawal with only post_cancel co_occurring;
+        // prose invents a sweep — not in own scorer, not in co_occurring.
+        JsonNode breakdown = JSON.readTree("""
+                {
+                  "symbol": "IWM",
+                  "company_name": "iShares Russell 2000",
+                  "co_occurring": {
+                    "during_event": {
+                      "post_cancel_cluster": {"count": 28}
+                    }
+                  }
+                }""");
+        JsonNode blueprint = JSON.readTree("{\"key_numbers\":[]}");
+        String prose = "iShares Russell 2000 (IWM) saw a liquidity withdrawal accompanied by a sweep across price levels.";
+        GroundingVerifier.Result r = new GroundingVerifier().verify(
+                prose, blueprint, breakdown, "liquidity_withdrawal");
+        assertFalse(r.passed(), "sweep not in own or co_occurring should fail");
+        assertTrue(r.mismatches().stream().anyMatch(m -> m.contains("sweep")),
+                "mismatch should cite the invented scorer: " + r.mismatches());
+    }
+
+    @Test
+    void verify_skipsPatternCheckWhenScorerIdNull() throws Exception {
+        // 4-arg form with null scorerId should behave like the 3-arg form.
+        JsonNode breakdown = JSON.readTree(
+                "{\"symbol\":\"IWM\",\"company_name\":\"iShares Russell 2000\"}");
+        JsonNode blueprint = JSON.readTree("{\"key_numbers\":[]}");
+        // Prose mentions an unrelated scorer; pattern check skipped → still passes.
+        String prose = "iShares Russell 2000 (IWM) experienced a sweep across price levels.";
+        GroundingVerifier.Result r = new GroundingVerifier().verify(
+                prose, blueprint, breakdown, null);
+        assertTrue(r.passed(), "null scorerId should skip the pattern check: " + r.mismatches());
+    }
+
+    @Test
+    void verify_threeArgFormPreservesBackCompat() throws Exception {
+        // The 3-arg form is what VerifierBackfill and other callers use.
+        // Should NOT run the pattern-mislabel check even on obvious mislabels.
+        JsonNode breakdown = JSON.readTree(
+                "{\"symbol\":\"IWM\",\"company_name\":\"iShares Russell 2000\"}");
+        JsonNode blueprint = JSON.readTree("{\"key_numbers\":[]}");
+        String prose = "iShares Russell 2000 (IWM) experienced a halt and a layering event simultaneously.";
+        GroundingVerifier.Result r = new GroundingVerifier().verify(prose, blueprint, breakdown);
+        assertTrue(r.passed(), "3-arg form should skip pattern check: " + r.mismatches());
+    }
 }
