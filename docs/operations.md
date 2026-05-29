@@ -225,6 +225,54 @@ Why `0.0.0.0:53` doesn't work: `systemd-resolved` already owns `127.0.0.53:53` o
 
 If a docker container ever lands in `Exited` with `restartCount=0`, treat it as a setup-time (not runtime) failure and look at `docker inspect <name> --format '{{.State.Error}}'` for the actual reason.
 
+## Gotcha — restart the worker after any activity/workflow source change
+
+Editing a class under `parser/src/main/java/com/longexposure/temporal/` does
+NOT automatically take effect in the running worker JVM, even with the dev
+stack's bind-mounted source. The JVM loads classes into metaspace at startup
+and doesn't reload them when the file on disk changes. Re-running `gradle
+compileJava` while the worker is up updates the `.class` files on disk but
+the running JVM keeps using the version it already loaded.
+
+Worse: there's a window — observed 2026-05-28 with Phase 9-A — where
+restarting the worker container within ~minute of a recent source change can
+hit a Gradle incremental-compile race that loads the **previous** class
+version. The container starts → `gradle --no-daemon run` decides nothing
+needs recompiling (file mtimes look "recent enough") → JVM loads the stale
+class. Hours pass. The new code looks committed and deployed but isn't
+running. Smoking gun: behavior matches the *old* code path, often a log
+message that should no longer appear.
+
+**Protocol after any source change to an activity or workflow class:**
+
+```bash
+# 1. Restart the worker
+docker restart long-exposure-dev-worker
+
+# 2. Wait for boot
+docker logs long-exposure-dev-worker --since 3m 2>&1 | grep "workers started"
+
+# 3. Verify the new class symbols are in /app/build (post-compile state)
+docker exec long-exposure-dev-worker sh -c \
+  'strings /app/build/classes/java/main/com/longexposure/temporal/activities/MyChangedActivityImpl.class | grep my-new-symbol'
+
+# 4. Confirm the WorkerMain JVM started AFTER the source change
+docker exec long-exposure-dev-worker sh -c \
+  "stat -c '%y' /proc/\$(pgrep -f longexposure.Main | tail -1)"
+```
+
+If step 3 finds the symbol but the behavior still doesn't match, the JVM
+loaded a stale `/tmp/cc/build/classes/` version. Force-recompile from the
+host before the next restart:
+
+```bash
+docker exec -w /app long-exposure-dev-worker gradle --no-daemon --quiet compileJava
+docker restart long-exposure-dev-worker
+```
+
+The pre-restart compile pre-stages `/app/build/classes/` with the fresh code
+so the JVM-start incremental check can't miss it.
+
 ## Operational rule — never run two LLM-bearing workflows concurrently
 
 **`llama-large.joi` is a single-GPU local model. Max throughput is 2 concurrent decode streams; above that, throughput collapses rather than scales.** The `LlamaClient.Semaphore(2, fair)` enforces this *within* a single workflow's activity fan-out, but it does NOT prevent two separate workflows from each spawning activities that compete for the same 2 slots.

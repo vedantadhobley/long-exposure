@@ -6,6 +6,126 @@ Append-only record of architectural and operational decisions, ordered by date. 
 
 ---
 
+## 2026-05-29 — Phase 8 / 9-A / 7b: orchestration moved into Temporal, inter-day INTERPRET wired, BackgroundHeartbeat replaces band-aid
+
+Three structural fixes shipped during a long evening session 2026-05-28
+→ 2026-05-29 EDT. The triggering event was the 2026-05-28 overnight
+relaunch stall (see `docs/todo.md` "Overnight failure diagnosis"); the
+root cause turned out to be the *driver architecture* — a bash script
+wrapping the Temporal SDK CLI — not anything in the codebase. Moving
+orchestration into Temporal (Phase 8) was the obvious follow-on, and
+two related improvements (Phase 9-A wiring, Phase 7b heartbeat fix)
+slotted in alongside it.
+
+**1. Phase 8 — `PipelineWorkflow` as the unified entry point** (commit
+`1352dcb`). Replaces the `scripts/rerun-dataset-*.sh` shell drivers
+that wrap `temporal workflow start --waitForResult` in a bash loop.
+Same code path covers:
+  - cron-driven daily (`dates=[yesterday-placeholder]`, `pollUntilReady=true`)
+  - ad-hoc single-day (`dates=[2026-05-21]`)
+  - multi-day backfill (`dates=[12 dates]`, `cascadeRollups=true`)
+
+Per-day work fires `DailyPipelineWorkflow` as a child (existing per-day
+fan-out unchanged). When `cascadeRollups=true`, `computeCascadeScope`
+(pure fn, unit-tested) maps the input dates to the touched
+(week, quarter, year) period anchors and fires each rollup. Each rollup
+is content-addressed at the activity level so unchanged inputs no-op
+cheaply, and the quarter/year gates short-circuit until
+`MIN_WEEKS_FOR_QUARTER=8` / `MIN_QUARTERS_FOR_YEAR=2` are met.
+
+**Why this is the right shape.** The shell-driver architecture has a
+specific failure mode: when the parent shell dies (terminal-close,
+SIGHUP, kill), the driver dies with it, but any Temporal workflow it
+launched keeps running on its own (Temporal is durable). So you get
+the worst of both worlds — invisible progress on workflows that
+nobody's tracking, no advancement to the next day, and a "dead" log
+that looks like the whole pipeline failed when it actually didn't.
+This bit us 2026-05-28: the v2 driver died at 16:39:55 EDT, narrate-21
+kept running in Temporal for another 56 min on its own producing 68
+narratives, then somebody manually terminated it at 17:35:59 EDT with
+reason `"clean slate for full overnight rerun"`. Moving the loop
+itself into Temporal eliminates this class of failure — no parent
+shell to die, no SDK CLI to exit, no log to go stale. The cron
+schedule, ad-hoc runs, and backfill drivers consolidate to one
+`PipelineWorkflow.run(PipelineInput)` call site.
+
+v1 (this commit): per-day work runs sequentially. The Phase A/B
+overlap parallelization (Phase A = luv-side non-LLM stages, Phase B =
+joi-bound LLM stages) is documented in the workflow's JavaDoc as a v2
+follow-up — it would save ~3-4 hr on a 12-day backfill but requires
+either splitting `DailyPipelineWorkflow` into separately-callable
+phase workflows or having `PipelineWorkflow` call the individual
+phase workflows directly. Deferred until after launch.
+
+**2. Phase 9-A — inter-day INTERPRET branch** (commit `a30441f`,
+verified working at runtime 2026-05-29 03:19 UTC). `volume_deviation`
+and `time_in_book_drift` events previously short-circuited at
+`Catalog.forScorer()` returning null (log: *"no catalog entry for
+scorer — skipping"*). Catalog now has entries for both; activity
+branches on `INTER_DAY_SCORERS` to skip the ±60-sec pre/post trade
+window query (day-level signal is not temporally anchored — the
+window framing doesn't apply) and uses a different prompt section
+that asks the model to interpret the magnitude using the catalog's
+documented drivers, without inventing sequential context.
+
+Verified end-to-end via a smoke `InterpretWorkflow(2026-05-13)`:
+3/3 inter-day events (TDIC, REI, DHY^ on `volume_deviation`) fired,
+all `verifier_passed=true`. DB now has inter-day INTERPRET rows
+where the architecture had a structural gap (decisions.md
+2026-05-28 audit findings).
+
+**3. Phase 7b — `BackgroundHeartbeat` in Narrate + Interpret**
+(commit `bc1630f`). The remaining LLM-bearing activities (`Narrate`
+and `Interpret`) used an explicit checkpoint-heartbeat pattern:
+
+```java
+actx.heartbeat("extract:" + selectedId);
+NarrationPipeline.Result result = pipeline.narrate(in);  // ← LLM call blocks here
+actx.heartbeat("upsert:" + selectedId);
+```
+
+The heartbeats fired BEFORE and AFTER the LLM call but couldn't cover
+the call's own duration. If joi hit a transient slow path > 1 min
+(heartbeat-timeout), Temporal killed the activity mid-LLM.
+
+The fix lifts the pattern already used by `SynthesizeDayActivityImpl`
+(itself lifted from `MaterializeOrderLifecycleActivityImpl`): wrap
+the entire activity body in a `try (BackgroundHeartbeat hb = ...)`
+that spawns a daemon thread firing `actx.heartbeat("keep_alive:" +
+stage)` every 30 sec regardless of where the worker thread is
+blocked. Stage labels (`load` / `cache_check` / `llm` / `upsert`)
+surface in the heartbeat payload so the Temporal UI shows what an
+in-flight activity is actually doing.
+
+This is the *proper fix* for the band-aid in commit `15af21f` that
+bumped `SynthesizeDay` + `AggregateWeek` heartbeat-timeout 1 → 5 min
+earlier today. With `BackgroundHeartbeat` everywhere on the LLM
+path, every heartbeat-timeout stays at 1 min as a real liveness
+signal (the 5-min bumps were reverted as part of this pass).
+
+**4. Operational lesson — gradle incremental compile within seconds
+of JVM start can produce stale class loads.** The Phase 9-A commit
+landed 2026-05-28 20:28:00 EDT. The worker container restarted 44 sec
+later at 20:28:44 EDT. The gradle build inside the container saw
+"recent" source timestamps and made an incremental-compile decision
+that didn't pick up the new file in `/tmp/cc/build/classes/`. The JVM
+then loaded the stale class into metaspace; subsequent recompiles
+to `/app/build/classes/` didn't affect the running JVM. Worker logs
+showed the smoking gun: `no catalog entry for scorer — skipping
+scorer=volume_deviation selected_id=XXXX` — the pre-Phase-9-A code
+path, 6+ hours after Phase 9-A had been committed.
+
+**Resolution + protocol going forward**: after any source change to
+an activity or workflow class, explicitly restart the worker
+(`docker restart long-exposure-dev-worker`) and verify the new
+symbols are present in `/app/build/classes/java/main/.../*.class`
+before assuming new behavior is in effect. The `docker logs
+long-exposure-dev-worker --since N | grep "workers started"` line
+is the "JVM has booted with new classes" signal. Documented in
+`docs/operations.md` as a Gotcha.
+
+---
+
 ## 2026-05-28 — Pre-overnight pass: class-label vocabulary generalization, Tier B (quarterly + yearly rollups), intent-denylist mirror on InterpretationVerifier
 
 The pre-overnight audit + 1-day validation gate produced the design pattern
