@@ -38,6 +38,7 @@ import com.longexposure.temporal.workflows.AggregateWeekWorkflowImpl;
 import com.longexposure.temporal.workflows.AggregateQuarterWorkflowImpl;
 import com.longexposure.temporal.workflows.AggregateYearWorkflowImpl;
 import com.longexposure.temporal.workflows.ParseWorkflowImpl;
+import com.longexposure.temporal.workflows.PipelineWorkflowImpl;
 import com.longexposure.temporal.workflows.RefreshSymbolsWorkflow;
 import com.longexposure.temporal.workflows.RefreshSymbolsWorkflowImpl;
 import com.longexposure.temporal.workflows.ScoreWorkflowImpl;
@@ -106,6 +107,7 @@ public final class WorkerMain {
         // bottleneck.
         Worker worker = factory.newWorker(DailyPipelineWorkflow.TASK_QUEUE);
         worker.registerWorkflowImplementationTypes(
+                PipelineWorkflowImpl.class,
                 DailyPipelineWorkflowImpl.class,
                 DownloadWorkflowImpl.class,
                 ParseWorkflowImpl.class,
