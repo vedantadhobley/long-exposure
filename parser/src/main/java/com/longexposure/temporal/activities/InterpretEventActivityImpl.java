@@ -60,7 +60,7 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
      * <p>v10 added the pattern-name mislabel check; v9 added supporting
      * analytics (slippage, OFI, etc.).
      */
-    private static final String PROMPT_VERSION = "interpret-v11-inter-day-2026-05-28";
+    private static final String PROMPT_VERSION = "interpret-v12-framing-rules-2026-05-29";
 
     /** Half-window for the surrounding trade context. */
     private static final long WINDOW_SECONDS = 60L;
@@ -130,6 +130,44 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
             For the slice-fragile measures (window_vpin, window_kyle_lambda,
             window_jump_ratio), only mention if the narrative truly needs them, and
             always with the "on IEX" qualifier.
+
+            FRAMING RULES — anchored renderings for fields that read awkwardly when
+            rendered verbatim (these change wording, not grounding):
+
+              - HALT TIMING. When present, the breakdown carries `halt_phase_span_label`
+                — a COMPLETE GRAMMATICAL PHRASE describing WHEN the halt ran ("lasting
+                through midday" / "starting in pre-market trading and resuming around
+                midday"). Use it verbatim. Otherwise fall back to `halt_start_phase_label`
+                + `halt_end_phase_label` joined with a connector verb (e.g. "began in
+                pre-market and resumed around midday"), never with bare "to" ("began in
+                pre-market to midday" is ungrammatical). NEVER render the
+                `halt_start_et` / `halt_end_et` nanosecond-precision strings ("07:07:44.766",
+                "14:35:02.554") — those are drill-down debug fields, not journalism.
+                If you need a single anchor time, use the phase label.
+
+              - `display_ratio_pct` (iceberg) is the ratio of displayed tip ÷ total
+                executed size, in PERCENT. Render as "displayed only N% of total size"
+                / "the visible tip was N% of executions" — NEVER as "display_ratio_pct
+                of N" (field-name leak). Anchor the meaning ("hidden reserve",
+                "institutional execution") with the catalog's documented drivers.
+
+              - `drift_x` (time_in_book_drift) is the SYMMETRIC MAGNITUDE of how far
+                today's average order lifetime moved from baseline (1.0 = no drift,
+                > 1.0 = drift in either direction; the breakdown also carries a
+                `direction` field for "shorter" or "longer"). Render as "N× shorter
+                than typical" or "N× longer than typical", NEVER as "N units" or
+                "N-point drift_x" (field-name leak).
+
+              - `pre_event_ofi` near 0.0 means the book was balanced. Either say
+                "the book was balanced" or omit the metric entirely. Do NOT render
+                bare "pre_event_ofi 0.0" with the field name.
+
+              - `robust_z` (volume_deviation, time_in_book_drift) is DIMENSIONLESS.
+                NEVER render as "sigma" / "standard deviations" — the values run
+                high because the underlying distributions are heavy-tailed. Render
+                as "far above its typical range" / "well outside the trailing band",
+                and let `percentile_rank` carry the intuition ("the most extreme day
+                in the trailing two weeks").
 
             EMPTY-WINDOW CASE: when both surrounding windows are empty or quiet,
             state that explicitly — "the pattern appears in isolation" is a valid
