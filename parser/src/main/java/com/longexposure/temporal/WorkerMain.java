@@ -38,6 +38,8 @@ import com.longexposure.temporal.workflows.AggregateWeekWorkflowImpl;
 import com.longexposure.temporal.workflows.AggregateQuarterWorkflowImpl;
 import com.longexposure.temporal.workflows.AggregateYearWorkflowImpl;
 import com.longexposure.temporal.workflows.ParseWorkflowImpl;
+import com.longexposure.temporal.workflows.FinalizeDayWorkflowImpl;
+import com.longexposure.temporal.workflows.IngestDayWorkflowImpl;
 import com.longexposure.temporal.workflows.LlmDayWorkflowImpl;
 import com.longexposure.temporal.workflows.PipelineWorkflowImpl;
 import com.longexposure.temporal.workflows.RefreshSymbolsWorkflow;
@@ -109,7 +111,9 @@ public final class WorkerMain {
         Worker worker = factory.newWorker(DailyPipelineWorkflow.TASK_QUEUE);
         worker.registerWorkflowImplementationTypes(
                 PipelineWorkflowImpl.class,
+                IngestDayWorkflowImpl.class,
                 LlmDayWorkflowImpl.class,
+                FinalizeDayWorkflowImpl.class,
                 DailyPipelineWorkflowImpl.class,
                 DownloadWorkflowImpl.class,
                 ParseWorkflowImpl.class,
