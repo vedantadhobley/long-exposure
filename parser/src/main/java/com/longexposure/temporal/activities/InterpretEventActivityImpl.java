@@ -50,14 +50,17 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
 
     /** Bumped when the prompt changes; invalidates the cache. */
     /**
-     * v10 (2026-05-28 evening) — verifier-only bump: adds the pattern-name
-     * mislabel check via the new InterpretationVerifier 6-arg verify
-     * overload that takes the event's scorer_id. The catalog vocabulary
-     * (AttributionVerifier.NOUN_TO_SCORER) is reused to identify mentioned
-     * scorers; mismatches against (event's scorer_id ∪ co_occurring keys)
-     * are flagged. Prompt text unchanged.
+     * v11 (2026-05-28 evening, Phase 9-A) — inter-day INTERPRET now fires.
+     * Catalog gained volume_deviation + time_in_book_drift entries.
+     * InterpretEventActivityImpl branches on scorerId for these: skips the
+     * ±60-sec window query (the day-level signal isn't temporally anchored),
+     * skips computeDerived, and uses a different prompt section asking for
+     * regime-interpretation framed by the catalog's documented drivers.
+     *
+     * <p>v10 added the pattern-name mislabel check; v9 added supporting
+     * analytics (slippage, OFI, etc.).
      */
-    private static final String PROMPT_VERSION = "interpret-v10-pattern-mislabel-verifier-2026-05-28";
+    private static final String PROMPT_VERSION = "interpret-v11-inter-day-2026-05-28";
 
     /** Half-window for the surrounding trade context. */
     private static final long WINDOW_SECONDS = 60L;
@@ -168,15 +171,24 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
 
             actx.heartbeat("window:" + selectedId);
 
-            // Pre / post window queries. ts_end is null for instantaneous
-            // events (large_trade) — use ts as both bounds.
-            Timestamp tsStart = Timestamp.from(row.ts);
-            Timestamp tsEnd   = (row.tsEnd != null) ? Timestamp.from(row.tsEnd) : tsStart;
-            Timestamp preFrom = new Timestamp(tsStart.getTime() - WINDOW_SECONDS * 1000L);
-            Timestamp postTo  = new Timestamp(tsEnd.getTime()   + WINDOW_SECONDS * 1000L);
-
-            TradeWindow pre  = TradeWindow.query(conn, row.symbol, preFrom, tsStart);
-            TradeWindow post = TradeWindow.query(conn, row.symbol, tsEnd, postTo);
+            // Inter-day events skip the ±60-sec window query (Phase 9-A) —
+            // their signal is day-level vs trailing baseline, not temporally
+            // anchored. The prompt branch in buildUserPrompt handles them
+            // with breakdown + catalog only.
+            TradeWindow pre, post;
+            if (INTER_DAY_SCORERS.contains(row.scorerId)) {
+                pre = TradeWindow.empty();
+                post = TradeWindow.empty();
+            } else {
+                // Pre / post window queries. ts_end is null for instantaneous
+                // events (large_trade) — use ts as both bounds.
+                Timestamp tsStart = Timestamp.from(row.ts);
+                Timestamp tsEnd   = (row.tsEnd != null) ? Timestamp.from(row.tsEnd) : tsStart;
+                Timestamp preFrom = new Timestamp(tsStart.getTime() - WINDOW_SECONDS * 1000L);
+                Timestamp postTo  = new Timestamp(tsEnd.getTime()   + WINDOW_SECONDS * 1000L);
+                pre  = TradeWindow.query(conn, row.symbol, preFrom, tsStart);
+                post = TradeWindow.query(conn, row.symbol, tsEnd, postTo);
+            }
             ObjectNode preJson  = pre.toJson(json);
             ObjectNode postJson = post.toJson(json);
 
@@ -184,8 +196,13 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
             // can't carry (they need the surrounding windows). Attached under
             // postJson.derived so they ride into the verifier haystack + the hash
             // (no verifier-signature change), then surfaced in the prompt.
-            ObjectNode derived = computeDerived(json, row, pre, post);
-            if (!derived.isEmpty()) postJson.set("derived", derived);
+            // Skipped for inter-day events (empty windows produce no meaningful
+            // derived stats).
+            ObjectNode derived = json.createObjectNode();
+            if (!INTER_DAY_SCORERS.contains(row.scorerId)) {
+                derived = computeDerived(json, row, pre, post);
+                if (!derived.isEmpty()) postJson.set("derived", derived);
+            }
 
             // Content-addressed skip (same pattern as NarrateEventActivity). The
             // window queries above are cheap SQL; the LLM call below is the
@@ -251,6 +268,28 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
                                            final TradeWindow pre,
                                            final TradeWindow post,
                                            final ObjectNode derived) {
+        // Inter-day scorers (volume_deviation, time_in_book_drift) carry a
+        // DAY-LEVEL signal, not a temporally-anchored event. The ±60-sec
+        // window framing doesn't apply — the breakdown's drift/deviation
+        // magnitude + baseline + catalog drivers ARE the full context. Use a
+        // different prompt section that asks the model to interpret the
+        // magnitude using the catalog's documented drivers, not invent
+        // sequential context that doesn't exist.
+        if (INTER_DAY_SCORERS.contains(row.scorerId)) {
+            return  "Scorer: " + row.scorerId + " (DAY-LEVEL inter-day signal)\n\n"
+                  + "Catalog entry for this scorer:\n"
+                  + "  mechanism: " + catalog.mechanism() + "\n"
+                  + "  canonical_interpretation: " + catalog.canonicalInterpretation() + "\n\n"
+                  + "Breakdown JSON (the day-level measurement):\n"
+                  + row.breakdown.toString() + "\n\n"
+                  + "Now write 1-2 sentences interpreting what the magnitude means for "
+                  + "this symbol today. Frame it using the catalog's documented drivers "
+                  + "(multiple legitimate causes — never a single intent claim). The "
+                  + "drift / deviation is a regime signal, not a temporally-anchored "
+                  + "event, so do NOT reference 'pre-event' or 'post-event' windows, "
+                  + "and do NOT invent sequential context. Stay grounded — every "
+                  + "number must come from the breakdown.";
+        }
         return  "Scorer: " + row.scorerId + "\n\n"
               + "Catalog entry for this scorer:\n"
               + "  mechanism: " + catalog.mechanism() + "\n"
@@ -267,6 +306,15 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
               + "must come from the breakdown or the surrounding context, and do not "
               + "mention the window size.";
     }
+
+    /**
+     * Inter-day scorer IDs — events without a sharp temporal anchor (the
+     * signal is the day's metric vs trailing baseline, not a moment-in-time
+     * event). For these, INTERPRET skips the ±60-sec window query and uses
+     * a different prompt section. Phase 9-A, 2026-05-28.
+     */
+    private static final java.util.Set<String> INTER_DAY_SCORERS =
+            java.util.Set.of("volume_deviation", "time_in_book_drift");
 
     /**
      * Cross-window INTERPRET metrics — stats that need the surrounding windows

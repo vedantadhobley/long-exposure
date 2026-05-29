@@ -77,7 +77,33 @@ public final class Catalog {
                     "Liquidity withdrawals describe a rapid contraction of displayed depth on a symbol — typically defensive "
                   + "market-maker behavior ahead of anticipated volatility from news, single-stock circuit breaker (LULD) bands, "
                   + "or correlated-instrument moves. The wire data records the cancellation pattern but not the specific information "
-                  + "or event the market makers were responding to.")
+                  + "or event the market makers were responding to."),
+
+            // ─── Inter-day scorers (Phase 9-A, 2026-05-28) ─────────────────────
+            // Inter-day INTERPRET reads only the breakdown (which carries the
+            // day's metric, the baseline median, and the deviation magnitude).
+            // No ±60-sec window query — the temporal framing doesn't apply to a
+            // whole-day signal. The InterpretEventActivityImpl branches on
+            // scorerId to use a different prompt section for these.
+
+            "volume_deviation", new Entry(
+                    "A day-level deviation in IEX-observed volume on a single symbol versus its trailing-window median, "
+                  + "computed against the daily_volume_by_symbol cagg (400-day refresh window). Surfaces when today's volume "
+                  + "is N× the trailing median by a configured threshold.",
+                    "Volume deviations describe a symbol whose IEX trading volume today differs materially from its trailing-window "
+                  + "norm. Documented drivers include news-driven attention, sector or ETF-family flow, index/basket rebalances, "
+                  + "single-name capital deployment, and algorithmic-strategy entry or exit. The wire data records the symbol's "
+                  + "IEX activity but not the underlying news, sector rotation, or capital event."),
+
+            "time_in_book_drift", new Entry(
+                    "A day-level shift in the per-symbol average order lifetime (how long the typical order rests on the book "
+                  + "before delete or execute) versus its trailing-window median, computed against the daily_lifetime_by_symbol "
+                  + "table. Drift_x measures the symmetric magnitude in either direction (lifetimes shorter or longer).",
+                    "Time-in-book drift describes a regime shift in how long orders rest on a symbol's book on IEX. Shorter "
+                  + "lifetimes are consistent with high-frequency algorithmic participants increasing activity (post-cancel "
+                  + "patterns dominate) or market-makers cycling quotes rapidly. Longer lifetimes are consistent with HFT "
+                  + "withdrawal, post-volatility cool-down, or institutional-strategy entry resting passively. The wire data "
+                  + "records the lifetime distribution but not which participant class produced the shift.")
     );
 
     /**
