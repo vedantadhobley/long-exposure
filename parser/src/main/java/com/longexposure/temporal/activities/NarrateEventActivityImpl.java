@@ -49,9 +49,18 @@ public final class NarrateEventActivityImpl implements NarrateEventActivity {
         LlamaClient llama = LlamaClient.fromEnv();
         NarrationPipeline pipeline = new NarrationPipeline(llama, MODEL_ID);
 
-        try (Connection conn = openConnection()) {
+        // Phase 7b: BackgroundHeartbeat daemon thread fires every 30 sec for
+        // the activity's full duration, so even if a single LLM call blocks
+        // longer than the 1-min heartbeat-timeout (joi transient slow path),
+        // Temporal sees liveness and doesn't kill the activity. Replaces the
+        // explicit-checkpoint pattern (heartbeat-before / heartbeat-after the
+        // LLM call) which couldn't cover the call's own duration.
+        try (BackgroundHeartbeat hb = BackgroundHeartbeat.start(actx, "narrate-heartbeat", 30);
+             Connection conn = openConnection()) {
+            hb.setStage("schema:" + selectedId);
             SchemaManager.apply(conn);
 
+            hb.setStage("load:" + selectedId);
             NarrationPipeline.NarrationInput in = loadSelectedEvent(conn, tradingDate, selectedId, json);
             if (in == null) {
                 LOG.warn("selected event not found  date={} selected_id={}", tradingDate, selectedId);
@@ -71,6 +80,7 @@ public final class NarrateEventActivityImpl implements NarrateEventActivity {
             // write — frontend showed no narration. Now we UPDATE the row's
             // selected_id to point at the current selected_events row. Same
             // content, fresh FK.
+            hb.setStage("cache_check:" + selectedId);
             byte[] eventHash = pipeline.eventHash(in);
             if (verifiedExists(conn, "narratives", "event_hash", eventHash)) {
                 relinkNarrative(conn, eventHash, selectedId);
@@ -79,10 +89,10 @@ public final class NarrateEventActivityImpl implements NarrateEventActivity {
                 return 1;
             }
 
-            actx.heartbeat("extract:" + selectedId);
+            hb.setStage("llm:" + selectedId);
             NarrationPipeline.Result result = pipeline.narrate(in);
-            actx.heartbeat("upsert:" + selectedId);
 
+            hb.setStage("upsert:" + selectedId);
             upsertNarrative(conn, in, result, json);
 
             LOG.info("narrated  selected_id={} scorer={} symbol={} elapsed_ms={} verifier_passed={} mismatches={}",

@@ -153,9 +153,18 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
         ObjectMapper json = new ObjectMapper();
         LlamaClient llama = LlamaClient.fromEnv();
 
-        try (Connection conn = openConnection()) {
+        // Phase 7b: BackgroundHeartbeat daemon thread fires every 30 sec for
+        // the activity's full duration, so even if the LLM call blocks longer
+        // than the 1-min heartbeat-timeout (joi transient slow path), Temporal
+        // sees liveness and doesn't kill the activity. Replaces the explicit-
+        // checkpoint pattern (heartbeat-before / heartbeat-after the LLM call)
+        // which couldn't cover the call's own duration.
+        try (BackgroundHeartbeat hb = BackgroundHeartbeat.start(actx, "interpret-heartbeat", 30);
+             Connection conn = openConnection()) {
+            hb.setStage("schema:" + selectedId);
             SchemaManager.apply(conn);
 
+            hb.setStage("load:" + selectedId);
             EventRow row = loadSelectedEvent(conn, tradingDate, selectedId, json);
             if (row == null) {
                 LOG.warn("selected event not found  date={} selected_id={}", tradingDate, selectedId);
@@ -169,7 +178,7 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
                 return 0;
             }
 
-            actx.heartbeat("window:" + selectedId);
+            hb.setStage("window:" + selectedId);
 
             // Inter-day events skip the ±60-sec window query (Phase 9-A) —
             // their signal is day-level vs trailing baseline, not temporally
@@ -223,7 +232,7 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
                 return 1;
             }
 
-            actx.heartbeat("llm:" + selectedId);
+            hb.setStage("llm:" + selectedId);
 
             String userPrompt = buildUserPrompt(row, catalog, pre, post, derived);
             InterpretationVerifier verifier = new InterpretationVerifier();
@@ -251,7 +260,7 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
                         selectedId, row.symbol, attempt, MAX_LLM_ATTEMPTS, verify.mismatches());
             }
 
-            actx.heartbeat("upsert:" + selectedId);
+            hb.setStage("upsert:" + selectedId);
             upsert(conn, row, interpretation, preJson, postJson, hash, verify, json);
 
             LOG.info("interpreted  selected_id={} scorer={} symbol={} llm_ms={} verifier_passed={} mismatches={}",
