@@ -73,7 +73,7 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
      * misattribution slightly worse. This v7 supersedes it via the
      * structural verifier approach.
      */
-    private static final String PROMPT_VERSION = "synthesize-v7-attribution-verifier-2026-05-28";
+    private static final String PROMPT_VERSION = "synthesize-v8-symbol-counts-2026-05-29";
 
     /** Max LLM attempts per day — re-roll on verifier failure (temp 1.0 gives variance). */
     private static final int MAX_LLM_ATTEMPTS = 3;
@@ -87,6 +87,12 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
             INPUTS:
               - DAY METADATA: trading date, total events, count per scorer type,
                 top symbols by event count, distribution across session phases.
+              - PER-SYMBOL COUNTS: the EXACT count per (symbol, scorer_type) for
+                today. This is the TRUTH for any per-symbol count claim. When
+                you describe a symbol's activity with a count ("TQQQ had 8
+                liquidity withdrawals"), the number must match this table
+                exactly. If the count isn't in the table, do not claim one —
+                describe qualitatively instead.
               - PER-EVENT LIST: each event's per-event interpretation prose,
                 in chronological order with symbol, scorer type, and event time.
 
@@ -158,7 +164,8 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
             for (EventRow e : events) if (e.symbol != null) daySymbols.add(e.symbol);
 
             hb.setStage("prompt");
-            String userPrompt = buildUserPrompt(tradingDate, dayAggregates, events);
+            String userPrompt = buildUserPrompt(tradingDate, dayAggregates, events,
+                    bySymbolByScorer, bySymbolTotal);
 
             String numberHaystack = buildNumberHaystack(events, dayAggregates);
             SynthesisVerifier verifier = new SynthesisVerifier();
@@ -322,7 +329,9 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
 
     private String buildUserPrompt(final LocalDate tradingDate,
                                    final ObjectNode dayAggregates,
-                                   final List<EventRow> events) {
+                                   final List<EventRow> events,
+                                   final Map<String, Map<String, Integer>> bySymbolByScorer,
+                                   final Map<String, Integer> bySymbolTotal) {
         // Compact JSON for the day aggregates (toPrettyString adds whitespace
         // that costs ~3-4× the token count). INTERP-only per-event entries to
         // fit within the joi llama.cpp server's n_ctx=32768 budget; INTERP
@@ -332,6 +341,45 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
         StringBuilder sb = new StringBuilder(64 * 1024);
         sb.append("Trading date: ").append(tradingDate).append("\n\n");
         sb.append("DAY METADATA: ").append(dayAggregates.toString()).append("\n\n");
+
+        // v8 (2026-05-29): inject per-symbol truth counts so the model can
+        // copy them rather than count from prose. Eliminates the attribution
+        // failures observed on the 2026-05-29 overnight run (TQQQ "six
+        // liquidity withdrawals" when actual was 8, SPY "ten sweeps" when
+        // actual was 2, etc.). Same structural pattern as Phase 7
+        // halt_phase_span_label — give the model the right field instead of
+        // asking it to compute. The verifier still checks against the same
+        // truth maps so a model that ignores the table still gets caught.
+        sb.append("PER-SYMBOL COUNTS (truth — copy these EXACT counts when describing per-symbol activity):\n");
+        // Order by total descending, then alphabetically — model attention bias
+        // skews to top-of-list, so put the most-active symbols first.
+        List<Map.Entry<String, Integer>> sortedSymbols =
+                new ArrayList<>(bySymbolTotal.entrySet());
+        sortedSymbols.sort((a, b) -> {
+            int c = Integer.compare(b.getValue(), a.getValue());
+            return c != 0 ? c : a.getKey().compareTo(b.getKey());
+        });
+        for (Map.Entry<String, Integer> e : sortedSymbols) {
+            String symbol = e.getKey();
+            int total = e.getValue();
+            Map<String, Integer> byScorer = bySymbolByScorer.get(symbol);
+            sb.append("  ").append(symbol).append(": total=").append(total);
+            if (byScorer != null && !byScorer.isEmpty()) {
+                // Per-scorer breakdown, sorted by count descending
+                List<Map.Entry<String, Integer>> ss = new ArrayList<>(byScorer.entrySet());
+                ss.sort((a, b) -> Integer.compare(b.getValue(), a.getValue()));
+                sb.append(" — ");
+                boolean first = true;
+                for (Map.Entry<String, Integer> se : ss) {
+                    if (!first) sb.append(", ");
+                    sb.append(se.getKey()).append(":").append(se.getValue());
+                    first = false;
+                }
+            }
+            sb.append('\n');
+        }
+        sb.append('\n');
+
         sb.append("PER-EVENT LIST (chronological, ").append(events.size()).append(" events):\n\n");
         int idx = 0;
         for (EventRow e : events) {
@@ -345,7 +393,8 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
               .append(" ET — ").append(body).append("\n");
         }
         sb.append("\nNow write the day's themes paragraph (3-6 sentences, journalist register, "
-                + "ground every claim in the data above).");
+                + "ground every claim in the data above). When you cite per-symbol counts, "
+                + "use the EXACT numbers from PER-SYMBOL COUNTS above.");
         return sb.toString();
     }
 
