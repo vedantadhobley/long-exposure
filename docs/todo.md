@@ -103,15 +103,16 @@ After Round 2 (R1-R7) shipped + the 05-13 1-day test passed, continuing structur
 
 **🚨 Tomorrow's checkpoint — read this first if you come back to a half-finished state:**
 
-The dataset state on disk: **stale relative to all Round 2 + Round 3 fixes.** All Round 2 changes (R1-R7 commits `8c3a3ee` through `d9841fb` + FK relink `d13fc52`) require re-Score; all Round 3 changes (commits `adafcb8` onward) require re-Score + re-Narrate; all 05-13 + 05-12 partial-test data is fresh but only those two days.
+The dataset state on disk: **partial overnight run completed days 05-12 through 05-20 (7 days), stalled at day 11/12 with 05-21 narrate-only-partial (68/~200 narratives)**, and 05-22 unreached. Driver script died 2026-05-28 16:39 EDT; `rerun2-NarrateWorkflow-20260521-163954` was Terminated 4 hr later (not the expected 05:28 cleanup). See "Overnight failure diagnosis" section below.
 
-Overnight rerun **planned for a WEEK** (week-of-05-18, 5 days: 05-18→05-22) — NOT the original 12-day plan. Reason: traded 2-week coverage for thoroughness on the implementations.
+Cause: still under investigation. Hypothesis: the rerun-dataset-v2.sh shell driver lost its parent shell when the terminal closed and `nohup`/`disown` didn't keep it alive, OR the SDK CLI inside it exited on a transient network blip without retrying. The Temporal workflow Terminated state is the *symptom* — the driver script was no longer there to send heartbeats / wait on it.
 
-Where we left off:
-  - Phase 6 in flight: 05-12 Score done; Narrate kicked, then Interp + Synth chain pending
-  - Phases 7/7b/7c/7d/7e/7f/9-A/9b queued (see below)
-  - Phase 8 (PipelineWorkflow) replaces all `scripts/rerun-dataset-*.sh` scripts
-  - Phase 8 test on 05-12 is the gate before the overnight kick
+Where we are now (2026-05-28 ~20:40 EDT):
+  - Phase 6 (1-day test on 05-12): ✅ PASSED before the overnight kick
+  - All Round 3 phases 1-5 + 7c/7e/7f shipped
+  - Phase 8 (PipelineWorkflow) ✅ shipped tonight (commit `1352dcb`) — replaces all `scripts/rerun-dataset-*.sh` scripts
+  - Phase 7/7b/9-A/9b still pending
+  - Overnight stall left dataset partial — needs re-kick from 05-21 forward (05-12→05-20 are clean and re-usable; their content_hash will skip on re-run)
 
 **Score-formula audit (Phase 9c) findings 2026-05-28 19:00 EDT:**
   - All scorers except **sweep** look sensible (top events match "obviously top" intuition).
@@ -129,32 +130,80 @@ Where we left off:
 
 - [x] **✅ Phase 5. Pattern-name mislabel verifier** (commit `9f2724c`). See above.
 
-- [ ] **Phase 6. 1-day test on 05-12** (in progress, partial validation already: Score completed with R2/R3/R4 visible + halt_reason_label + duration_humanized populated correctly). Narrate-05-12 kicked at ~19:00 EDT. Continues through Interp + Synth. Phase 6 final-audit gate before Phase 8 build.
+- [x] **✅ Phase 6. 1-day test on 05-12 — PASSED 2026-05-28 ~20:30 EDT.** Synth-05-12 verifier_passed=true with all R2-R5 + Phases 3-5 + 7c/7e/7f fixes active. Gate cleared before Phase 8 build kicked off.
 
 - [ ] **Phase 7. Compound phase-label stitch in DESCRIBE prose.** Observed 2026-05-28 GMRS halt: *"The halt began in pre-market to midday"* — model glued `halt_start_phase_label="in pre-market trading"` + `halt_end_phase_label="around midday"` without a connector verb. Same structural-data-layer pattern as Phase 3 (halt_reason_label) and Phase 4 (duration_humanized): pre-compute a `halt_phase_span_label` field in HaltScorer that combines the two grammatically ("starting in pre-market and resuming around midday" / "lasting through midday from pre-market trading" / etc., depending on phase combination). INTERPRET/DESCRIBE prompts read the unified field; no prompt rule about "don't glue phase labels" needed. ~20 min.
 
 - [ ] **Phase 7b. Background heartbeat daemon in LLM activities.** The heartbeat-timeout fix from earlier today (commit `15af21f` bumped heartbeat 1→5 min on SynthesizeDay + AggregateWeek workflow stubs) is a band-aid that's still in place. The PROPER fix is a background thread inside each LLM-bearing activity that calls `actx.heartbeat()` every 30 sec while the blocking LLM HTTP call runs — same pattern as `MaterializeOrderLifecycleActivityImpl`. After this lands, the heartbeat timeout can drop back to 1 min as a real liveness signal. Apply to: SynthesizeDayActivityImpl, AggregateWeekActivityImpl, AggregateQuarterActivityImpl, AggregateYearActivityImpl. ~30 min.
 
-- [ ] **Phase 7c. Time-of-day weight in scoring (option G).** Events at the open + close get more market attention; the scoring formula should reflect this. Implementation: a `BreakdownFmt.timeOfDayWeight(ts)` multiplier (pre_market: 0.85, opening_5min: 1.20, early_session: 1.05, midday: 0.95, late_session: 1.10, closing_5min: 1.15). Applied uniformly across all scorers via `score = baseScore × timeOfDayWeight(ts)`. The within-scorer percentile selection then surfaces more open/close events. ~30 min.
+- [x] **✅ Phase 7c. Time-of-day weight in scoring — SHIPPED.** `BreakdownFmt.timeOfDayWeight(utc)` multiplier (pre_market: 0.85, opening_5min: 1.20, early_session: 1.05, midday: 0.95, late_session: 1.10, closing_5min: 1.15). Applied uniformly across all 7 intraday scorers via `score = baseScore × timeOfDayWeight(ts)`. Unit-tested in `BreakdownFmtTest`.
 
 - [ ] **Phase 7d. Time-of-day diversity in selection (option E) — PUNTED to post-launch.** Decided 2026-05-28 19:40 EDT after Phase 7c landed: the time-of-day-weight multiplier already provides structural attention-window boost (open/close events score 10-12% higher → naturally selected more). Forcing min-per-bucket would risk under-selecting genuine open-driven days. The right call is to observe whether 7c alone produces sufficient diversity in the overnight outputs; if a single-phase-domination pattern persists, revisit 7d post-launch with the data to tune the per-bucket minimums.
 
-- [ ] **Phase 7e. TimeInBookDrift baseline gate `MIN_BASELINE_DAYS` 3 → 5.** Observed 2026-05-28 audit: OVT 5,748× drift on 3-day baseline = numerically correct but statistically noisy. Bumping to 5 days delays first-emission but stabilizes the median. ~5 min.
+- [x] **✅ Phase 7e. TimeInBookDrift baseline gate `MIN_BASELINE_DAYS` 3 → 5 — SHIPPED.** Median stability over noise; one constant in `TimeInBookDriftScorer`.
 
-- [ ] **Phase 7f. SweepScorer formula rebalance.** Audit finding 2026-05-28: current `log10($notional) × distinct_levels` over-weights level count. Change to `log10($notional) + log10(distinct_levels)` (additive in log space) so both notional and level count contribute without dominating. Validates against the LDOS-vs-CSX miscalibration. ~10 min + observe top-10 sweeps on the re-Scored data.
+- [x] **✅ Phase 7f. SweepScorer formula rebalance — SHIPPED.** Changed `log10($notional) × distinct_levels` → `log10($notional) + log10(distinct_levels)` (additive in log space). Both notional and level count contribute without dominating. Re-scored visible on 05-12 + ratified in Phase 9c audit.
 
-- [ ] **Phase 8. PipelineWorkflow — unified entry point for cron + ad-hoc + backfill.** *Generalizes* the current entry points (cron-driven DailyPipelineWorkflow, ad-hoc `temporal workflow start`, and the shell rerun scripts) into a single workflow that takes a list of dates + options. Replaces `rerun-dataset-v3.sh` (committed but never run). Auto-detects:
-   - **Cascade**: from the date list, derives touched weeks/quarters/years; cascade-fires the rollup workflows (idempotent via content_hash so no-op when unchanged)
-   - **Parallelization**: Phase A (Download → Parse → Materialize → Score → Refresh → Select; all non-LLM) of day N+1 starts in parallel with Phase B (Narrate → Interp → Synth; LLM-serialized) of day N. Uses Temporal `Async.function` + `Promise.thenCompose` to chain. Bounded by Phase A backpressure (Postgres memory) and Phase B LLM mutex (Semaphore 2). Estimated saving: ~4 hours over a 12-day overnight; less over a 5-day week.
-   - **Skip-when-unchanged**: each downstream activity's content_hash skip applies. Running on already-done dates is effectively a no-op cost.
+- [x] **✅ Phase 8 v1 — PipelineWorkflow + rollup cascade (sequential per-day) — SHIPPED 2026-05-28 ~20:45 EDT** (commit `1352dcb`). Unified entry point: `PipelineWorkflow.run(PipelineInput{dates, pollUntilReady, forceReingest, runRetentionSweep, cascadeRollups})` covers cron, ad-hoc single-day, and multi-day backfill. Per-day chain fires `DailyPipelineWorkflow` as child (existing per-day fan-out preserved). When `cascadeRollups=true`, `computeCascadeScope(dates)` maps the input list to touched week/quarter/year period anchors and fires each rollup; content-addressed at activity level so unchanged inputs no-op cheaply, and the quarter/year gates short-circuit until `MIN_WEEKS_FOR_QUARTER=8` / `MIN_QUARTERS_FOR_YEAR=2` are met. `PipelineWorkflowCascadeTest` covers the pure cascade-scope function (7/7 green: single-date, week-dedup, two-week span, quarter boundary, year boundary, 12-day overnight scenario, chronological ordering).
 
-   Cron schedule consolidates to: `PipelineWorkflow.run(PipelineInput(dates=[yesterday-placeholder], pollUntilReady=true, ...))` — same code path as a 12-day backfill, just dates.size()==1. The existing DailyPipelineWorkflow becomes the per-day primitive (child of PipelineWorkflow).
-
-   ~2-3 hours. The right shape; replaces all three rerun-dataset-*.sh scripts.
+- [ ] **Phase 8 v2 — Phase A/B overlap parallelization (deferred to post-launch).** v1 runs days sequentially. v2 splits `DailyPipelineWorkflow` into separately-callable `PhaseA` (download/parse/validate/materialize/score/enrich/select — luv, no LLM) + `PhaseB` (DESCRIBE/INTERPRET/SYNTHESIZE — joi, LLM-serialized) child workflows. `PipelineWorkflow` then runs a sliding window: `PhaseA[N+1]` overlaps with `PhaseB[N]`, gated only by the joi `Semaphore(2,fair)` mutex (the one-LLM-workflow-at-a-time rule). Cascade fires sequentially after all `PhaseB` complete. Estimated saving: ~3–4 hr over a 12-day backfill (the Phase A time hidden behind the LLM time of the prior day). Zero saving on a 1-day cron fire. Defer until after launch — v1 already unblocks the cron migration + the overnight resets.
 
 - [ ] **Phase 9-A. Inter-day scorer INTERPRET — implement for both scorers.** Currently `volume_deviation` + `time_in_book_drift` events skip INTERPRET (`TradeWindow.query()`'s ±60-sec framing isn't meaningful for whole-day metrics). Implementation: new `TradeWindow.daySummary(date, symbol)` method reads the day's intraday volume + order-lifetime curve summary; InterpretEventActivityImpl branches on `scorerId IN ('volume_deviation', 'time_in_book_drift')` to use the day-summary query instead of the ±60-sec window. Verifier rules unchanged (same haystack grounding). Catalog has interpretive material for both — "volume built through midday" / "lifetime regime shift began at 09:35 ET and persisted through morning". ~90 min.
 
 - [ ] **Phase 9b. DESCRIBE-side pattern-mislabel check.** Mirror of Phase 5 (INTERPRET) for DESCRIBE. Reuses `AttributionVerifier.extractScorerNounIds`. Allowed-scorer set: event's own scorer_id ∪ co_occurring keys. Plumbed via a new 5-arg `GroundingVerifier.verify(prose, blueprint, breakdown, scorerId, allowedSet)` overload; back-compat 3-arg form preserved. ~15 min.
+
+---
+
+### 🟢 Overnight failure diagnosis — RESOLVED (2026-05-28 morning kick → manual terminate)
+
+**Root cause: not a code or system failure.** The `rerun2-NarrateWorkflow-20260521-163954` was **manually terminated at 17:35:59 EDT** via `docker exec long-exposure-dev-temporal temporal workflow terminate` with explicit reason `"clean slate for full overnight rerun"` (identity `243415@a47c8c8f3891@` — the CLI inside the temporal container). Almost certainly a user-issued cleanup from another session.
+
+**Timeline (EDT):**
+- 05:28 — terminal-close incident, restarted via `nohup scripts/rerun-dataset-v2.sh &`
+- 05:28 → 16:39 — 11 hours, 7 days completed cleanly (05-12 → 05-20)
+- 16:39:54 — driver writes "ScoreWorkflow 05-21 → COMPLETED" + "Starting NarrateWorkflow 20260521"
+- 16:39:55 — driver script's last log entry; driver subsequently dies (unknown cause — kill / SIGHUP / OOM, doesn't matter)
+- 16:40 → 17:36 — **narrate-21 kept running in Temporal on its own for 56 min**, producing 68 narratives (Temporal is durable — driver death doesn't kill workflows it spawned)
+- 17:35:59 — manual `temporal workflow terminate` with reason "clean slate for full overnight rerun" → workflow status → TERMINATED
+- 17:36 → 20:39 — 3 hr of nothing in flight; check-in at 20:39 saw the stale state
+
+**Confirmed via:** `WORKFLOW_EXECUTION_TERMINATED` event 427 in the workflow history; `reason="clean slate for full overnight rerun"`. The 68 partial narratives in the DB are consistent with 56 min of progress at ~25 sec/event × 2 concurrent.
+
+**Lesson — the driver architecture itself is the brittle layer.** A bash script wrapping `temporal workflow start --waitForResult` is exactly what Phase 8 (`PipelineWorkflow`, shipped tonight) replaces. Once orchestration moves into Temporal:
+- driver-death cannot happen (no external driver)
+- terminal-close cannot kill the loop (no external loop)
+- the only way to kill it is `temporal workflow terminate` on the orchestrator itself, which is deliberate
+- Temporal's history makes the cause auditable in 30 sec (vs the diagnosis dance we just did)
+
+So the answer to "what failed" is "the shell driver". The answer to "what do we do" is "use `PipelineWorkflow`". The right re-kick uses the new orchestrator that doesn't have this failure mode.
+
+**Re-kick plan (post-Phase-7b):**
+
+```bash
+# Single-day test first (Phase 8 has never been end-to-end exercised):
+docker exec long-exposure-dev-temporal temporal workflow start \
+  --task-queue long-exposure-daily-pipeline --type PipelineWorkflow \
+  --workflow-id pipeline-test-20260521 \
+  --input '{"dates":[[2026,5,21]],"pollUntilReady":false,"forceReingest":false,"runRetentionSweep":false,"cascadeRollups":true}'
+
+# Then the remaining catch-up dates:
+docker exec long-exposure-dev-temporal temporal workflow start \
+  --task-queue long-exposure-daily-pipeline --type PipelineWorkflow \
+  --workflow-id pipeline-catchup-20260528 \
+  --input '{"dates":[[2026,5,21],[2026,5,22]],"pollUntilReady":false,"forceReingest":false,"runRetentionSweep":false,"cascadeRollups":true}'
+```
+
+`PipelineWorkflow` runs inside Temporal, so it survives terminal-close / driver-death by construction — the exact failure mode that killed the v2 driver cannot recur.
+
+### 🟢 Tonight's plan (post-diagnosis, in order)
+
+1. **Diagnose the 16:40 EDT failure** via the 5 commands above. Find root cause OR rule out (1)/(2)/(3)/(4).
+2. **Phase 9-A verification** — grep `INTER_DAY_SCORERS` in `InterpretEventActivityImpl` to confirm the activity branch is actually wired (Catalog entries are wired; activity branch may or may not be — verify before assuming inter-day events get INTERPRET prose).
+3. **Phase 7b — Background heartbeat daemon in LLM activities.** Apply the `BackgroundHeartbeat` utility (already exists, used in SYNTHESIZE/AGGREGATE) to `NarrateEventActivityImpl` + `InterpretEventActivityImpl`. Drop the 5-min heartbeat band-aid back to 1 min. ~30 min.
+4. **1-day test on 05-21 via `PipelineWorkflow`** — first end-to-end exercise of Phase 8 itself + first test of Phase 7b under load. Confirms cascade fires (weekly-of-05-18 should recompute), quarter/year gates short-circuit cleanly, no child-workflow ID collisions.
+5. **Kick the overnight catch-up** via `PipelineWorkflow(dates=[2026-05-21, 2026-05-22])` — the remaining 2 days of the planned week. Replaces the dead shell driver permanently.
+
+Items explicitly NOT doing tonight: Phase 7 (compound phase-label, low rate), Phase 9b (DESCRIBE pattern-mislabel mirror, low rate), Phase 8-v2 parallelization (post-launch).
 
 - [x] **✅ Phase 9c. Score formula sanity audit — DONE 2026-05-28 19:00 EDT.** Audit output captured at top of this section ("Tomorrow's checkpoint"). Cross-scorer normalization (F) PUNTED; sweep-formula fix surfaced as Phase 7f.
 
