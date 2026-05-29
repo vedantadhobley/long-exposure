@@ -386,7 +386,7 @@ The orchestrator is *pure orchestration* — calls child workflows for each phas
 ```
 DailyPipelineWorkflow
   ├── DownloadWorkflow      (3 IEX HIST URLs resolved + 3 .pcap.gz downloaded, all parallel)
-  ├── ParseWorkflow         (DPLS → 13 hypertables via JDBC COPY)
+  ├── ParseWorkflow         (DPLS → 14 hypertables via JDBC COPY)
   ├── ValidateWorkflow      (runs in parallel with Parse; 3 cross-check legs:
   │                          DPLS↔DEEP price-level, DPLS→TOPS BBO, DEEP→TOPS BBO)
   ├── ScoreWorkflow         (RefreshBaselines → MaterializeOrderLifecycle → 9 scorers
@@ -469,7 +469,7 @@ The original 22-day plan compressed substantially. Current state (2026-05-27):
 
 ✅ **Storage** (2026-05-12). 13 wire-format hypertables, `order_lifecycle` derived hypertable for sub-second PostCancel/Layering scans, 7 standard tables, `daily_volume_by_symbol` continuous aggregate. End-to-end: 364 M rows ingested in 35:07 (~174 K rows/sec) via JDBC `COPY`.
 
-✅ **Temporal pipeline** (2026-05-13, extended through 2026-05-28). 15 workflows on the daily-pipeline task queue, 26 activities. Per-activity retry policies, heartbeats, start-to-close timeouts. Idempotent on pipeline_run with pre-clean by trading_date. The full calendar rollup hierarchy (week → quarter → year) is wired into the daily pipeline; quarterly + yearly tiers sit dormant until enough lower-tier rollups accumulate.
+✅ **Temporal pipeline** (2026-05-13, extended through 2026-05-29). 16 workflows on the daily-pipeline task queue (incl. `PipelineWorkflow` — unified entry point covering cron + ad-hoc + backfill, replaces all `scripts/rerun-dataset-*.sh` shell drivers), 26 activities. Per-activity retry policies, heartbeats, start-to-close timeouts. Idempotent on pipeline_run with pre-clean by trading_date. The full calendar rollup hierarchy (week → quarter → year) is wired into the daily pipeline; quarterly + yearly tiers sit dormant until enough lower-tier rollups accumulate.
 
 ✅ **Scoring + selection** (2026-05-16, extended through 2026-05-27). 9 scorers — 7 intraday (halt, large_trade, sweep, post_cancel_cluster, layering, iceberg, liquidity_withdrawal) + 2 inter-day (`volume_deviation` 2026-05-25; `time_in_book_drift` 2026-05-27 reading a durable `daily_lifetime_by_symbol` baseline) — implementing push-model `EventScorer`. Selection via within-scorer percentile rank → ~90–170 narratable events per trading day. A shared pure-function `com.longexposure.analytics.Analytics` layer + post-select `EnrichAnalyticsActivity` (windowed + book-replay) feeds genuinely sophisticated grounded metrics into every breakdown — order-to-trade ratio, OFI, slippage + reversion, effective spread, realized vol, burstiness, depth-imbalance, % of book removed + recovery, iceberg display-ratio, robust-z/percentile, HHI/entropy, and slice-caveated VPIN/Kyle's-λ. See [`docs/analytics-catalog.md`](docs/analytics-catalog.md).
 

@@ -15,7 +15,7 @@ Each stage answers exactly one question. Mixing concerns across stages is the ro
 
 ### WIRE — raw atomic events on disk
 
-What it is: 13 hypertables (`orders_add`, `orders_delete`, `orders_executed`, `trades`, `quotes`, `status_events`, etc.) populated by the parser from IEX DEEP+ pcap files. ~360 M events/day. Not code — just data.
+What it is: 14 hypertables (`orders_add`, `orders_delete`, `orders_executed`, `trades`, `quotes`, `status_events`, etc. + derived `order_lifecycle`) populated by the parser from IEX DEEP+ pcap files. ~360 M events/day. Not code — just data.
 
 What it answers: "What happened on the wire today, byte-for-byte?"
 
