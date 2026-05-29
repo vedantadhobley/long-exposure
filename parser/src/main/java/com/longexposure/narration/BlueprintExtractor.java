@@ -27,7 +27,7 @@ import java.util.Map;
 public final class BlueprintExtractor {
 
     /** Bump this string when the prompt or output shape changes. Used in the event_hash. */
-    public static final String PROMPT_VERSION = "extract-v9-deletes-disambiguation";
+    public static final String PROMPT_VERSION = "extract-v10-halt-phase-span";
 
     private static final String SYSTEM_PROMPT = """
             You are an extraction system. Given a market microstructure event with structured facts,
@@ -59,7 +59,7 @@ public final class BlueprintExtractor {
             - post_cancel_cluster:  orders, order_to_trade (use `order_to_trade_phrase` when present else `order_to_trade_ratio`), median_lifetime_ms, burstiness_class (with `burstiness_fano` as the parenthetical value)
             - layering:             orders, distinct_levels, depth_from_touch_near_bps, order_to_trade (use `order_to_trade_phrase` when present else `order_to_trade_ratio`)
             - iceberg:              fills, total_shares, display_ratio_pct, refill_cadence_class (with `refill_cadence_cv` as the parenthetical value)
-            - halt:                 halt duration + reason; pre_halt_spread_bps when present
+            - halt:                 duration_humanized, halt_reason_label, halt_phase_span_label; pre_halt_spread_bps when present
 
             SUPPORTING ANALYTICS — the breakdown carries deeper measures that sharpen the story
             when relevant. Weave in 1-2 when they meaningfully add context — never list mechanically.
@@ -147,6 +147,15 @@ public final class BlueprintExtractor {
               symbol's trailing-window volume. Use it to distinguish "today was a one-day
               spike" from "today marks a regime shift": "the surge was a sustained step, not
               a one-day spike" when the shift is high; "an isolated one-day spike" otherwise.
+            - halt_phase_span_label is a COMPLETE GRAMMATICAL PHRASE describing when in the
+              session the halt ran ("lasting through midday" / "starting in pre-market trading
+              and resuming around midday" / "starting in pre-market trading with no resume in
+              the window"). USE IT VERBATIM as the timing of the halt — e.g. "Genomic Solutions
+              (GMRS) was halted, lasting through midday" or "AMD (AMD) was halted starting in
+              pre-market trading and resuming around midday." DO NOT combine halt_start_phase_label
+              + halt_end_phase_label by hand; those are drill-down-only fields and stitching them
+              produces ungrammatical bridges ("began in pre-market to midday"). The span label
+              already encodes the duration story grammatically — let it carry it.
             """;
 
     private final LlamaClient llama;
