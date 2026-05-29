@@ -46,29 +46,62 @@ public interface PipelineWorkflow {
     PipelineResult run(PipelineInput input);
 
     /**
+     * Execution mode for the per-day chain.
+     */
+    enum Mode {
+        /** Default — run the full per-day pipeline via {@link DailyPipelineWorkflow}. */
+        FULL_PIPELINE,
+        /** Skip parse/score/materialize; run only Narrate → Interpret → Synthesize. */
+        LLM_CHAIN
+    }
+
+    /**
      * @param dates             list of trading dates to process (size 1 to N).
      *                          For cron, pass a single date — the placeholder
      *                          {@link DailyPipelineWorkflow#PLACEHOLDER_DATE}
      *                          works the same way as the existing cron path
      *                          (resolves to "yesterday in ET" at fire time).
      * @param pollUntilReady    cron-mode HIST-availability poll: retry the URL
-     *                          resolve when the file isn't published yet
+     *                          resolve when the file isn't published yet.
+     *                          {@code FULL_PIPELINE} only.
      * @param forceReingest     bypass {@code pipeline_runs.status='ok'} check
-     *                          so a previously-completed date re-runs
+     *                          so a previously-completed date re-runs.
+     *                          {@code FULL_PIPELINE} only.
      * @param runRetentionSweep run the week-aligned 2-week retention sweep at
      *                          the end of each day's pipeline. Typically true
-     *                          for cron, false for ad-hoc / rerun
+     *                          for cron, false for ad-hoc / rerun.
+     *                          {@code FULL_PIPELINE} only.
      * @param cascadeRollups    after all per-day work, fire the rollup
      *                          workflows (week / quarter / year) for every
      *                          period touched by the input dates. Idempotent
      *                          via each rollup's content_hash.
+     * @param mode              {@code FULL_PIPELINE} runs {@link DailyPipelineWorkflow}
+     *                          per date. {@code LLM_CHAIN} runs
+     *                          {@link NarrateWorkflow} →
+     *                          {@link InterpretWorkflow} →
+     *                          {@link SynthesizeDayWorkflow} per date directly,
+     *                          skipping the parse/score idempotency guard. Use
+     *                          {@code LLM_CHAIN} for re-runs after a
+     *                          PROMPT_VERSION bump or to backfill INTERPRET
+     *                          coverage. Null = {@code FULL_PIPELINE}.
      */
     record PipelineInput(
             List<LocalDate> dates,
             boolean         pollUntilReady,
             boolean         forceReingest,
             boolean         runRetentionSweep,
-            boolean         cascadeRollups) {}
+            boolean         cascadeRollups,
+            Mode            mode) {
+
+        /** Back-compat constructor — defaults mode to FULL_PIPELINE. */
+        public PipelineInput(List<LocalDate> dates,
+                              boolean pollUntilReady,
+                              boolean forceReingest,
+                              boolean runRetentionSweep,
+                              boolean cascadeRollups) {
+            this(dates, pollUntilReady, forceReingest, runRetentionSweep, cascadeRollups, Mode.FULL_PIPELINE);
+        }
+    }
 
     /**
      * @param daysProcessed     number of dates pushed through the per-day chain

@@ -12,6 +12,8 @@ import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.TreeSet;
 
+import static com.longexposure.temporal.workflows.PipelineWorkflow.Mode;
+
 public final class PipelineWorkflowImpl implements PipelineWorkflow {
 
     private static final Logger LOG = Workflow.getLogger(PipelineWorkflowImpl.class);
@@ -19,28 +21,40 @@ public final class PipelineWorkflowImpl implements PipelineWorkflow {
     @Override
     public PipelineResult run(final PipelineInput input) {
         long t0 = System.currentTimeMillis();
-        LOG.info("pipeline start  dates={} cascade={} forceReingest={} retentionSweep={}",
-                input.dates(), input.cascadeRollups(), input.forceReingest(), input.runRetentionSweep());
+        Mode mode = (input.mode() == null) ? Mode.FULL_PIPELINE : input.mode();
+        LOG.info("pipeline start  mode={} dates={} cascade={} forceReingest={} retentionSweep={}",
+                mode, input.dates(), input.cascadeRollups(), input.forceReingest(), input.runRetentionSweep());
 
-        // Per-day work. Each date fires DailyPipelineWorkflow as a child.
+        // Per-day work — dispatched by mode.
+        //   FULL_PIPELINE: fires DailyPipelineWorkflow per date (existing
+        //     behavior; respects status='ok' idempotency guard).
+        //   LLM_CHAIN:     fires Narrate → Interpret → Synthesize per date
+        //     directly, skipping the parse/score guard. Used for re-runs
+        //     after a PROMPT_VERSION bump where the wire-format tables +
+        //     selected_events are already populated but the LLM stages need
+        //     to re-run. Eliminates the bash-driver chain that
+        //     scripts/catchup-*.sh used to wrap.
+        //
         // Sequential in v1 — parallelization (Phase A overlap) is a planned
-        // follow-up that requires either splitting DailyPipelineWorkflow into
-        // separately-callable phase workflows or having PipelineWorkflow call
-        // the individual stage workflows directly.
+        // follow-up (see docs/phase8-v2-parallelization.md).
         int daysProcessed = 0;
         for (LocalDate date : input.dates()) {
-            DailyPipelineWorkflow daily = Workflow.newChildWorkflowStub(
-                    DailyPipelineWorkflow.class,
-                    ChildWorkflowOptions.newBuilder()
-                            .setWorkflowId("pipeline-daily-" + date + "-" + Workflow.getInfo().getWorkflowId())
-                            .build());
-            DailyPipelineWorkflowInput dailyInput = new DailyPipelineWorkflowInput(
-                    date,
-                    input.pollUntilReady(),
-                    input.forceReingest(),
-                    input.runRetentionSweep());
-            String status = daily.run(dailyInput);
-            LOG.info("daily done  date={} status={}", date, status);
+            if (mode == Mode.LLM_CHAIN) {
+                runLlmChainForDay(date);
+            } else {
+                DailyPipelineWorkflow daily = Workflow.newChildWorkflowStub(
+                        DailyPipelineWorkflow.class,
+                        ChildWorkflowOptions.newBuilder()
+                                .setWorkflowId("pipeline-daily-" + date + "-" + Workflow.getInfo().getWorkflowId())
+                                .build());
+                DailyPipelineWorkflowInput dailyInput = new DailyPipelineWorkflowInput(
+                        date,
+                        input.pollUntilReady(),
+                        input.forceReingest(),
+                        input.runRetentionSweep());
+                String status = daily.run(dailyInput);
+                LOG.info("daily done  date={} status={}", date, status);
+            }
             daysProcessed++;
         }
 
@@ -88,6 +102,40 @@ public final class PipelineWorkflowImpl implements PipelineWorkflow {
         LOG.info("pipeline done  days={} weekly={} quarterly={} yearly={} elapsed_ms={}",
                 daysProcessed, weekly, quarterly, yearly, elapsed);
         return new PipelineResult(daysProcessed, weekly, quarterly, yearly, elapsed);
+    }
+
+    /**
+     * Run the LLM chain (Narrate → Interpret → SynthesizeDay) for a single
+     * date, strictly sequential per the one-LLM-workflow-at-a-time rule. All
+     * three workflows are content-addressed so unchanged inputs no-op cheaply;
+     * a PROMPT_VERSION bump invalidates the cache and forces a fresh LLM run.
+     */
+    private void runLlmChainForDay(final LocalDate date) {
+        String wfid = Workflow.getInfo().getWorkflowId();
+
+        NarrateWorkflow narrate = Workflow.newChildWorkflowStub(
+                NarrateWorkflow.class,
+                ChildWorkflowOptions.newBuilder()
+                        .setWorkflowId("pipeline-narrate-" + date + "-" + wfid)
+                        .build());
+        long narrated = narrate.run(date);
+        LOG.info("llm-chain narrate done  date={} narrated={}", date, narrated);
+
+        InterpretWorkflow interpret = Workflow.newChildWorkflowStub(
+                InterpretWorkflow.class,
+                ChildWorkflowOptions.newBuilder()
+                        .setWorkflowId("pipeline-interpret-" + date + "-" + wfid)
+                        .build());
+        long interpreted = interpret.run(date);
+        LOG.info("llm-chain interpret done  date={} interpreted={}", date, interpreted);
+
+        SynthesizeDayWorkflow synth = Workflow.newChildWorkflowStub(
+                SynthesizeDayWorkflow.class,
+                ChildWorkflowOptions.newBuilder()
+                        .setWorkflowId("pipeline-synth-" + date + "-" + wfid)
+                        .build());
+        synth.run(date);
+        LOG.info("llm-chain synth done  date={}", date);
     }
 
     /**
