@@ -52,7 +52,14 @@ public interface PipelineWorkflow {
         /** Default — run the full per-day pipeline via {@link DailyPipelineWorkflow}. */
         FULL_PIPELINE,
         /** Skip parse/score/materialize; run only Narrate → Interpret → Synthesize. */
-        LLM_CHAIN
+        LLM_CHAIN,
+        /**
+         * Re-score then run the LLM chain per day. Use when a scorer change
+         * or breakdown enrichment requires fresh {@code scored_events} +
+         * {@code selected_events} but the parsed wire data is already loaded.
+         * Replaces the {@code scripts/rescore-rerun-*.sh} bash drivers.
+         */
+        SCORE_AND_LLM
     }
 
     /**

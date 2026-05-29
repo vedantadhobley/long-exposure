@@ -53,6 +53,8 @@ public final class PipelineWorkflowImpl implements PipelineWorkflow {
         if (mode == Mode.LLM_CHAIN) {
             for (LocalDate date : effectiveDates) runLlmChainForDay(date);
             daysProcessed = effectiveDates.size();
+        } else if (mode == Mode.SCORE_AND_LLM) {
+            daysProcessed = runScoreAndLlm(effectiveDates);
         } else if (effectiveDates.size() == 1) {
             LocalDate date = effectiveDates.get(0);
             DailyPipelineWorkflow daily = Workflow.newChildWorkflowStub(
@@ -189,6 +191,55 @@ public final class PipelineWorkflowImpl implements PipelineWorkflow {
         for (int i = 0; i < n; i++) {
             try { finP[i].get(); } catch (Exception e) {
                 LOG.warn("sliding-window day failed  date={} err={}",
+                        dates.get(i), e.getMessage());
+            }
+        }
+        return n;
+    }
+
+    /**
+     * Stage 6 (2026-05-29) — SCORE_AND_LLM mode. Replaces the bash
+     * rescore-rerun chain: re-score each day (luv, sequential) then run
+     * the LLM chain (joi, serial). Sliding window: Score[N+1] runs while
+     * LlmDay[N] is on joi.
+     */
+    private int runScoreAndLlm(final java.util.List<LocalDate> dates) {
+        int n = dates.size();
+        @SuppressWarnings("unchecked")
+        io.temporal.workflow.Promise<Long>[] scoreP = new io.temporal.workflow.Promise[n];
+        @SuppressWarnings("unchecked")
+        io.temporal.workflow.Promise<Long>[] llmP = new io.temporal.workflow.Promise[n];
+
+        String parentId = Workflow.getInfo().getWorkflowId();
+        for (int i = 0; i < n; i++) {
+            final int idx = i;
+            final LocalDate date = dates.get(i);
+
+            scoreP[i] = io.temporal.workflow.Async.function(() -> {
+                if (idx > 0) scoreP[idx - 1].get();
+                ScoreWorkflow score = Workflow.newChildWorkflowStub(
+                        ScoreWorkflow.class,
+                        ChildWorkflowOptions.newBuilder()
+                                .setWorkflowId("pipeline-score-" + date + "-" + parentId)
+                                .build());
+                return score.run(date);
+            });
+
+            llmP[i] = io.temporal.workflow.Async.function(() -> {
+                scoreP[idx].get();
+                if (idx > 0) llmP[idx - 1].get();
+                LlmDayWorkflow llm = Workflow.newChildWorkflowStub(
+                        LlmDayWorkflow.class,
+                        ChildWorkflowOptions.newBuilder()
+                                .setWorkflowId("pipeline-llm-" + date + "-" + parentId)
+                                .build());
+                return llm.run(date);
+            });
+        }
+
+        for (int i = 0; i < n; i++) {
+            try { llmP[i].get(); } catch (Exception e) {
+                LOG.warn("score+llm day failed  date={} err={}",
                         dates.get(i), e.getMessage());
             }
         }
