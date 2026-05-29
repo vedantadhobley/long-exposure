@@ -5,6 +5,7 @@ import io.temporal.workflow.WorkflowMethod;
 
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Unified entry point for all pipeline execution modes: cron-driven daily,
@@ -63,6 +64,31 @@ public interface PipelineWorkflow {
     }
 
     /**
+     * Per-day phase. Used as an optional fine-grained filter on top of
+     * {@link Mode}: pass {@code stages=null} (default) to let Mode pick the
+     * phases; pass a non-empty set to run ONLY those phases.
+     *
+     * <p>Examples:
+     * <ul>
+     *   <li>{@code stages=[INGEST]} — parse + score, no LLM, no cleanup
+     *   <li>{@code stages=[FINALIZE]} — compress + cleanup only
+     *   <li>{@code stages=[LLM, FINALIZE]} — LLM chain + post-LLM cleanup
+     *       (assumes ingest already happened)
+     * </ul>
+     *
+     * <p>{@link Mode#LLM_CHAIN} and {@link Mode#SCORE_AND_LLM} are fixed-
+     * shape presets — they ignore {@code stages}.
+     */
+    enum Stage {
+        /** {@link IngestDayWorkflow}: Download + Parse + Validate + Score per day. */
+        INGEST,
+        /** {@link LlmDayWorkflow}: Narrate + Interpret + Synthesize per day. */
+        LLM,
+        /** {@link FinalizeDayWorkflow}: Compress chunks + Cleanup files per day. */
+        FINALIZE
+    }
+
+    /**
      * @param dates             list of trading dates to process (size 1 to N).
      *                          For cron, pass a single date — the placeholder
      *                          {@link DailyPipelineWorkflow#PLACEHOLDER_DATE}
@@ -107,25 +133,37 @@ public interface PipelineWorkflow {
             boolean         forceReingest,
             boolean         runRetentionSweep,
             boolean         cascadeRollups,
-            Mode            mode) {
+            Mode            mode,
+            Set<Stage>      stages) {
 
-        /** Back-compat constructor — defaults mode to FULL_PIPELINE, no ranges. */
+        /** Back-compat constructor — defaults mode to FULL_PIPELINE, no ranges, no stage filter. */
         public PipelineInput(List<LocalDate> dates,
                               boolean pollUntilReady,
                               boolean forceReingest,
                               boolean runRetentionSweep,
                               boolean cascadeRollups) {
-            this(dates, null, pollUntilReady, forceReingest, runRetentionSweep, cascadeRollups, Mode.FULL_PIPELINE);
+            this(dates, null, pollUntilReady, forceReingest, runRetentionSweep, cascadeRollups, Mode.FULL_PIPELINE, null);
         }
 
-        /** Back-compat constructor with mode but no ranges. */
+        /** Back-compat constructor with mode, no ranges, no stage filter. */
         public PipelineInput(List<LocalDate> dates,
                               boolean pollUntilReady,
                               boolean forceReingest,
                               boolean runRetentionSweep,
                               boolean cascadeRollups,
                               Mode mode) {
-            this(dates, null, pollUntilReady, forceReingest, runRetentionSweep, cascadeRollups, mode);
+            this(dates, null, pollUntilReady, forceReingest, runRetentionSweep, cascadeRollups, mode, null);
+        }
+
+        /** Back-compat constructor with date ranges + mode, no stage filter. */
+        public PipelineInput(List<LocalDate> dates,
+                              List<DateRange> dateRanges,
+                              boolean pollUntilReady,
+                              boolean forceReingest,
+                              boolean runRetentionSweep,
+                              boolean cascadeRollups,
+                              Mode mode) {
+            this(dates, dateRanges, pollUntilReady, forceReingest, runRetentionSweep, cascadeRollups, mode, null);
         }
     }
 

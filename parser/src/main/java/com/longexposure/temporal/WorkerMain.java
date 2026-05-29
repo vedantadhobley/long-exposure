@@ -224,11 +224,24 @@ public final class WorkerMain {
         // entry. (Future cleanup: a separate Cron schedule that calls a
         // shim activity to compute the date.)
         LocalDate placeholder = LocalDate.of(1970, 1, 1);
-        DailyPipelineWorkflowInput input = DailyPipelineWorkflowInput.cron(placeholder);
+        // Cron fires PipelineWorkflow (the universal entry point) — internally
+        // delegates to DailyPipelineWorkflow for single-day FULL_PIPELINE,
+        // preserving the cron contract exactly. Using PipelineWorkflow here
+        // keeps every entry point (cron, ad-hoc, multi-day backfill,
+        // LLM-only re-runs) on a single workflow type.
+        com.longexposure.temporal.workflows.PipelineWorkflow.PipelineInput input =
+                new com.longexposure.temporal.workflows.PipelineWorkflow.PipelineInput(
+                        List.of(placeholder),    // dates
+                        null,                     // dateRanges
+                        true,                     // pollUntilReady — cron HIST poll
+                        false,                    // forceReingest
+                        true,                     // runRetentionSweep
+                        true,                     // cascadeRollups
+                        com.longexposure.temporal.workflows.PipelineWorkflow.Mode.FULL_PIPELINE);
 
-        String workflowIdBase = DailyPipelineWorkflow.WORKFLOW_ID_PREFIX + "scheduled";
+        String workflowIdBase = "pipeline-scheduled";
         ScheduleActionStartWorkflow action = ScheduleActionStartWorkflow.newBuilder()
-                .setWorkflowType(DailyPipelineWorkflow.class)
+                .setWorkflowType(com.longexposure.temporal.workflows.PipelineWorkflow.class)
                 .setArguments(input)
                 .setOptions(WorkflowOptions.newBuilder()
                         .setWorkflowId(workflowIdBase)

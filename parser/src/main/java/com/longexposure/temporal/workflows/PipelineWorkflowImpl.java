@@ -129,6 +129,14 @@ public final class PipelineWorkflowImpl implements PipelineWorkflow {
      */
     private int runSlidingWindow(final java.util.List<LocalDate> dates,
                                   final PipelineInput input) {
+        // Resolve which stages to run. null = all 3.
+        final java.util.Set<PipelineWorkflow.Stage> stages = (input.stages() == null)
+                ? java.util.EnumSet.allOf(PipelineWorkflow.Stage.class)
+                : input.stages();
+        final boolean runIngest   = stages.contains(PipelineWorkflow.Stage.INGEST);
+        final boolean runLlm      = stages.contains(PipelineWorkflow.Stage.LLM);
+        final boolean runFinalize = stages.contains(PipelineWorkflow.Stage.FINALIZE);
+
         int n = dates.size();
         @SuppressWarnings("unchecked")
         io.temporal.workflow.Promise<String>[] ingestP = new io.temporal.workflow.Promise[n];
@@ -142,9 +150,12 @@ public final class PipelineWorkflowImpl implements PipelineWorkflow {
             final int idx = i;
             final LocalDate date = dates.get(i);
 
-            // IngestDay[N]: serial across days (Postgres mutex).
+            // IngestDay[N]: serial across days (Postgres mutex). Skipped
+            // entirely when stages excludes INGEST (caller is requesting
+            // LLM/FINALIZE on already-ingested data).
             ingestP[i] = io.temporal.workflow.Async.function(() -> {
                 if (idx > 0) ingestP[idx - 1].get();
+                if (!runIngest) return "ok";  // synthetic — gates downstream as if ingest succeeded
                 IngestDayWorkflow ing = Workflow.newChildWorkflowStub(
                         IngestDayWorkflow.class,
                         ChildWorkflowOptions.newBuilder()
@@ -155,7 +166,8 @@ public final class PipelineWorkflowImpl implements PipelineWorkflow {
             });
 
             // LlmDay[N]: serial across days (joi mutex), but parallel with
-            // next day's Ingest. Skipped when ingest short-circuits.
+            // next day's Ingest. Skipped when ingest short-circuits or when
+            // stages excludes LLM.
             llmP[i] = io.temporal.workflow.Async.function(() -> {
                 String status = ingestP[idx].get();
                 if ("skipped_already_ingested".equals(status)
@@ -164,6 +176,7 @@ public final class PipelineWorkflowImpl implements PipelineWorkflow {
                     return 0L;
                 }
                 if (idx > 0) llmP[idx - 1].get();
+                if (!runLlm) return 0L;
                 LlmDayWorkflow llm = Workflow.newChildWorkflowStub(
                         LlmDayWorkflow.class,
                         ChildWorkflowOptions.newBuilder()
@@ -174,8 +187,10 @@ public final class PipelineWorkflowImpl implements PipelineWorkflow {
 
             // FinalizeDay[N]: follows LlmDay[N]; independent across days
             // (compress + cleanup are per-day, no cross-day contention).
+            // Skipped when stages excludes FINALIZE.
             finP[i] = io.temporal.workflow.Async.procedure(() -> {
                 llmP[idx].get();
+                if (!runFinalize) return;
                 String status = ingestP[idx].get();
                 boolean deleteFiles = input.runRetentionSweep() && "ok".equals(status);
                 FinalizeDayWorkflow fin = Workflow.newChildWorkflowStub(
