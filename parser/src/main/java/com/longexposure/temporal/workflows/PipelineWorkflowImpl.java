@@ -120,36 +120,18 @@ public final class PipelineWorkflowImpl implements PipelineWorkflow {
 
     /**
      * Run the LLM chain (Narrate → Interpret → SynthesizeDay) for a single
-     * date, strictly sequential per the one-LLM-workflow-at-a-time rule. All
-     * three workflows are content-addressed so unchanged inputs no-op cheaply;
-     * a PROMPT_VERSION bump invalidates the cache and forces a fresh LLM run.
+     * date via {@link LlmDayWorkflow}. Stage 2 (2026-05-29) — previously
+     * inline; extracted so the chain is composable across cron, ad-hoc, and
+     * the planned SCORE_AND_LLM mode.
      */
     private void runLlmChainForDay(final LocalDate date) {
-        String wfid = Workflow.getInfo().getWorkflowId();
-
-        NarrateWorkflow narrate = Workflow.newChildWorkflowStub(
-                NarrateWorkflow.class,
+        LlmDayWorkflow llm = Workflow.newChildWorkflowStub(
+                LlmDayWorkflow.class,
                 ChildWorkflowOptions.newBuilder()
-                        .setWorkflowId("pipeline-narrate-" + date + "-" + wfid)
+                        .setWorkflowId("pipeline-llm-" + date + "-"
+                                + Workflow.getInfo().getWorkflowId())
                         .build());
-        long narrated = narrate.run(date);
-        LOG.info("llm-chain narrate done  date={} narrated={}", date, narrated);
-
-        InterpretWorkflow interpret = Workflow.newChildWorkflowStub(
-                InterpretWorkflow.class,
-                ChildWorkflowOptions.newBuilder()
-                        .setWorkflowId("pipeline-interpret-" + date + "-" + wfid)
-                        .build());
-        long interpreted = interpret.run(date);
-        LOG.info("llm-chain interpret done  date={} interpreted={}", date, interpreted);
-
-        SynthesizeDayWorkflow synth = Workflow.newChildWorkflowStub(
-                SynthesizeDayWorkflow.class,
-                ChildWorkflowOptions.newBuilder()
-                        .setWorkflowId("pipeline-synth-" + date + "-" + wfid)
-                        .build());
-        synth.run(date);
-        LOG.info("llm-chain synth done  date={}", date);
+        llm.run(date);
     }
 
     /**
