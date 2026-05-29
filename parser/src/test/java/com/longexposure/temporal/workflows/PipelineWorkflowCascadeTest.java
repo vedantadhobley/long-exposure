@@ -95,6 +95,66 @@ class PipelineWorkflowCascadeTest {
         assertEquals(1, scope.yearStarts().size(), "all in 2026");
     }
 
+    // ─── Stage 1 — expandDates (date list + range union + weekday filter) ──
+
+    @Test
+    void expandDates_explicitOnly() {
+        java.util.List<LocalDate> out = PipelineWorkflowImpl.expandDates(
+                List.of(LocalDate.of(2026, 5, 12), LocalDate.of(2026, 5, 13)),
+                null);
+        assertEquals(2, out.size());
+        assertEquals(LocalDate.of(2026, 5, 12), out.get(0));
+        assertEquals(LocalDate.of(2026, 5, 13), out.get(1));
+    }
+
+    @Test
+    void expandDates_rangeExpansionExcludesWeekends() {
+        // 2026-05-11 (Mon) through 2026-05-17 (Sun) — 5 weekdays
+        java.util.List<LocalDate> out = PipelineWorkflowImpl.expandDates(
+                null,
+                new PipelineWorkflow.DateRange(
+                        LocalDate.of(2026, 5, 11), LocalDate.of(2026, 5, 17)));
+        assertEquals(5, out.size());
+        assertEquals(LocalDate.of(2026, 5, 11), out.get(0));   // Mon
+        assertEquals(LocalDate.of(2026, 5, 15), out.get(4));   // Fri
+    }
+
+    @Test
+    void expandDates_unionAndDedup() {
+        // dates [12, 13] + range [12..15] should produce 4 unique weekdays
+        java.util.List<LocalDate> out = PipelineWorkflowImpl.expandDates(
+                List.of(LocalDate.of(2026, 5, 12), LocalDate.of(2026, 5, 13)),
+                new PipelineWorkflow.DateRange(
+                        LocalDate.of(2026, 5, 12), LocalDate.of(2026, 5, 15)));
+        assertEquals(4, out.size());
+    }
+
+    @Test
+    void expandDates_skipsWeekendsInExplicitList() {
+        // 2026-05-16 is Saturday; should be filtered
+        java.util.List<LocalDate> out = PipelineWorkflowImpl.expandDates(
+                List.of(LocalDate.of(2026, 5, 15), LocalDate.of(2026, 5, 16)),
+                null);
+        assertEquals(1, out.size());
+        assertEquals(LocalDate.of(2026, 5, 15), out.get(0));
+    }
+
+    @Test
+    void expandDates_handlesReversedRange() {
+        // Swap from/to — should still expand correctly
+        java.util.List<LocalDate> out = PipelineWorkflowImpl.expandDates(
+                null,
+                new PipelineWorkflow.DateRange(
+                        LocalDate.of(2026, 5, 15), LocalDate.of(2026, 5, 11)));
+        assertEquals(5, out.size());
+    }
+
+    @Test
+    void expandDates_emptyWhenAllNull() {
+        java.util.List<LocalDate> out = PipelineWorkflowImpl.expandDates(null, null);
+        assertTrue(out.isEmpty());
+    }
+
     /** Chronological ordering preserved (TreeSet → LinkedHashSet). */
     @Test
     void chronologicalOrder() {

@@ -22,8 +22,22 @@ public final class PipelineWorkflowImpl implements PipelineWorkflow {
     public PipelineResult run(final PipelineInput input) {
         long t0 = System.currentTimeMillis();
         Mode mode = (input.mode() == null) ? Mode.FULL_PIPELINE : input.mode();
-        LOG.info("pipeline start  mode={} dates={} cascade={} forceReingest={} retentionSweep={}",
-                mode, input.dates(), input.cascadeRollups(), input.forceReingest(), input.runRetentionSweep());
+
+        // Stage 1: expand dates + dateRange into an ordered, deduplicated,
+        // weekday-only list. Caller can pass either field or both (union).
+        java.util.List<LocalDate> effectiveDates = expandDates(
+                input.dates(), input.dateRange());
+        if (effectiveDates.isEmpty()) {
+            LOG.warn("pipeline start  no effective dates  dates={} dateRange={}",
+                    input.dates(), input.dateRange());
+            return new PipelineResult(0, 0, 0, 0, System.currentTimeMillis() - t0);
+        }
+
+        LOG.info("pipeline start  mode={} dates_count={} (from dates={} range={}) cascade={} forceReingest={} retentionSweep={}",
+                mode, effectiveDates.size(),
+                input.dates() == null ? 0 : input.dates().size(),
+                input.dateRange(),
+                input.cascadeRollups(), input.forceReingest(), input.runRetentionSweep());
 
         // Per-day work — dispatched by mode.
         //   FULL_PIPELINE: fires DailyPipelineWorkflow per date (existing
@@ -38,7 +52,7 @@ public final class PipelineWorkflowImpl implements PipelineWorkflow {
         // Sequential in v1 — parallelization (Phase A overlap) is a planned
         // follow-up (see docs/phase8-v2-parallelization.md).
         int daysProcessed = 0;
-        for (LocalDate date : input.dates()) {
+        for (LocalDate date : effectiveDates) {
             if (mode == Mode.LLM_CHAIN) {
                 runLlmChainForDay(date);
             } else {
@@ -65,7 +79,7 @@ public final class PipelineWorkflowImpl implements PipelineWorkflow {
         // quarter/year) cost essentially nothing.
         int weekly = 0, quarterly = 0, yearly = 0;
         if (input.cascadeRollups()) {
-            CascadeScope scope = computeCascadeScope(input.dates());
+            CascadeScope scope = computeCascadeScope(effectiveDates);
             LOG.info("cascade scope  weeks={} quarters={} years={}",
                     scope.weekStarts.size(), scope.quarterStarts.size(), scope.yearStarts.size());
 
@@ -136,6 +150,43 @@ public final class PipelineWorkflowImpl implements PipelineWorkflow {
                         .build());
         synth.run(date);
         LOG.info("llm-chain synth done  date={}", date);
+    }
+
+    /**
+     * Stage 1 (2026-05-29): expand dates + dateRange into one ordered,
+     * deduplicated, weekday-only list. Caller can pass either field or both
+     * (union); IEX is closed on weekends, so Sat/Sun are excluded — pcap
+     * doesn't exist for those days. Holidays pass through unchanged: the
+     * per-day workflow short-circuits via {@code NotATradingDay} from
+     * {@link com.longexposure.temporal.activities.ResolveUrlActivity}, so
+     * we don't try to maintain a holiday calendar here.
+     *
+     * <p>Range expansion is inclusive of both endpoints. Order is
+     * chronological (TreeSet → LinkedHashSet pattern matches
+     * computeCascadeScope).
+     */
+    static java.util.List<LocalDate> expandDates(
+            final java.util.List<LocalDate> explicit,
+            final PipelineWorkflow.DateRange range) {
+        java.util.TreeSet<LocalDate> all = new java.util.TreeSet<>();
+        if (explicit != null) {
+            for (LocalDate d : explicit) {
+                if (d != null && isWeekday(d)) all.add(d);
+            }
+        }
+        if (range != null && range.from() != null && range.to() != null) {
+            LocalDate from = range.from(), to = range.to();
+            if (from.isAfter(to)) { LocalDate tmp = from; from = to; to = tmp; }
+            for (LocalDate d = from; !d.isAfter(to); d = d.plusDays(1)) {
+                if (isWeekday(d)) all.add(d);
+            }
+        }
+        return new java.util.ArrayList<>(all);
+    }
+
+    private static boolean isWeekday(final LocalDate d) {
+        DayOfWeek dow = d.getDayOfWeek();
+        return dow != DayOfWeek.SATURDAY && dow != DayOfWeek.SUNDAY;
     }
 
     /**

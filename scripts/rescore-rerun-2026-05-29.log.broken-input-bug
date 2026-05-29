@@ -1,0 +1,10 @@
+[2026-05-29T09:18:21Z] ==== rescore-rerun START ====
+[2026-05-29T09:18:21Z] dates: 2026-05-12 2026-05-13 2026-05-14 2026-05-15 2026-05-18 2026-05-19 2026-05-20 2026-05-21 2026-05-22
+[2026-05-29T09:18:21Z] step 1: terminating overnight-rerun-20260529-083026...
+Workflow terminated
+[2026-05-29T09:18:21Z] step 1b: waiting for in-flight children to drain...
+[2026-05-29T09:18:21Z]   no workflows in flight (poll iter 1)
+[2026-05-29T09:18:21Z] step 2: re-scoring 9 days...
+[2026-05-29T09:18:21Z] --- DAY 2026-05-12 : rescore ---
+[2026-05-29T09:18:21Z] START ScoreWorkflow  id=rescore-20260512-091821  input=
+time=2026-05-29T09:18:21.464 level=ERROR msg="input #1 is not valid JSON"

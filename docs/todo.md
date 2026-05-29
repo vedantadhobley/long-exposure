@@ -132,9 +132,9 @@ Where we are now (2026-05-28 ~20:40 EDT):
 
 - [x] **✅ Phase 6. 1-day test on 05-12 — PASSED 2026-05-28 ~20:30 EDT.** Synth-05-12 verifier_passed=true with all R2-R5 + Phases 3-5 + 7c/7e/7f fixes active. Gate cleared before Phase 8 build kicked off.
 
-- [ ] **Phase 7. Compound phase-label stitch in DESCRIBE prose.** Observed 2026-05-28 GMRS halt: *"The halt began in pre-market to midday"* — model glued `halt_start_phase_label="in pre-market trading"` + `halt_end_phase_label="around midday"` without a connector verb. Same structural-data-layer pattern as Phase 3 (halt_reason_label) and Phase 4 (duration_humanized): pre-compute a `halt_phase_span_label` field in HaltScorer that combines the two grammatically ("starting in pre-market and resuming around midday" / "lasting through midday from pre-market trading" / etc., depending on phase combination). INTERPRET/DESCRIBE prompts read the unified field; no prompt rule about "don't glue phase labels" needed. ~20 min.
+- [x] **✅ Phase 7. halt_phase_span_label — SHIPPED 2026-05-29** (data: `c7d79f9`, prompt: `8ffc960`). `BreakdownFmt.haltPhaseSpan(start, endOrNull)` emits a complete grammatical phrase ("lasting through midday" / "starting in pre-market trading and resuming around midday" / "starting in pre-market with no resume in the window"). `HaltScorer.applyEnrichment` writes it as `breakdown.halt_phase_span_label`. `BlueprintExtractor` halt narration-set leads with it + holistic FRAMING RULES entry directs model away from stitching the two separate labels. `PROMPT_VERSION` bumped `extract-v9-deletes-disambiguation` → `extract-v10-halt-phase-span`.
 
-- [ ] **Phase 7b. Background heartbeat daemon in LLM activities.** The heartbeat-timeout fix from earlier today (commit `15af21f` bumped heartbeat 1→5 min on SynthesizeDay + AggregateWeek workflow stubs) is a band-aid that's still in place. The PROPER fix is a background thread inside each LLM-bearing activity that calls `actx.heartbeat()` every 30 sec while the blocking LLM HTTP call runs — same pattern as `MaterializeOrderLifecycleActivityImpl`. After this lands, the heartbeat timeout can drop back to 1 min as a real liveness signal. Apply to: SynthesizeDayActivityImpl, AggregateWeekActivityImpl, AggregateQuarterActivityImpl, AggregateYearActivityImpl. ~30 min.
+- [x] **✅ Phase 7b. BackgroundHeartbeat in Narrate + Interpret — SHIPPED 2026-05-29** (`bc1630f`). `NarrateEventActivityImpl` + `InterpretEventActivityImpl` wrap their bodies in `try (BackgroundHeartbeat hb = BackgroundHeartbeat.start(actx, "...-heartbeat", 30))`. Daemon thread fires `actx.heartbeat("keep_alive:" + stage)` every 30 sec for the activity's full duration; stage labels (`load` / `cache_check` / `llm` / `upsert`) surface in heartbeat payloads. Replaces the explicit checkpoint-heartbeat pattern that couldn't cover the LLM call's own duration. SynthesizeDay/AggregateWeek/Quarter/Year already used this pattern (the 5-min heartbeat band-aid in `15af21f` had been reverted earlier). All LLM-bound activities now share one liveness mechanism.
 
 - [x] **✅ Phase 7c. Time-of-day weight in scoring — SHIPPED.** `BreakdownFmt.timeOfDayWeight(utc)` multiplier (pre_market: 0.85, opening_5min: 1.20, early_session: 1.05, midday: 0.95, late_session: 1.10, closing_5min: 1.15). Applied uniformly across all 7 intraday scorers via `score = baseScore × timeOfDayWeight(ts)`. Unit-tested in `BreakdownFmtTest`.
 
@@ -150,7 +150,7 @@ Where we are now (2026-05-28 ~20:40 EDT):
 
 - [ ] **Phase 9-A. Inter-day scorer INTERPRET — implement for both scorers.** Currently `volume_deviation` + `time_in_book_drift` events skip INTERPRET (`TradeWindow.query()`'s ±60-sec framing isn't meaningful for whole-day metrics). Implementation: new `TradeWindow.daySummary(date, symbol)` method reads the day's intraday volume + order-lifetime curve summary; InterpretEventActivityImpl branches on `scorerId IN ('volume_deviation', 'time_in_book_drift')` to use the day-summary query instead of the ±60-sec window. Verifier rules unchanged (same haystack grounding). Catalog has interpretive material for both — "volume built through midday" / "lifetime regime shift began at 09:35 ET and persisted through morning". ~90 min.
 
-- [ ] **Phase 9b. DESCRIBE-side pattern-mislabel check.** Mirror of Phase 5 (INTERPRET) for DESCRIBE. Reuses `AttributionVerifier.extractScorerNounIds`. Allowed-scorer set: event's own scorer_id ∪ co_occurring keys. Plumbed via a new 5-arg `GroundingVerifier.verify(prose, blueprint, breakdown, scorerId, allowedSet)` overload; back-compat 3-arg form preserved. ~15 min.
+- [x] **✅ Phase 9b. DESCRIBE pattern-mislabel check — SHIPPED + TESTED 2026-05-29** (tests: `1fd1f6d`; code was already in place). `GroundingVerifier.verify(prose, blueprint, breakdown, scorerId)` 4-arg form runs the pattern-name mislabel check via `AttributionVerifier.extractScorerNounIds(prose)`; allowed set = event's own scorer_id ∪ `breakdown.co_occurring.during_event` keys; `null` scorerId skips check (back-compat preserved). `NarrationPipeline.narrate()` already calls the 4-arg form. Six new unit tests cover happy path, mislabel, co_occurring allowed, scorer not in own nor co_occurring, null-scorer skip, 3-arg back-compat.
 
 ---
 
@@ -508,16 +508,6 @@ Full layout in @plan.md. Quick status:
 - [x] `DplsMessageRouter`
 - [x] `SaleConditionFlags` promoted from `tops/` to `wire/`
 - [x] 14 JUnit tests (45 total in the suite)
-
-### Sprint B — order book state machine 🔜 next
-
-- [ ] `OrderBook` class: `Map<Long orderId, OrderState>` per symbol
-- [ ] Updates on Add/Modify/Delete/Execute
-- [ ] ClearBook drops all entries
-- [ ] BBO derivation method (`bestBid()`, `bestAsk()`)
-- [ ] Aggregate depth metrics (size-at-best, depth at level N)
-- [ ] `OrderBookManager` — `Map<symbol, OrderBook>` + dispatch
-- [ ] JUnit tests with synthetic 5–10-event message streams
 
 ### Sprint B — order book state machine ✅ done 2026-05-11
 

@@ -85,21 +85,40 @@ public interface PipelineWorkflow {
      *                          PROMPT_VERSION bump or to backfill INTERPRET
      *                          coverage. Null = {@code FULL_PIPELINE}.
      */
+    /**
+     * Inclusive date range. {@code from} ≤ {@code to}, both required.
+     * Expanded to weekdays only (US market trading calendar). Holidays
+     * passed through — the per-day workflow short-circuits on {@code
+     * NotATradingDay} from {@link com.longexposure.temporal.activities.ResolveUrlActivity}.
+     */
+    record DateRange(LocalDate from, LocalDate to) {}
+
     record PipelineInput(
             List<LocalDate> dates,
+            DateRange       dateRange,
             boolean         pollUntilReady,
             boolean         forceReingest,
             boolean         runRetentionSweep,
             boolean         cascadeRollups,
             Mode            mode) {
 
-        /** Back-compat constructor — defaults mode to FULL_PIPELINE. */
+        /** Back-compat constructor — defaults mode to FULL_PIPELINE, no range. */
         public PipelineInput(List<LocalDate> dates,
                               boolean pollUntilReady,
                               boolean forceReingest,
                               boolean runRetentionSweep,
                               boolean cascadeRollups) {
-            this(dates, pollUntilReady, forceReingest, runRetentionSweep, cascadeRollups, Mode.FULL_PIPELINE);
+            this(dates, null, pollUntilReady, forceReingest, runRetentionSweep, cascadeRollups, Mode.FULL_PIPELINE);
+        }
+
+        /** Back-compat constructor with mode but no range. */
+        public PipelineInput(List<LocalDate> dates,
+                              boolean pollUntilReady,
+                              boolean forceReingest,
+                              boolean runRetentionSweep,
+                              boolean cascadeRollups,
+                              Mode mode) {
+            this(dates, null, pollUntilReady, forceReingest, runRetentionSweep, cascadeRollups, mode);
         }
     }
 
