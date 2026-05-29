@@ -39,37 +39,33 @@ public final class PipelineWorkflowImpl implements PipelineWorkflow {
                 input.dateRange(),
                 input.cascadeRollups(), input.forceReingest(), input.runRetentionSweep());
 
-        // Per-day work — dispatched by mode.
-        //   FULL_PIPELINE: fires DailyPipelineWorkflow per date (existing
-        //     behavior; respects status='ok' idempotency guard).
-        //   LLM_CHAIN:     fires Narrate → Interpret → Synthesize per date
-        //     directly, skipping the parse/score guard. Used for re-runs
-        //     after a PROMPT_VERSION bump where the wire-format tables +
-        //     selected_events are already populated but the LLM stages need
-        //     to re-run. Eliminates the bash-driver chain that
-        //     scripts/catchup-*.sh used to wrap.
-        //
-        // Sequential in v1 — parallelization (Phase A overlap) is a planned
-        // follow-up (see docs/phase8-v2-parallelization.md).
-        int daysProcessed = 0;
-        for (LocalDate date : effectiveDates) {
-            if (mode == Mode.LLM_CHAIN) {
-                runLlmChainForDay(date);
-            } else {
-                DailyPipelineWorkflow daily = Workflow.newChildWorkflowStub(
-                        DailyPipelineWorkflow.class,
-                        ChildWorkflowOptions.newBuilder()
-                                .setWorkflowId("pipeline-daily-" + date + "-" + Workflow.getInfo().getWorkflowId())
-                                .build());
-                DailyPipelineWorkflowInput dailyInput = new DailyPipelineWorkflowInput(
-                        date,
-                        input.pollUntilReady(),
-                        input.forceReingest(),
-                        input.runRetentionSweep());
-                String status = daily.run(dailyInput);
-                LOG.info("daily done  date={} status={}", date, status);
-            }
-            daysProcessed++;
+        // Per-day work — dispatched by mode + size.
+        //   LLM_CHAIN: fires LlmDayWorkflow per date sequentially. joi GPU
+        //     mutex serializes Narrate/Interpret/Synth across days; no
+        //     parallelization opportunity.
+        //   FULL_PIPELINE single day: delegates to DailyPipelineWorkflow to
+        //     preserve cron contract (returns status string).
+        //   FULL_PIPELINE multi-day: Stage 5 — IngestDay[N] runs sequentially
+        //     (Postgres mutex); LlmDay[N] runs in parallel with
+        //     IngestDay[N+1] (joi mutex + luv free during LLM). FinalizeDay[N]
+        //     follows LlmDay[N]. Saves ~3-4 hr on a 12-day backfill.
+        int daysProcessed;
+        if (mode == Mode.LLM_CHAIN) {
+            for (LocalDate date : effectiveDates) runLlmChainForDay(date);
+            daysProcessed = effectiveDates.size();
+        } else if (effectiveDates.size() == 1) {
+            LocalDate date = effectiveDates.get(0);
+            DailyPipelineWorkflow daily = Workflow.newChildWorkflowStub(
+                    DailyPipelineWorkflow.class,
+                    ChildWorkflowOptions.newBuilder()
+                            .setWorkflowId("pipeline-daily-" + date + "-" + Workflow.getInfo().getWorkflowId())
+                            .build());
+            String status = daily.run(new DailyPipelineWorkflowInput(
+                    date, input.pollUntilReady(), input.forceReingest(), input.runRetentionSweep()));
+            LOG.info("daily done  date={} status={}", date, status);
+            daysProcessed = 1;
+        } else {
+            daysProcessed = runSlidingWindow(effectiveDates, input);
         }
 
         // Rollup cascade. From the input dates, derive every touched
@@ -116,6 +112,87 @@ public final class PipelineWorkflowImpl implements PipelineWorkflow {
         LOG.info("pipeline done  days={} weekly={} quarterly={} yearly={} elapsed_ms={}",
                 daysProcessed, weekly, quarterly, yearly, elapsed);
         return new PipelineResult(daysProcessed, weekly, quarterly, yearly, elapsed);
+    }
+
+    /**
+     * Stage 5 (2026-05-29) — Phase A/B overlap parallelization. For each day:
+     * <ul>
+     *   <li>IngestDay[N] runs after IngestDay[N-1] (sequential Postgres)
+     *   <li>LlmDay[N] runs after IngestDay[N] AND LlmDay[N-1] (joi GPU mutex)
+     *   <li>FinalizeDay[N] runs after LlmDay[N]
+     * </ul>
+     * Result: while LlmDay[N] hits joi, IngestDay[N+1] runs on luv. Saves
+     * ~3-4 hr on a 12-day backfill; zero on a 1-day cron fire.
+     */
+    private int runSlidingWindow(final java.util.List<LocalDate> dates,
+                                  final PipelineInput input) {
+        int n = dates.size();
+        @SuppressWarnings("unchecked")
+        io.temporal.workflow.Promise<String>[] ingestP = new io.temporal.workflow.Promise[n];
+        @SuppressWarnings("unchecked")
+        io.temporal.workflow.Promise<Long>[] llmP = new io.temporal.workflow.Promise[n];
+        @SuppressWarnings("unchecked")
+        io.temporal.workflow.Promise<Void>[] finP = new io.temporal.workflow.Promise[n];
+
+        String parentId = Workflow.getInfo().getWorkflowId();
+        for (int i = 0; i < n; i++) {
+            final int idx = i;
+            final LocalDate date = dates.get(i);
+
+            // IngestDay[N]: serial across days (Postgres mutex).
+            ingestP[i] = io.temporal.workflow.Async.function(() -> {
+                if (idx > 0) ingestP[idx - 1].get();
+                IngestDayWorkflow ing = Workflow.newChildWorkflowStub(
+                        IngestDayWorkflow.class,
+                        ChildWorkflowOptions.newBuilder()
+                                .setWorkflowId("pipeline-ingest-" + date + "-" + parentId)
+                                .build());
+                return ing.run(new IngestDayWorkflow.Input(
+                        date, input.pollUntilReady(), input.forceReingest()));
+            });
+
+            // LlmDay[N]: serial across days (joi mutex), but parallel with
+            // next day's Ingest. Skipped when ingest short-circuits.
+            llmP[i] = io.temporal.workflow.Async.function(() -> {
+                String status = ingestP[idx].get();
+                if ("skipped_already_ingested".equals(status)
+                        || "skipped_no_data".equals(status)
+                        || "parse_failed".equals(status)) {
+                    return 0L;
+                }
+                if (idx > 0) llmP[idx - 1].get();
+                LlmDayWorkflow llm = Workflow.newChildWorkflowStub(
+                        LlmDayWorkflow.class,
+                        ChildWorkflowOptions.newBuilder()
+                                .setWorkflowId("pipeline-llm-" + date + "-" + parentId)
+                                .build());
+                return llm.run(date);
+            });
+
+            // FinalizeDay[N]: follows LlmDay[N]; independent across days
+            // (compress + cleanup are per-day, no cross-day contention).
+            finP[i] = io.temporal.workflow.Async.procedure(() -> {
+                llmP[idx].get();
+                String status = ingestP[idx].get();
+                boolean deleteFiles = input.runRetentionSweep() && "ok".equals(status);
+                FinalizeDayWorkflow fin = Workflow.newChildWorkflowStub(
+                        FinalizeDayWorkflow.class,
+                        ChildWorkflowOptions.newBuilder()
+                                .setWorkflowId("pipeline-finalize-" + date + "-" + parentId)
+                                .build());
+                fin.run(new FinalizeDayWorkflow.Input(
+                        date, deleteFiles, input.runRetentionSweep()));
+            });
+        }
+
+        // Drain all FinalizeDay promises (which depend on everything else).
+        for (int i = 0; i < n; i++) {
+            try { finP[i].get(); } catch (Exception e) {
+                LOG.warn("sliding-window day failed  date={} err={}",
+                        dates.get(i), e.getMessage());
+            }
+        }
+        return n;
     }
 
     /**
