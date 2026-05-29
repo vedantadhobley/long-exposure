@@ -97,6 +97,11 @@ public final class Main {
             com.longexposure.narration.VerifierBackfill.run(reverify);
             return;
         }
+        String reverifyInterp = System.getenv("IEX_REVERIFY_INTERP");
+        if (reverifyInterp != null && !reverifyInterp.isBlank()) {
+            com.longexposure.narration.VerifierBackfill.runInterpretations(reverifyInterp);
+            return;
+        }
         String interpretSmoke = System.getenv("IEX_INTERPRET_SMOKE");
         if (interpretSmoke != null && !interpretSmoke.isBlank()) {
             com.longexposure.narration.InterpretSmokeTest.run(interpretSmoke);

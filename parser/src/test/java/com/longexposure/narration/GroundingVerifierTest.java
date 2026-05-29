@@ -308,4 +308,51 @@ final class GroundingVerifierTest {
         GroundingVerifier.Result r = new GroundingVerifier().verify(prose, blueprint, breakdown);
         assertTrue(r.passed(), "3-arg form should skip pattern check: " + r.mismatches());
     }
+
+    // ─── cardinalWordNumbersIn — hyphenated-compound exclusion (2026-05-29) ─
+    // Eliminates the "two-sided" / "one-sided" / "three-fold" false-positive
+    // failure class. Compound numeric ADJECTIVES (anchored labels rendered in
+    // prose) should not be extracted as numeric claims.
+
+    @Test
+    void cardinalWords_skipsHyphenatedCompounds() {
+        // The withdrawal_side_class="two_sided" anchored label renders in
+        // prose as "two-sided". Verifier must not try to ground "2".
+        java.util.Set<String> nums = GroundingVerifier.cardinalWordNumbersIn(
+                "a two-sided liquidity withdrawal removed 3,367 orders");
+        assertFalse(nums.contains("2"), "should NOT extract from 'two-sided'");
+        assertTrue(nums.isEmpty(), "no word-form numerals in this string: " + nums);
+    }
+
+    @Test
+    void cardinalWords_stillCatchesStandaloneNumerals() {
+        java.util.Set<String> nums = GroundingVerifier.cardinalWordNumbersIn(
+                "three trading halts and ten sweeps");
+        assertTrue(nums.contains("3"));
+        assertTrue(nums.contains("10"));
+    }
+
+    @Test
+    void cardinalWords_skipsCommonCompoundAdjectives() {
+        java.util.Set<String> nums = GroundingVerifier.cardinalWordNumbersIn(
+                "the one-sided withdrawal and five-fold spike across "
+              + "two-tier order book activity");
+        assertFalse(nums.contains("1"), "skip 'one-sided'");
+        assertFalse(nums.contains("5"), "skip 'five-fold'");
+        assertFalse(nums.contains("2"), "skip 'two-tier'");
+        assertTrue(nums.isEmpty(), "no actual count claims: " + nums);
+    }
+
+    @Test
+    void cardinalWords_handlesAdjacentPunctuationCleanly() {
+        // At sentence start, before punctuation, etc.
+        java.util.Set<String> nums1 = GroundingVerifier.cardinalWordNumbersIn(
+                "A two-sided withdrawal followed.");
+        assertFalse(nums1.contains("2"), "skip at sentence start");
+
+        // Standalone "two" should still match
+        java.util.Set<String> nums2 = GroundingVerifier.cardinalWordNumbersIn(
+                "We saw two distinct events.");
+        assertTrue(nums2.contains("2"), "match standalone numeral");
+    }
 }

@@ -104,11 +104,17 @@ public final class GroundingVerifier {
         WORD_NUMBERS = Map.copyOf(m);
     }
 
+    // (?<![\w-]) / (?![\w-]) — like \b but ALSO excludes hyphens.
+    // "two-sided" / "one-sided" / "three-fold" / "two-way" / "five-tier" are
+    // ADJECTIVAL compounds (from anchored labels like withdrawal_side_class=
+    // "two_sided"), not numeric claims. Without the hyphen exclusion the
+    // verifier would try to ground the leading numeral in the breakdown,
+    // producing false-positive failures.
     private static final Pattern WORD_NUMBER_RE = Pattern.compile(
-            "\\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|"
+            "(?<![\\w-])(zero|one|two|three|four|five|six|seven|eight|nine|ten|"
                     + "eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
                     + "eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|"
-                    + "eighty|ninety|hundred|thousand|dozen)\\b",
+                    + "eighty|ninety|hundred|thousand|dozen)(?![\\w-])",
             Pattern.CASE_INSENSITIVE);
 
     /**
