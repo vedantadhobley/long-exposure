@@ -27,7 +27,7 @@ import java.util.Map;
 public final class BlueprintExtractor {
 
     /** Bump this string when the prompt or output shape changes. Used in the event_hash. */
-    public static final String PROMPT_VERSION = "extract-v10-halt-phase-span";
+    public static final String PROMPT_VERSION = "extract-v11-strip-stats-jargon-2026-05-30";
 
     private static final String SYSTEM_PROMPT = """
             You are an extraction system. Given a market microstructure event with structured facts,
@@ -97,15 +97,21 @@ public final class BlueprintExtractor {
             - slippage_direction is CATEGORICAL ("up"/"down"/"flat"); pair it with slippage_bps
               (e.g. "walked 11.0 bps up across N levels").
             - burstiness_class is the ANCHORED LABEL ("highly bursty" / "moderately bursty" /
-              "weakly bursty" / "Poisson-like"). Lead with the WORD and add the Fano number as
-              a parenthetical for grounding — e.g. "highly bursty (Fano 9.4)" — not "burstiness
-              of 9.43" with no scale anchor.
+              "weakly bursty" / "Poisson-like"). Render the LABEL ALONE — e.g.
+              "moderately bursty arrival" or "the cluster was weakly bursty". DO NOT include
+              the burstiness_fano numeric value as a parenthetical. "(Fano 4.79)" is
+              statistician variable jargon that reads poorly to a general audience; the
+              anchored class label already carries the journalistic claim. The raw
+              burstiness_fano value lives in the breakdown for analyst drill-down. The same
+              rule applies to omitting burstiness_fano from key_numbers when burstiness_class
+              is present.
             - refill_cadence_class is the ANCHORED LABEL for iceberg inter-fill cadence
-              ("metronomic" / "regular" / "irregular" / "erratic"). Lead with the WORD and
-              add the CV as a parenthetical, e.g. "metronomic refills (CV 0.24)" or
-              "irregular cadence (CV 1.6)". NEVER render the bare phrase "coefficient of
-              variation" or "CV X" without the anchor word — those read as raw statistics
-              vocabulary, not journalism.
+              ("metronomic" / "regular" / "irregular" / "erratic"). Render the LABEL ALONE —
+              e.g. "erratic refills" or "the order saw irregular cadence". DO NOT include
+              refill_cadence_cv as a parenthetical. "(CV 4.58)" is statistician jargon. The
+              class label carries the meaning; the CV value lives in the breakdown for
+              drill-down. Same: omit refill_cadence_cv from key_numbers when
+              refill_cadence_class is present.
             - order_to_trade_phrase is the narrator-friendly rendering for the 0-fills case
               (value like "no fills against 187 posted orders"); when present, USE IT verbatim
               instead of "order-to-trade ratio of infinite". Falls back to `order_to_trade_ratio`
@@ -119,6 +125,16 @@ public final class BlueprintExtractor {
               N orders" / "removed N orders" — NEVER as "N shares". (The layering and
               post_cancel_cluster co_occurring blocks carry both `sum_orders` and
               `sum_total_shares` separately, so for those, distinguish the two.)
+            - CO_OCCURRING ENUMERATION LIMIT (v11): the breakdown's co_occurring block
+              may contain multiple nested scorer types (layering + post_cancel_cluster +
+              liquidity_withdrawal all firing inside a parent iceberg or withdrawal).
+              When extracting key_numbers from co_occurring data, INCLUDE AT MOST 3
+              entries total across all nested types — pick the two or three most
+              salient counts (e.g., the dominant scorer type's order count + share
+              count + one secondary type's count). The downstream renderer puts
+              these into ONE summary sentence. Do not include every metric of every
+              co_occurring scorer type — that produces a CSV-shaped sentence
+              enumerating each type, which reads as restatement, not narration.
             - pre_event_ofi_class is the ANCHORED LABEL ("buyer-leaning"/"seller-leaning"/
               "balanced") for the OFI value. Lead with the WORD and add the bare value as
               parenthetical, e.g. "the book was seller-leaning (OFI −0.42) before the sweep"

@@ -25,7 +25,7 @@ import com.longexposure.llm.SamplingParams;
  */
 public final class ProseRenderer {
 
-    public static final String PROMPT_VERSION = "render-v9-holistic";
+    public static final String PROMPT_VERSION = "render-v10-no-restate-2026-05-30";
 
     private static final String SYSTEM_PROMPT = """
             You are a financial-data journalist writing for the Long Exposure column —
@@ -42,11 +42,21 @@ public final class ProseRenderer {
                 `key_numbers[].value` not already consumed by the lead. Together with
                 the lead, the array surfaces every key_numbers entry.
 
-              - co_occurring: one sentence describing the breakdown's `co_occurring`
-                block (nested events that happened inside the parent event's window),
+              - co_occurring: EXACTLY ONE sentence (no semicolons that split into
+                multiple statements) describing the breakdown's `co_occurring` block,
                 or null when no such block is present. Any `key_numbers[]` entry whose
                 `source_field` begins with `"co_occurring."` belongs in this slot —
-                not in `facts[]`.
+                not in `facts[]`. When the co_occurring block contains MULTIPLE nested
+                scorer types (e.g. layering + post_cancel_cluster + liquidity_withdrawal
+                all inside an iceberg parent), write ONE holistic summary sentence —
+                NOT a sentence-per-type enumeration. Example of what NOT to write:
+                "X co-occurring layering events involving 98 orders. The period also
+                included Y post-cancel cluster events with 98 orders. Additionally,
+                Z liquidity withdrawal events occurred." Example of what TO write:
+                "The execution window contained dense same-side microstructure
+                activity — concentrated layering and post-cancel bursts alongside a
+                57-order liquidity withdrawal." Use compact qualitative language;
+                rely on the breakdown's drill-down for full enumeration.
 
             GROUNDING — the primary rule:
 
@@ -55,8 +65,18 @@ public final class ProseRenderer {
             values from the breakdown's `co_occurring` block when referenced. Numbers
             appear in your output exactly as they appear in the blueprint — no
             rounding, paraphrasing, or approximating. Do not infer, interpret,
-            compare to other events, or assert post-event state. Do not restate
-            facts a previous sentence already conveyed.
+            compare to other events, or assert post-event state.
+
+            NO-RESTATEMENT (v10, load-bearing): once a fact appears in the lead or
+            an earlier sentence, do NOT restate it in a later sentence with different
+            phrasing. Specifically:
+            - the co_occurring sentence describes what was inside the window — do not
+              also restate its contents in a facts[] sentence.
+            - if the class label of a metric (e.g. "weakly bursty") appears in one
+              sentence, do not restate it as "the burstiness was weakly bursty" in
+              the next sentence. The repetition reads as padding.
+            - each key_numbers[] entry surfaces in EXACTLY ONE sentence across the
+              entire output (lead OR a facts entry OR co_occurring) — never two.
 
             REGISTER:
 
