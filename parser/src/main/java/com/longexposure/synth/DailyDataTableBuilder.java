@@ -71,23 +71,31 @@ public final class DailyDataTableBuilder {
 
     private DailyDataTableBuilder() {}
 
+    /**
+     * Magnitude threshold for surfacing a "+X% vs prior session" bullet.
+     * Below this, the change isn't journalistic — within noise.
+     */
+    private static final int VS_PRIOR_MIN_PCT_CHANGE = 20;
+
     public static ObjectNode build(final Connection conn,
                                     final LocalDate tradingDate,
                                     final ObjectMapper json) throws SQLException {
         ObjectNode root = json.createObjectNode();
         root.put("trading_date", tradingDate.toString());
-        ObjectNode daySummary = buildDaySummary(conn, tradingDate, json);
-        ObjectNode extremes   = buildNotableExtremes(conn, tradingDate, json);
+        ObjectNode daySummary  = buildDaySummary(conn, tradingDate, json);
+        ObjectNode extremes    = buildNotableExtremes(conn, tradingDate, json);
+        ObjectNode vsPriorDay  = buildVsPriorDay(conn, tradingDate, daySummary, json);
 
-        // Executive summary derived from day_summary + extremes —
+        // Executive summary derived from day_summary + extremes + vs_prior_day —
         // deterministic, no LLM. Renders ABOVE the synth prose for the
         // 5-second skim before reading the paragraph.
         root.set("executive_summary",
-                buildExecutiveSummary(daySummary, extremes, json));
+                buildExecutiveSummary(daySummary, extremes, vsPriorDay, json));
         root.set("headline",          buildHeadline(conn, tradingDate, json));
         root.set("per_scorer_top",    buildPerScorerTop(conn, tradingDate, json));
         root.set("day_summary",       daySummary);
         root.set("notable_extremes",  extremes);
+        if (vsPriorDay != null) root.set("vs_prior_day", vsPriorDay);
         return root;
     }
 
@@ -97,6 +105,7 @@ public final class DailyDataTableBuilder {
 
     private static ArrayNode buildExecutiveSummary(final ObjectNode daySummary,
                                                     final ObjectNode extremes,
+                                                    final ObjectNode vsPriorDay,
                                                     final ObjectMapper json) {
         ArrayNode bullets = json.createArrayNode();
         List<String> candidates = new ArrayList<>();
@@ -149,16 +158,52 @@ public final class DailyDataTableBuilder {
             }
         }
 
-        // Bullet 5 — wildcard "wow" stat: pick from highest_volume_deviation,
-        // biggest_lifetime_drift, largest_pct_depth_removed, deepest_sweep
-        // (whichever fired with the most striking magnitude).
+        // Bullet 5 candidates — extremes wildcard + vs_prior_day.
+        // Priority: extremes first (intrinsic story of the day),
+        // then vs_prior_day (comparison to yesterday). Caller caps at 5
+        // so at most one of these makes it.
         String wildcardBullet = wildcardExtremeBullet(extremes);
         if (wildcardBullet != null) candidates.add(wildcardBullet);
+        if (vsPriorDay != null) {
+            for (String b : vsPriorDayBullets(vsPriorDay)) candidates.add(b);
+        }
 
         for (int i = 0; i < Math.min(candidates.size(), EXEC_SUMMARY_MAX_BULLETS); i++) {
             bullets.add(candidates.get(i));
         }
         return bullets;
+    }
+
+    /**
+     * Bullets sourced from vs_prior_day data. Emits volume-change bullet
+     * when pct change crosses the threshold; emits persistence bullet
+     * when the top symbol repeated. Order: change first, persistence
+     * second.
+     */
+    private static List<String> vsPriorDayBullets(final ObjectNode vsPriorDay) {
+        List<String> out = new ArrayList<>();
+        int pct = vsPriorDay.path("total_events_pct_change").asInt(0);
+        if (Math.abs(pct) >= VS_PRIOR_MIN_PCT_CHANGE) {
+            out.add("Event volume " + (pct > 0 ? "+" : "") + pct + "% vs prior session");
+        }
+        boolean persisted = vsPriorDay.path("top_symbol_persisted").asBoolean(false);
+        int streak = vsPriorDay.path("top_symbol_persistence_count").asInt(1);
+        String sym = vsPriorDay.path("top_symbol").asText("");
+        if (persisted && streak >= 2 && !sym.isEmpty()) {
+            out.add(sym + " led activity for the " + ordinal(streak)
+                    + " consecutive session");
+        }
+        return out;
+    }
+
+    private static String ordinal(final int n) {
+        if (n % 100 >= 11 && n % 100 <= 13) return n + "th";
+        return switch (n % 10) {
+            case 1 -> n + "st";
+            case 2 -> n + "nd";
+            case 3 -> n + "rd";
+            default -> n + "th";
+        };
     }
 
     /**
@@ -553,6 +598,174 @@ public final class DailyDataTableBuilder {
         }
 
         return out;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // vs_prior_day: cross-period comparison vs the previous trading day
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Compares today's per-scorer + top-symbol picture against the most
+     * recent prior trading day that has selected_events. Returns null if
+     * no such day exists (first row in dataset) — exec_summary skips the
+     * bullets and the comparison block is omitted entirely.
+     *
+     * <p>"Persistence" of top symbol is defined narrowly: top-1 today
+     * matches top-1 of the prior session. Same for dominant scorer.
+     *
+     * <p>The persistence count walks backwards through trading days while
+     * the top-1 symbol stays the same, so a 3-day streak shows "3rd
+     * consecutive session" — never fabricates a streak longer than the
+     * actual data.
+     */
+    private static ObjectNode buildVsPriorDay(final Connection conn,
+                                                final LocalDate tradingDate,
+                                                final ObjectNode daySummary,
+                                                final ObjectMapper json) throws SQLException {
+        LocalDate priorDate = findPriorTradingDay(conn, tradingDate);
+        if (priorDate == null) return null;
+
+        ObjectNode out = json.createObjectNode();
+        out.put("prior_date", priorDate.toString());
+
+        long todayTotal = daySummary.path("total_narrated_events").asLong(0);
+        long priorTotal = countSelected(conn, priorDate);
+        int pctChange = pctChange(priorTotal, todayTotal);
+        out.put("today_total_events", todayTotal);
+        out.put("prior_total_events", priorTotal);
+        out.put("total_events_pct_change", pctChange);
+
+        String todayTopScorer = topScorerOn(daySummary);
+        String priorTopScorer = topScorerForDay(conn, priorDate);
+        out.put("today_dominant_scorer", todayTopScorer == null ? "" : todayTopScorer);
+        out.put("prior_dominant_scorer", priorTopScorer == null ? "" : priorTopScorer);
+        out.put("dominant_scorer_persisted",
+                todayTopScorer != null && todayTopScorer.equals(priorTopScorer));
+
+        String todayTopSymbol = topSymbolOn(daySummary);
+        String priorTopSymbol = topSymbolForDay(conn, priorDate);
+        out.put("top_symbol", todayTopSymbol == null ? "" : todayTopSymbol);
+        out.put("prior_top_symbol", priorTopSymbol == null ? "" : priorTopSymbol);
+        boolean persisted = todayTopSymbol != null && todayTopSymbol.equals(priorTopSymbol);
+        out.put("top_symbol_persisted", persisted);
+        int streak = persisted ? topSymbolStreak(conn, tradingDate, todayTopSymbol) : 1;
+        out.put("top_symbol_persistence_count", streak);
+
+        // Per-scorer changes: difference in event count by scorer.
+        ObjectNode byScorerChanges = json.createObjectNode();
+        ObjectNode todayByScorer = (ObjectNode) daySummary.path("by_scorer");
+        ObjectNode priorByScorer = byScorerForDay(conn, priorDate, json);
+        java.util.Set<String> allScorers = new java.util.HashSet<>();
+        if (todayByScorer != null) todayByScorer.fieldNames().forEachRemaining(allScorers::add);
+        if (priorByScorer != null) priorByScorer.fieldNames().forEachRemaining(allScorers::add);
+        for (String s : allScorers) {
+            long today = todayByScorer != null ? todayByScorer.path(s).asLong(0) : 0;
+            long prior = priorByScorer != null ? priorByScorer.path(s).asLong(0) : 0;
+            byScorerChanges.put(s, (int) (today - prior));
+        }
+        out.set("by_scorer_changes", byScorerChanges);
+
+        return out;
+    }
+
+    /** Find the most recent trading day strictly before {@code today} that
+     * has any selected_events. Returns null if none. */
+    private static LocalDate findPriorTradingDay(final Connection conn,
+                                                  final LocalDate today) throws SQLException {
+        String sql = "SELECT MAX(trading_date) FROM selected_events WHERE trading_date < ?";
+        try (PreparedStatement st = conn.prepareStatement(sql)) {
+            st.setObject(1, today);
+            try (ResultSet rs = st.executeQuery()) {
+                if (rs.next()) return rs.getObject(1, LocalDate.class);
+            }
+        }
+        return null;
+    }
+
+    private static long countSelected(final Connection conn, final LocalDate date) throws SQLException {
+        try (PreparedStatement st = conn.prepareStatement(
+                "SELECT COUNT(*) FROM selected_events WHERE trading_date=?")) {
+            st.setObject(1, date);
+            try (ResultSet rs = st.executeQuery()) { return rs.next() ? rs.getLong(1) : 0; }
+        }
+    }
+
+    private static String topScorerForDay(final Connection conn, final LocalDate date) throws SQLException {
+        try (PreparedStatement st = conn.prepareStatement(
+                "SELECT scorer_id FROM selected_events WHERE trading_date=? "
+                  + "GROUP BY scorer_id ORDER BY COUNT(*) DESC LIMIT 1")) {
+            st.setObject(1, date);
+            try (ResultSet rs = st.executeQuery()) { return rs.next() ? rs.getString(1) : null; }
+        }
+    }
+
+    private static String topSymbolForDay(final Connection conn, final LocalDate date) throws SQLException {
+        try (PreparedStatement st = conn.prepareStatement(
+                "SELECT symbol FROM selected_events WHERE trading_date=? "
+                  + "GROUP BY symbol ORDER BY COUNT(*) DESC LIMIT 1")) {
+            st.setObject(1, date);
+            try (ResultSet rs = st.executeQuery()) { return rs.next() ? rs.getString(1) : null; }
+        }
+    }
+
+    private static ObjectNode byScorerForDay(final Connection conn,
+                                              final LocalDate date,
+                                              final ObjectMapper json) throws SQLException {
+        ObjectNode out = json.createObjectNode();
+        try (PreparedStatement st = conn.prepareStatement(
+                "SELECT scorer_id, COUNT(*) FROM selected_events WHERE trading_date=? GROUP BY scorer_id")) {
+            st.setObject(1, date);
+            try (ResultSet rs = st.executeQuery()) {
+                while (rs.next()) out.put(rs.getString(1), rs.getLong(2));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Walk backwards through trading days starting from {@code from}, counting
+     * how many consecutive sessions had {@code symbol} as the top-1 symbol.
+     * Caps at 60 days as a safety bound — far above any plausible streak.
+     */
+    private static int topSymbolStreak(final Connection conn,
+                                        final LocalDate from,
+                                        final String symbol) throws SQLException {
+        int streak = 0;
+        LocalDate cursor = from;
+        for (int i = 0; i < 60; i++) {
+            String top = topSymbolForDay(conn, cursor);
+            if (top == null || !top.equals(symbol)) break;
+            streak++;
+            LocalDate prior = findPriorTradingDay(conn, cursor);
+            if (prior == null) break;
+            cursor = prior;
+        }
+        return streak;
+    }
+
+    private static int pctChange(final long prior, final long today) {
+        if (prior == 0) return today == 0 ? 0 : 100; // treat 0→N as +100% capped
+        return (int) Math.round(100.0 * (today - prior) / prior);
+    }
+
+    private static String topScorerOn(final ObjectNode daySummary) {
+        ObjectNode byScorer = (ObjectNode) daySummary.path("by_scorer");
+        if (byScorer == null || byScorer.isMissingNode()) return null;
+        String top = null;
+        long max = 0;
+        java.util.Iterator<String> it = byScorer.fieldNames();
+        while (it.hasNext()) {
+            String s = it.next();
+            long c = byScorer.path(s).asLong(0);
+            if (c > max) { max = c; top = s; }
+        }
+        return top;
+    }
+
+    private static String topSymbolOn(final ObjectNode daySummary) {
+        ArrayNode topSymbols = (ArrayNode) daySummary.path("top_symbols");
+        if (topSymbols == null || topSymbols.size() == 0) return null;
+        return topSymbols.get(0).path("symbol").asText(null);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

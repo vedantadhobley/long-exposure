@@ -58,6 +58,9 @@ public final class WeeklyDataTableBuilder {
 
     private WeeklyDataTableBuilder() {}
 
+    /** Magnitude threshold for the "+N% vs prior week" bullet. */
+    private static final int VS_PRIOR_MIN_PCT_CHANGE = 20;
+
     public static ObjectNode build(final Connection conn,
                                     final LocalDate weekStart,
                                     final LocalDate weekEnd,
@@ -71,16 +74,18 @@ public final class WeeklyDataTableBuilder {
         ArrayNode perDay     = buildPerDay(conn, weekStart, weekEnd, json);
         ObjectNode scorerMix = buildScorerMix(conn, weekStart, weekEnd, json);
         ObjectNode extremes  = buildNotableExtremes(conn, weekStart, weekEnd, json);
+        ObjectNode vsPriorWeek = buildVsPriorWeek(conn, weekStart, weekEnd, topSymbols, scorerMix, json);
 
         // Executive summary derived from the structured data above —
         // deterministic, no LLM.
         root.set("executive_summary",
-                buildExecutiveSummary(topSymbols, perDay, scorerMix, extremes, json));
+                buildExecutiveSummary(topSymbols, perDay, scorerMix, extremes, vsPriorWeek, json));
         root.set("headline_events",   headline);
         root.set("per_day",           perDay);
         root.set("top_symbols",       topSymbols);
         root.set("scorer_mix",        scorerMix);
         root.set("notable_extremes",  extremes);
+        if (vsPriorWeek != null) root.set("vs_prior_week", vsPriorWeek);
         return root;
     }
 
@@ -92,6 +97,7 @@ public final class WeeklyDataTableBuilder {
                                                     final ArrayNode perDay,
                                                     final ObjectNode scorerMix,
                                                     final ObjectNode extremes,
+                                                    final ObjectNode vsPriorWeek,
                                                     final ObjectMapper json) {
         ArrayNode bullets = json.createArrayNode();
         List<String> candidates = new ArrayList<>();
@@ -146,7 +152,11 @@ public final class WeeklyDataTableBuilder {
             }
         }
 
-        // Bullet 5 (fallback) — per-day variation.
+        // Bullet 5 candidates — vs_prior_week + fallback daily range.
+        // Priority: cross-period change first (the trend story), then fallback.
+        if (vsPriorWeek != null) {
+            for (String b : vsPriorWeekBullets(vsPriorWeek)) candidates.add(b);
+        }
         if (perDay.size() >= 2) {
             int max = 0, min = Integer.MAX_VALUE;
             String maxDate = "", minDate = "";
@@ -165,6 +175,217 @@ public final class WeeklyDataTableBuilder {
             bullets.add(candidates.get(i));
         }
         return bullets;
+    }
+
+    /**
+     * Bullets sourced from vs_prior_week. Emits a volume-change bullet
+     * when pct change crosses the threshold, and a scorer-persistence
+     * bullet when the same scorer dominated both this week and prior.
+     */
+    private static List<String> vsPriorWeekBullets(final ObjectNode vsPriorWeek) {
+        List<String> out = new ArrayList<>();
+        int pct = vsPriorWeek.path("total_events_pct_change").asInt(0);
+        if (Math.abs(pct) >= VS_PRIOR_MIN_PCT_CHANGE) {
+            out.add("Event volume " + (pct > 0 ? "+" : "") + pct + "% vs prior week");
+        }
+        boolean scorerPersisted = vsPriorWeek.path("dominant_scorer_persisted").asBoolean(false);
+        int scorerStreak = vsPriorWeek.path("dominant_scorer_streak").asInt(1);
+        String topScorer = vsPriorWeek.path("dominant_scorer").asText("");
+        if (scorerPersisted && scorerStreak >= 2 && !topScorer.isEmpty()) {
+            out.add(humanScorer(topScorer) + " dominated for the "
+                    + ordinal(scorerStreak) + " consecutive week");
+        }
+        boolean symbolPersisted = vsPriorWeek.path("top_symbol_persisted").asBoolean(false);
+        int symbolStreak = vsPriorWeek.path("top_symbol_streak").asInt(1);
+        String topSymbol = vsPriorWeek.path("top_symbol").asText("");
+        if (symbolPersisted && symbolStreak >= 2 && !topSymbol.isEmpty()) {
+            out.add(topSymbol + " led activity for the " + ordinal(symbolStreak)
+                    + " consecutive week");
+        }
+        return out;
+    }
+
+    private static String ordinal(final int n) {
+        if (n % 100 >= 11 && n % 100 <= 13) return n + "th";
+        return switch (n % 10) {
+            case 1 -> n + "st";
+            case 2 -> n + "nd";
+            case 3 -> n + "rd";
+            default -> n + "th";
+        };
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // vs_prior_week: cross-period comparison vs the prior ISO week
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Compares this week's per-scorer + top-symbol picture against the
+     * prior ISO week (weekStart - 7d). Returns null if the prior week has
+     * no selected_events (first row in dataset).
+     *
+     * <p>Persistence semantics are the narrow form: top-1 this week
+     * matches top-1 of the prior week. Streak walks backwards through
+     * weeks to find how long it's been true.
+     */
+    private static ObjectNode buildVsPriorWeek(final Connection conn,
+                                                 final LocalDate weekStart,
+                                                 final LocalDate weekEnd,
+                                                 final ArrayNode todayTopSymbols,
+                                                 final ObjectNode todayScorerMix,
+                                                 final ObjectMapper json) throws SQLException {
+        LocalDate priorWeekStart = weekStart.minusDays(7);
+        LocalDate priorWeekEnd   = weekEnd.minusDays(7);
+
+        long priorTotal = countRange(conn, priorWeekStart, priorWeekEnd);
+        if (priorTotal == 0) return null;  // first week in dataset
+
+        ObjectNode out = json.createObjectNode();
+        out.put("prior_week_start", priorWeekStart.toString());
+        out.put("prior_week_end",   priorWeekEnd.toString());
+
+        long todayTotal = countRange(conn, weekStart, weekEnd);
+        out.put("today_total_events", todayTotal);
+        out.put("prior_total_events", priorTotal);
+        out.put("total_events_pct_change", pctChange(priorTotal, todayTotal));
+
+        String todayTopScorer = topScorerInRange(todayScorerMix);
+        String priorTopScorer = topScorerForRange(conn, priorWeekStart, priorWeekEnd);
+        out.put("dominant_scorer", todayTopScorer == null ? "" : todayTopScorer);
+        out.put("prior_dominant_scorer", priorTopScorer == null ? "" : priorTopScorer);
+        boolean scorerPersisted = todayTopScorer != null && todayTopScorer.equals(priorTopScorer);
+        out.put("dominant_scorer_persisted", scorerPersisted);
+        int scorerStreak = scorerPersisted ? scorerStreakWeeks(conn, weekStart, weekEnd, todayTopScorer) : 1;
+        out.put("dominant_scorer_streak", scorerStreak);
+
+        String todayTopSymbol = topSymbolInRange(todayTopSymbols);
+        String priorTopSymbol = topSymbolForRange(conn, priorWeekStart, priorWeekEnd);
+        out.put("top_symbol", todayTopSymbol == null ? "" : todayTopSymbol);
+        out.put("prior_top_symbol", priorTopSymbol == null ? "" : priorTopSymbol);
+        boolean symbolPersisted = todayTopSymbol != null && todayTopSymbol.equals(priorTopSymbol);
+        out.put("top_symbol_persisted", symbolPersisted);
+        int symbolStreak = symbolPersisted ? symbolStreakWeeks(conn, weekStart, weekEnd, todayTopSymbol) : 1;
+        out.put("top_symbol_streak", symbolStreak);
+
+        // Per-scorer week-over-week changes.
+        ObjectNode byScorerChanges = json.createObjectNode();
+        ObjectNode priorScorerMix = scorerMixForRange(conn, priorWeekStart, priorWeekEnd, json);
+        java.util.Set<String> allScorers = new java.util.HashSet<>();
+        if (todayScorerMix != null) todayScorerMix.fieldNames().forEachRemaining(allScorers::add);
+        priorScorerMix.fieldNames().forEachRemaining(allScorers::add);
+        for (String s : allScorers) {
+            long today = todayScorerMix != null ? todayScorerMix.path(s).asLong(0) : 0;
+            long prior = priorScorerMix.path(s).asLong(0);
+            byScorerChanges.put(s, (int) (today - prior));
+        }
+        out.set("by_scorer_changes", byScorerChanges);
+
+        return out;
+    }
+
+    private static long countRange(final Connection conn,
+                                    final LocalDate from, final LocalDate to) throws SQLException {
+        try (PreparedStatement st = conn.prepareStatement(
+                "SELECT COUNT(*) FROM selected_events WHERE trading_date BETWEEN ? AND ?")) {
+            st.setObject(1, from);
+            st.setObject(2, to);
+            try (ResultSet rs = st.executeQuery()) { return rs.next() ? rs.getLong(1) : 0; }
+        }
+    }
+
+    private static String topScorerForRange(final Connection conn,
+                                              final LocalDate from, final LocalDate to) throws SQLException {
+        try (PreparedStatement st = conn.prepareStatement(
+                "SELECT scorer_id FROM selected_events WHERE trading_date BETWEEN ? AND ? "
+                  + "GROUP BY scorer_id ORDER BY COUNT(*) DESC LIMIT 1")) {
+            st.setObject(1, from);
+            st.setObject(2, to);
+            try (ResultSet rs = st.executeQuery()) { return rs.next() ? rs.getString(1) : null; }
+        }
+    }
+
+    private static String topSymbolForRange(final Connection conn,
+                                              final LocalDate from, final LocalDate to) throws SQLException {
+        try (PreparedStatement st = conn.prepareStatement(
+                "SELECT symbol FROM selected_events WHERE trading_date BETWEEN ? AND ? "
+                  + "GROUP BY symbol ORDER BY COUNT(*) DESC LIMIT 1")) {
+            st.setObject(1, from);
+            st.setObject(2, to);
+            try (ResultSet rs = st.executeQuery()) { return rs.next() ? rs.getString(1) : null; }
+        }
+    }
+
+    private static ObjectNode scorerMixForRange(final Connection conn,
+                                                  final LocalDate from, final LocalDate to,
+                                                  final ObjectMapper json) throws SQLException {
+        ObjectNode out = json.createObjectNode();
+        try (PreparedStatement st = conn.prepareStatement(
+                "SELECT scorer_id, COUNT(*) FROM selected_events "
+                  + "WHERE trading_date BETWEEN ? AND ? GROUP BY scorer_id")) {
+            st.setObject(1, from);
+            st.setObject(2, to);
+            try (ResultSet rs = st.executeQuery()) {
+                while (rs.next()) out.put(rs.getString(1), rs.getLong(2));
+            }
+        }
+        return out;
+    }
+
+    /** Walk backwards by ISO week, counting consecutive weeks where the
+     * dominant scorer equals {@code scorerId}. Capped at 26 weeks. */
+    private static int scorerStreakWeeks(final Connection conn,
+                                          final LocalDate weekStart, final LocalDate weekEnd,
+                                          final String scorerId) throws SQLException {
+        int streak = 0;
+        LocalDate s = weekStart, e = weekEnd;
+        for (int i = 0; i < 26; i++) {
+            String top = topScorerForRange(conn, s, e);
+            if (top == null || !top.equals(scorerId)) break;
+            streak++;
+            s = s.minusDays(7);
+            e = e.minusDays(7);
+        }
+        return streak;
+    }
+
+    /** Walk backwards by ISO week, counting consecutive weeks where the
+     * top symbol equals {@code symbol}. Capped at 26 weeks. */
+    private static int symbolStreakWeeks(final Connection conn,
+                                          final LocalDate weekStart, final LocalDate weekEnd,
+                                          final String symbol) throws SQLException {
+        int streak = 0;
+        LocalDate s = weekStart, e = weekEnd;
+        for (int i = 0; i < 26; i++) {
+            String top = topSymbolForRange(conn, s, e);
+            if (top == null || !top.equals(symbol)) break;
+            streak++;
+            s = s.minusDays(7);
+            e = e.minusDays(7);
+        }
+        return streak;
+    }
+
+    private static int pctChange(final long prior, final long today) {
+        if (prior == 0) return today == 0 ? 0 : 100;
+        return (int) Math.round(100.0 * (today - prior) / prior);
+    }
+
+    private static String topScorerInRange(final ObjectNode scorerMix) {
+        if (scorerMix == null || scorerMix.isMissingNode()) return null;
+        String top = null;
+        long max = 0;
+        java.util.Iterator<String> it = scorerMix.fieldNames();
+        while (it.hasNext()) {
+            String s = it.next();
+            long c = scorerMix.path(s).asLong(0);
+            if (c > max) { max = c; top = s; }
+        }
+        return top;
+    }
+
+    private static String topSymbolInRange(final ArrayNode topSymbols) {
+        if (topSymbols == null || topSymbols.size() == 0) return null;
+        return topSymbols.get(0).path("symbol").asText(null);
     }
 
     private static String humanScorer(final String scorerId) {
