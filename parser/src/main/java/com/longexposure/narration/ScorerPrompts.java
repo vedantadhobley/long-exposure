@@ -89,6 +89,24 @@ public final class ScorerPrompts {
                 renderer. Do NOT include every metric of every nested type —
                 that produces a CSV-shaped restatement, not narration.
 
+            TIME-OF-DAY CONTEXT (load-bearing — include unless absent):
+              - event_phase_label is a pre-built session-phase phrase like
+                "in the opening minutes of regular trading" / "during the
+                midday lull" / "in the final minutes before the close" /
+                "in pre-market trading" / "in the afternoon session". Every
+                non-halt event has this field populated. INCLUDE IT as one
+                of the key_numbers entries — it anchors the event in the
+                reader's mental session timeline. Render the label verbatim
+                per the categorical rule (no parenthetical session_phase
+                code).
+              - Halt events use halt_phase_span_label instead (covered in
+                the halt section); halt does NOT carry event_phase_label.
+              - Without time context, the reader sees "AMZN executed a
+                large block trade with $23M notional" and has no idea
+                whether it was at the open, midday, or close. The session
+                phase is the difference between "interesting context" and
+                "naked datum".
+
             NO INTENT, NO EXTERNAL NEWS, NO COMPARISON:
               - Do not assert intent ("the algo was trying to X",
                 "manipulation", "spoofing", "front-running").
