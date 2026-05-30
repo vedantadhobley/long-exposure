@@ -27,152 +27,23 @@ import java.util.Map;
 public final class BlueprintExtractor {
 
     /** Bump this string when the prompt or output shape changes. Used in the event_hash. */
-    public static final String PROMPT_VERSION = "extract-v11-strip-stats-jargon-2026-05-30";
+    public static final String PROMPT_VERSION = "extract-v12-per-scorer-prompts-2026-05-30";
 
-    private static final String SYSTEM_PROMPT = """
-            You are an extraction system. Given a market microstructure event with structured facts,
-            you produce a JSON blueprint that the downstream prose-rendering step will use.
-
-            STRICT RULES:
-            - Output ONLY valid JSON, no markdown fences, no preamble.
-            - Every key_numbers[].source_field MUST exactly match a key in the input breakdown.
-            - Do not invent values. Do not interpret. Do not add context outside the breakdown.
-            - If a field in the breakdown is null, do not include it in key_numbers.
-
-            JSON shape:
-            {
-              "subject": "<symbol>",
-              "what_happened": "<short noun phrase describing the event kind, e.g. 'large block trade', 'halt', 'multi-level execution sweep'>",
-              "key_numbers": [
-                {"value": "<value as it should appear in prose>", "label": "<short label like 'duration' or 'notional'>", "source_field": "<key in breakdown JSON>"}
-              ]
-            }
-
-            Include between 3 and 6 entries in key_numbers — pick the most salient facts for a 2-3 sentence narration.
-
-            HEADLINE FIELDS BY EVENT TYPE — lead key_numbers with the DEFINING fields for the event
-            type below (include them FIRST when present in the breakdown, then add supporting facts):
-            - sweep:                notional_dollars, distinct_levels, slippage_bps, effective_spread_bps
-            - large_trade:          notional_dollars, pct_of_baseline_volume
-            - volume_deviation:     deviation_x, percentile_rank
-            - liquidity_withdrawal: deletes, rate_per_sec, withdrawal_side_class, pct_of_book_removed
-            - post_cancel_cluster:  orders, order_to_trade (use `order_to_trade_phrase` when present else `order_to_trade_ratio`), median_lifetime_ms, burstiness_class (with `burstiness_fano` as the parenthetical value)
-            - layering:             orders, distinct_levels, depth_from_touch_near_bps, order_to_trade (use `order_to_trade_phrase` when present else `order_to_trade_ratio`)
-            - iceberg:              fills, total_shares, display_ratio_pct, refill_cadence_class (with `refill_cadence_cv` as the parenthetical value)
-            - halt:                 duration_humanized, halt_reason_label, halt_phase_span_label; pre_halt_spread_bps when present
-
-            SUPPORTING ANALYTICS — the breakdown carries deeper measures that sharpen the story
-            when relevant. Weave in 1-2 when they meaningfully add context — never list mechanically.
-            A paragraph that recites every metric reads like a CSV, not journalism; a paragraph
-            with a single defining number and a sharpening context-metric reads like a journalist.
-            The most useful supporting metric varies by scorer:
-            - sweep:                   pre_event_ofi (was directional flow primed?), window_realized_vol_bps (was the surrounding window volatile?), book_depth_imbalance (was the book skewed pre-event?)
-            - large_trade:             pre_event_ofi (informed flow signature?), window_realized_vol_bps
-            - post_cancel_cluster:     self_excitation (cascading triggers vs independent), arrival_autocorr (machine-paced cadence vs random), book_depth_imbalance
-            - layering:                self_excitation, arrival_autocorr, book_depth_imbalance
-            - iceberg:                 arrival_autocorr (regular refill cadence?), book_depth_imbalance
-            - liquidity_withdrawal:    book_depth_imbalance (was the withdrawal asymmetric?), pre_event_ofi
-            - halt:                    pre_event_ofi (was the book bracing before the suspension?)
-            - volume_deviation:        volume_regime_shift (sustained step shift vs one-day spike)
-
-            Slice-fragile (window_vpin, window_kyle_lambda, window_jump_ratio) are IEX-slice
-            approximations. Use only when the narrative truly needs them, and always with the
-            "on IEX" qualifier.
-
-            The `what_happened` phrase NAMES THE EVENT TYPE (from "Event type:") and is INDEPENDENT
-            of which number leads — never let a leading notional value relabel a sweep as a "block
-            trade". Use: sweep → "multi-level execution sweep"; large_trade → "large block trade";
-            layering → "layering event"; post_cancel_cluster → "post-cancel cluster"; iceberg →
-            "iceberg execution"; liquidity_withdrawal → "liquidity withdrawal"; halt → "trading
-            halt"; volume_deviation → "volume surge".
-
-            FRAMING RULES (apply in the `value` text; these change wording, not grounding):
-            - robust_z, burstiness_fano, refill_cadence_cv, withdrawal_sidedness_ratio are
-              DIMENSIONLESS. NEVER call robust_z "sigma" / "standard deviations" — its values run
-              high because volume is heavy-tailed; render it as "far above its typical range" and let
-              percentile_rank ("the busiest day in the trailing two weeks") carry the intuition.
-            - withdrawal_side_class is CATEGORICAL: render "two_sided" as "two-sided" (both bid and
-              ask pulled), "bid_side"/"ask_side" as "concentrated on the bid/ask side". Do not assert
-              intent. (Categorical key_numbers carry the label text as their value.)
-            - slippage_direction is CATEGORICAL ("up"/"down"/"flat"); pair it with slippage_bps
-              (e.g. "walked 11.0 bps up across N levels").
-            - burstiness_class is the ANCHORED LABEL ("highly bursty" / "moderately bursty" /
-              "weakly bursty" / "Poisson-like"). Render the LABEL ALONE — e.g.
-              "moderately bursty arrival" or "the cluster was weakly bursty". DO NOT include
-              the burstiness_fano numeric value as a parenthetical. "(Fano 4.79)" is
-              statistician variable jargon that reads poorly to a general audience; the
-              anchored class label already carries the journalistic claim. The raw
-              burstiness_fano value lives in the breakdown for analyst drill-down. The same
-              rule applies to omitting burstiness_fano from key_numbers when burstiness_class
-              is present.
-            - refill_cadence_class is the ANCHORED LABEL for iceberg inter-fill cadence
-              ("metronomic" / "regular" / "irregular" / "erratic"). Render the LABEL ALONE —
-              e.g. "erratic refills" or "the order saw irregular cadence". DO NOT include
-              refill_cadence_cv as a parenthetical. "(CV 4.58)" is statistician jargon. The
-              class label carries the meaning; the CV value lives in the breakdown for
-              drill-down. Same: omit refill_cadence_cv from key_numbers when
-              refill_cadence_class is present.
-            - order_to_trade_phrase is the narrator-friendly rendering for the 0-fills case
-              (value like "no fills against 187 posted orders"); when present, USE IT verbatim
-              instead of "order-to-trade ratio of infinite". Falls back to `order_to_trade_ratio`
-              for finite values.
-            - book-state stats (present only when the symbol had a live IEX book):
-              depth_from_touch_near_bps/far_bps → "the layered band sat N-M bps off the touch";
-              pre_halt_spread_bps → "the spread was N bps when trading halted";
-              pct_of_book_removed → "pulled N% of displayed depth".
-            - co_occurring `sum_deletes` (under liquidity_withdrawal) is a COUNT OF
-              CANCELLED ORDERS, not a share count. Render as "N deletes" / "cancelled
-              N orders" / "removed N orders" — NEVER as "N shares". (The layering and
-              post_cancel_cluster co_occurring blocks carry both `sum_orders` and
-              `sum_total_shares` separately, so for those, distinguish the two.)
-            - CO_OCCURRING ENUMERATION LIMIT (v11): the breakdown's co_occurring block
-              may contain multiple nested scorer types (layering + post_cancel_cluster +
-              liquidity_withdrawal all firing inside a parent iceberg or withdrawal).
-              When extracting key_numbers from co_occurring data, INCLUDE AT MOST 3
-              entries total across all nested types — pick the two or three most
-              salient counts (e.g., the dominant scorer type's order count + share
-              count + one secondary type's count). The downstream renderer puts
-              these into ONE summary sentence. Do not include every metric of every
-              co_occurring scorer type — that produces a CSV-shaped sentence
-              enumerating each type, which reads as restatement, not narration.
-            - pre_event_ofi_class is the ANCHORED LABEL ("buyer-leaning"/"seller-leaning"/
-              "balanced") for the OFI value. Lead with the WORD and add the bare value as
-              parenthetical, e.g. "the book was seller-leaning (OFI −0.42) before the sweep"
-              or "buyer-leaning (OFI 0.6) ahead of the print". When pre_event_ofi_class is
-              "balanced", the book was roughly even — skip the metric (no signal).
-            - window_realized_vol_bps is the surrounding-window realized volatility in basis
-              points. Render as "realized vol ran N bps in the window" or context-anchored
-              ("the surrounding minute carried N bps of vol, well above the day's baseline").
-            - self_excitation ∈ [0, 1] is the Hawkes branching-ratio estimate: fraction of
-              orders triggered by prior orders. > 0.6 = "the burst self-excited — N% of orders
-              triggered by prior arrivals" (cascading shape); 0.3-0.6 = "moderate self-
-              excitation"; near zero = "arrivals were largely independent". When near zero,
-              omit (no signal).
-              When > 0.6 and arrival_autocorr is also high, the cadence was both cascading
-              AND machine-paced — say so.
-            - arrival_autocorr ∈ [−1, +1] is the lag-1 autocorrelation of inter-arrival gaps.
-              > 0.5 = "machine-paced (autocorr 0.7)" — a fixed-beat algo. Between −0.2 and
-              +0.2 = "near-Poisson arrivals (autocorr ~0)" or omit. Highly negative is rare
-              and not worth rendering.
-            - book_depth_imbalance_class is the ANCHORED LABEL ("bid-skewed"/"ask-skewed"/
-              "balanced") for the displayed-depth ratio at event-time. Lead with the WORD
-              and add the bare value as parenthetical: "the book was bid-skewed (imbalance
-              0.43)" or "displayed depth was ask-skewed before the print". When the class
-              is "balanced", skip the metric.
-            - volume_regime_shift is the CUSUM-style detector of a SUSTAINED step in a
-              symbol's trailing-window volume. Use it to distinguish "today was a one-day
-              spike" from "today marks a regime shift": "the surge was a sustained step, not
-              a one-day spike" when the shift is high; "an isolated one-day spike" otherwise.
-            - halt_phase_span_label is a COMPLETE GRAMMATICAL PHRASE describing when in the
-              session the halt ran ("lasting through midday" / "starting in pre-market trading
-              and resuming around midday" / "starting in pre-market trading with no resume in
-              the window"). USE IT VERBATIM as the timing of the halt — e.g. "Genomic Solutions
-              (GMRS) was halted, lasting through midday" or "AMD (AMD) was halted starting in
-              pre-market trading and resuming around midday." DO NOT combine halt_start_phase_label
-              + halt_end_phase_label by hand; those are drill-down-only fields and stitching them
-              produces ungrammatical bridges ("began in pre-market to midday"). The span label
-              already encodes the duration story grammatically — let it carry it.
-            """;
+    /*
+     * v12 (2026-05-30) — Refactor A. Replaces the v10/v11 universal 200-line
+     * SYSTEM_PROMPT (one block, per-scorer FRAMING RULES weaved throughout)
+     * with per-scorer prompts assembled at call time:
+     *   ScorerPrompts.COMMON_PREAMBLE + ScorerPrompts.forScorer(id).scorerSection()
+     *
+     * Each scorer's section is ~15-25 lines and only mentions fields that
+     * scorer actually emits. The framing-rule sprawl that grew with every
+     * analytical-field addition is gone — adding a new field now touches
+     * exactly the scorer(s) that emit it. See ScorerPrompts.java.
+     *
+     * The pre-refactor SYSTEM_PROMPT (v10/v11) is preserved in git history
+     * at commit 869b788 for the inevitable "what did it look like before?"
+     * audit.
+     */
 
     private final LlamaClient llama;
     private final ObjectMapper json;
@@ -190,15 +61,23 @@ public final class BlueprintExtractor {
      * @return parsed blueprint JsonNode. Throws if the model output is not parseable JSON.
      */
     public JsonNode extract(final String scorerId, final String symbol, final JsonNode breakdown) {
+        // v12 — assemble system prompt from the universal preamble + the
+        // scorer-specific section. Each scorer's section names its required
+        // noun phrase, its headline fields, and only the framing rules that
+        // apply to fields it actually emits.
+        ScorerPrompts.ScorerPrompt prompt = ScorerPrompts.forScorer(scorerId);
+        String systemPrompt = ScorerPrompts.COMMON_PREAMBLE + "\n\n" + prompt.scorerSection();
+
         String userPrompt =
                 "Event type: " + scorerId + "\n" +
+                "Required noun phrase for what_happened: \"" + prompt.eventNoun() + "\"\n" +
                 "Symbol: " + symbol + "\n" +
                 "Breakdown (input — every source_field must be a key here):\n" +
                 breakdown.toPrettyString();
 
         // EXTRACT preset: low temperature + Qwen instruct base. Pass-1 wants
         // deterministic JSON, not prose variety, so presence_penalty is 0.
-        String raw = llama.chat(SYSTEM_PROMPT, userPrompt, SamplingParams.EXTRACT);
+        String raw = llama.chat(systemPrompt, userPrompt, SamplingParams.EXTRACT);
         JsonNode blueprint = parseJson(raw);
 
         // Pass-through fields the renderer needs but the extractor

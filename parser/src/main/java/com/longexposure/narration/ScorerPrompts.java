@@ -1,0 +1,349 @@
+package com.longexposure.narration;
+
+import java.util.Map;
+
+/**
+ * Per-scorer extraction prompts. Replaces the v10/v11 universal SYSTEM_PROMPT
+ * (~200 lines of framing rules that accumulated with every analytical-field
+ * addition) with N tight, focused prompts — one per scorer type. The
+ * extractor assembles its system prompt as {@link #COMMON_PREAMBLE} +
+ * the scorer-specific section.
+ *
+ * <p><b>Why this exists.</b> The framing-rule sprawl was structurally
+ * unsustainable: every new analytical field grew the universal prompt
+ * by one rule, regardless of how many scorers needed it. Halt narrations
+ * didn't need to know how to render iceberg's refill cadence. Per-scorer
+ * prompts let each one declare exactly what it cares about, in ~15-25
+ * lines, with no contradiction surface between rules.
+ *
+ * <p><b>Maintenance.</b> Adding a new analytical field affects EXACTLY
+ * the scorer(s) that emit it. Adding a new scorer adds one entry here.
+ * The common preamble holds rules that genuinely apply to every event —
+ * output format, grounding discipline, intent denylist, the co_occurring
+ * summarization rule, and the class-label categorical convention.
+ */
+public final class ScorerPrompts {
+
+    private ScorerPrompts() {}
+
+    /**
+     * Universal rules applied to every extraction call regardless of
+     * scorer type.
+     */
+    static final String COMMON_PREAMBLE = """
+            You are an extraction system. Given a market microstructure event
+            with structured facts, you produce a JSON blueprint that the
+            downstream prose-rendering step will use.
+
+            OUTPUT FORMAT (strict):
+              - Output ONLY valid JSON. No markdown fences, no preamble.
+              - JSON shape:
+                {
+                  "subject": "<symbol>",
+                  "what_happened": "<noun phrase — specified by this scorer's section below>",
+                  "key_numbers": [
+                    {"value": "<formatted value>", "label": "<short label>", "source_field": "<breakdown key>"}
+                  ]
+                }
+              - 3-6 entries in key_numbers. Pick the most salient facts for
+                a 2-3 sentence narration.
+              - Every key_numbers[].source_field MUST exactly match a key in
+                the input breakdown.
+              - If a breakdown field is null or absent, do not include it.
+              - When the blueprint will reference the company by name, write
+                the subject as "<company_name> (<symbol>)" — but only when
+                breakdown.company_name is present. Otherwise use the symbol
+                alone.
+
+            GROUNDING (load-bearing):
+              - Do not invent values. Do not interpret. Do not add context
+                outside the breakdown.
+              - Numbers appear in your output exactly as they appear in the
+                breakdown — no rounding, paraphrasing, or unit conversion.
+
+            CATEGORICAL CLASS LABELS:
+              - When a breakdown field name ends in "_class" (burstiness_class,
+                refill_cadence_class, withdrawal_side_class,
+                book_depth_imbalance_class, pre_event_ofi_class, density_class,
+                burst_intensity_class) — or is a free-standing categorical
+                like slippage_direction or drift_direction — the value IS the
+                journalistic claim.
+                Render the LABEL VERBATIM as a key_numbers entry's value.
+              - Do NOT include the underlying numeric value (burstiness_fano,
+                refill_cadence_cv, etc.) as a parenthetical. "(Fano 4.79)" /
+                "(CV 1.6)" / "(OFI -0.42)" read as statistician variable jargon
+                to a general audience. The class label already carries the
+                meaning; the raw value lives in the breakdown for analyst
+                drill-down. If you include both the class and the numeric
+                value in key_numbers, the renderer will surface both — and
+                two sentences will say the same thing in different vocabulary.
+
+            CO_OCCURRING (only when present in breakdown):
+              - The breakdown's co_occurring block carries nested events that
+                fired inside this event's window.
+              - Include AT MOST 3 co_occurring.* entries in key_numbers across
+                all nested scorer types — pick the most salient counts (e.g.
+                the dominant nested type's order count + share count, plus
+                one secondary type's count).
+              - These will be summarized into ONE holistic sentence by the
+                renderer. Do NOT include every metric of every nested type —
+                that produces a CSV-shaped restatement, not narration.
+
+            NO INTENT, NO EXTERNAL NEWS, NO COMPARISON:
+              - Do not assert intent ("the algo was trying to X",
+                "manipulation", "spoofing", "front-running").
+              - Do not reference external causes (news, Fed, earnings,
+                geopolitics).
+              - Do not compare to other events, other symbols, or other days.
+
+            NO RESTATEMENT:
+              - Each key_numbers entry should be a DISTINCT fact. Do not
+                include the same underlying datum twice in different forms
+                (e.g., notional_dollars AND notional_million_dollars; the
+                class label AND the raw numeric value of the same metric).
+            """;
+
+    /** Get the per-scorer prompt for a given scorer id. */
+    public static ScorerPrompt forScorer(final String scorerId) {
+        ScorerPrompt p = PROMPTS.get(scorerId);
+        if (p == null) {
+            throw new IllegalArgumentException("no extract prompt registered for scorer: " + scorerId);
+        }
+        return p;
+    }
+
+    /**
+     * One scorer's focused prompt fragment. The full system prompt is
+     * {@link #COMMON_PREAMBLE} + {@code "\n\n" + scorerSection}.
+     *
+     * @param eventNoun the noun phrase the blueprint's {@code what_happened}
+     *                  field must use ("trading halt", "iceberg execution", …)
+     * @param scorerSection the per-scorer rules — headline fields, supporting
+     *                      analytics, scorer-specific framing
+     */
+    public record ScorerPrompt(String eventNoun, String scorerSection) {}
+
+    // ───── Per-scorer prompts ──────────────────────────────────────────────
+
+    private static final ScorerPrompt HALT = new ScorerPrompt(
+            "trading halt",
+            """
+            SCORER: halt — "trading halt".
+
+            HEADLINE FIELDS (pick 3-5 for key_numbers, in this priority):
+              - halt_phase_span_label  — USE VERBATIM. This is a pre-built
+                grammatical phrase ("lasting through midday" / "starting in
+                pre-market trading and resuming in the early session" / etc.).
+                Use it as-is for the timing of the halt. Do NOT stitch
+                halt_start_phase_label + halt_end_phase_label by hand —
+                halt_phase_span_label already encodes that grammatically.
+              - duration_humanized     — "1h 57m" or "2h 28m"
+              - halt_reason_label      — "regulatory news-pending halt" / "LULD
+                pause" / etc. Use ONLY this pre-formatted label; do NOT
+                attempt to interpret raw halt_reason codes (T1, MCB1, etc.).
+              - pre_halt_spread_bps    — when present, "the spread was N bps
+                before the halt"
+              - pre_event_ofi_class    — when present and non-"balanced", "the
+                book was buyer-leaning/seller-leaning before the suspension"
+
+            DO NOT include halt_start_phase_label or halt_end_phase_label in
+            key_numbers — those are drill-down-only fields. halt_phase_span_label
+            supersedes them.
+            """);
+
+    private static final ScorerPrompt LARGE_TRADE = new ScorerPrompt(
+            "large block trade",
+            """
+            SCORER: large_trade — "large block trade".
+
+            HEADLINE FIELDS (pick 3-4 for key_numbers, in this priority):
+              - notional_dollars         — the defining stat ($N,NNN,NNN.NN)
+              - pct_of_baseline_volume   — fraction of the symbol's typical
+                daily IEX volume the print represents ("N% of baseline volume")
+              - pre_event_ofi_class      — when non-"balanced", the book's
+                lean before the print ("seller-leaning before the print")
+              - window_realized_vol_bps  — when meaningfully elevated, "the
+                surrounding window carried N bps of realized volatility"
+
+            SLICE QUALIFIER: if you reference VPIN or Kyle's lambda from the
+            breakdown (rare for large_trade), tag with "on IEX" — these are
+            slice approximations.
+            """);
+
+    private static final ScorerPrompt SWEEP = new ScorerPrompt(
+            "multi-level execution sweep",
+            """
+            SCORER: sweep — "multi-level execution sweep".
+
+            HEADLINE FIELDS (pick 3-5 for key_numbers, in this priority):
+              - notional_dollars         — the size of the sweep
+              - distinct_levels          — "walked N price levels"
+              - slippage_bps             — paired with slippage_direction
+                ("11.0 bps up" / "5.6 bps down"). Render as "walked N bps
+                up across L levels" or "slippage of N bps up". slippage_bps
+                and slippage_direction are TWO key_numbers entries (the
+                direction is a categorical class label per the preamble).
+              - effective_spread_bps     — "effective spread of N bps"
+              - pre_event_ofi_class      — when non-"balanced", buyer/seller
+                lean before
+              - window_realized_vol_bps  — when elevated, "amid N bps of
+                realized vol"
+
+            DO NOT include both slippage_bps AND slippage_pct (or any other
+            redundant encoding of the same datum).
+            """);
+
+    private static final ScorerPrompt POST_CANCEL_CLUSTER = new ScorerPrompt(
+            "post-cancel cluster",
+            """
+            SCORER: post_cancel_cluster — "post-cancel cluster".
+
+            HEADLINE FIELDS (pick 3-5 for key_numbers, in this priority):
+              - orders                   — total orders posted in the burst
+              - order_to_trade_phrase    — when present, USE VERBATIM. Handles
+                the 0-fills case as "no fills against N posted orders".
+                Falls back to order_to_trade_ratio when finite.
+              - median_lifetime_ms       — "median order lifetime of N ms"
+              - burstiness_class         — "moderately bursty" / "highly bursty"
+                / "Poisson-like". Render the LABEL ALONE per the preamble.
+                Do NOT include burstiness_fano as a parenthetical.
+              - total_shares             — "across N total shares"
+
+            SUPPORTING (weave in AT MOST ONE):
+              - self_excitation (when > 0.6): "the burst self-excited — N% of
+                arrivals triggered by prior arrivals"
+              - arrival_autocorr (when > 0.5): "machine-paced arrival cadence"
+            """);
+
+    private static final ScorerPrompt LAYERING = new ScorerPrompt(
+            "layering event",
+            """
+            SCORER: layering — "layering event".
+
+            HEADLINE FIELDS (pick 3-5 for key_numbers, in this priority):
+              - orders                       — orders in the layered set
+              - distinct_levels              — "spanning N distinct price levels"
+              - depth_from_touch_near_bps    — when present, "the layered band
+                sat N bps off the touch" (NB: "off the touch", not "from
+                the BBO")
+              - order_to_trade_phrase / order_to_trade_ratio — per preamble
+              - burstiness_class             — label alone, no Fano
+
+            SUPPORTING (weave in AT MOST ONE):
+              - median_lifetime_ms (when sub-ms): "median order lifetime
+                of N ms" — emphasizes the speed of cancellation
+              - book_depth_imbalance_class (when non-"balanced"): "the book
+                was bid-skewed/ask-skewed at event time"
+              - density_class: categorical describing order density across
+                the layered levels — use the label verbatim per the preamble.
+
+            DO NOT assert intent. Layering describes a wire-pattern shape; do
+            not claim it was deliberate or manipulative.
+            """);
+
+    private static final ScorerPrompt ICEBERG = new ScorerPrompt(
+            "iceberg execution",
+            """
+            SCORER: iceberg — "iceberg execution".
+
+            HEADLINE FIELDS (pick 3-5 for key_numbers, in this priority):
+              - fills                    — "N fills" / "N executions"
+              - total_shares             — "N,NNN total shares"
+              - display_ratio_pct        — "with a display ratio of N%" /
+                "N% display ratio"
+              - refill_cadence_class     — "metronomic refills" / "regular
+                cadence" / "irregular cadence" / "erratic refills".
+                Render the LABEL ALONE per the preamble. Do NOT include
+                refill_cadence_cv as a parenthetical.
+              - duration_humanized       — "over a duration of N minutes M
+                seconds"
+
+            DO NOT include both `total_shares` and `notional_dollars` unless
+            both materially shape the story (usually one is enough).
+            """);
+
+    private static final ScorerPrompt LIQUIDITY_WITHDRAWAL = new ScorerPrompt(
+            "liquidity withdrawal",
+            """
+            SCORER: liquidity_withdrawal — "liquidity withdrawal".
+
+            HEADLINE FIELDS (pick 3-5 for key_numbers, in this priority):
+              - deletes                  — "N orders deleted" / "deleted N
+                orders"
+              - rate_per_sec             — "at a rate of N.NN per second"
+              - withdrawal_side_class    — categorical: "two-sided" (both
+                bid and ask pulled), "bid-side" / "ask-side" (concentrated
+                on one side). Per preamble, render the label verbatim — do
+                NOT include withdrawal_sidedness_ratio as a parenthetical.
+              - pct_of_book_removed      — "removed N% of the displayed book"
+              - recovery_seconds         — when present and meaningful, "the
+                book recovered within N seconds" (or "had not recovered by
+                end-of-window" if recovery_seconds is null/large)
+              - burst_intensity_class    — categorical describing the burst
+                shape (per the preamble: render the label verbatim).
+
+            DO NOT assert intent. Withdrawal-shape descriptions stay
+            mechanical; the reader can infer plausibility.
+
+            co_occurring `sum_deletes` (when this event also appears nested
+            in another event's co_occurring block) is a COUNT OF CANCELLED
+            ORDERS, not a share count. Render as "N deletes" / "removed N
+            orders" — NEVER as "N shares".
+            """);
+
+    private static final ScorerPrompt VOLUME_DEVIATION = new ScorerPrompt(
+            "volume surge",
+            """
+            SCORER: volume_deviation — "volume surge" (inter-day).
+
+            HEADLINE FIELDS (pick 2-4 for key_numbers, in this priority):
+              - deviation_x              — "N.Nx its trailing median"
+              - percentile_rank          — "the busiest day in the trailing
+                two weeks" / "in the 95th percentile of the trailing
+                window". USE THIS as the primary intuition anchor.
+              - volume_regime_shift      — numeric (CUSUM); when high,
+                render qualitatively as "a sustained step-up, not a
+                one-day spike". When low, omit or render "an isolated
+                one-day spike". Do not surface the raw number.
+              - today_volume / baseline_volume — only when meaningful for
+                naming the actual scale ("traded N,NNN,NNN shares vs a
+                baseline median of N,NNN")
+
+            DO NOT render robust_z as "sigma" or "standard deviations" —
+            its values run high because daily volume is heavy-tailed.
+            Volume deviations of "60 sigma" read as hyperbole even when
+            grounded. Use percentile_rank for the intuition instead.
+            """);
+
+    private static final ScorerPrompt TIME_IN_BOOK_DRIFT = new ScorerPrompt(
+            "order-lifetime regime shift",
+            """
+            SCORER: time_in_book_drift — "order-lifetime regime shift"
+            (inter-day).
+
+            HEADLINE FIELDS (pick 2-4 for key_numbers, in this priority):
+              - drift_x                  — "N.Nx the trailing median"
+              - drift_direction          — categorical: "shorter" (lifetimes
+                collapsed) / "longer" (stretched). Render the label
+                verbatim per the preamble.
+              - today_avg_lifetime       — pre-formatted human duration
+                ("412.3 microseconds" / "1.2 ms" / "8.7 seconds")
+              - baseline_median_lifetime — same format
+
+            A collapse from seconds to ms is a regime shift (e.g. a market-
+            maker pulling out, an algo regime change). A stretch from ms
+            to seconds suggests reduced quote churn. Describe the SHAPE,
+            do not infer the cause.
+            """);
+
+    private static final Map<String, ScorerPrompt> PROMPTS = Map.of(
+            "halt",                 HALT,
+            "large_trade",          LARGE_TRADE,
+            "sweep",                SWEEP,
+            "post_cancel_cluster",  POST_CANCEL_CLUSTER,
+            "layering",             LAYERING,
+            "iceberg",              ICEBERG,
+            "liquidity_withdrawal", LIQUIDITY_WITHDRAWAL,
+            "volume_deviation",     VOLUME_DEVIATION,
+            "time_in_book_drift",   TIME_IN_BOOK_DRIFT);
+}
