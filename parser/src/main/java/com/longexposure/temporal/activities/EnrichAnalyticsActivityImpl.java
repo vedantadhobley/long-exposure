@@ -158,9 +158,12 @@ public final class EnrichAnalyticsActivityImpl implements EnrichAnalyticsActivit
         if (classified == 0) return;   // all cancels were of prior-day adds; leave untouched
 
         Analytics.OneSidedness os = Analytics.oneSidedness(bid, ask);
-        String sideClass = os.ratio() < TWO_SIDED_CUTOFF ? "two_sided"
-                : "buy".equals(os.dominant())  ? "bid_side"
-                : "sell".equals(os.dominant()) ? "ask_side" : "two_sided";
+        // v14 (2026-05-30): prose-ready hyphenated values. v13 used
+        // underscored "two_sided"/"bid_side"/"ask_side" which leaked
+        // into prose with underscores when the model didn't translate.
+        String sideClass = os.ratio() < TWO_SIDED_CUTOFF ? "two-sided"
+                : "buy".equals(os.dominant())  ? "bid-side"
+                : "sell".equals(os.dominant()) ? "ask-side" : "two-sided";
 
         add.put("side_classified_cancels",   BreakdownFmt.formatCount(classified));
         add.put("bid_side_cancels",          BreakdownFmt.formatCount(bid));
