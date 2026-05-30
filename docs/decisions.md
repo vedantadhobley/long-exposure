@@ -6,6 +6,81 @@ Append-only record of architectural and operational decisions, ordered by date. 
 
 ---
 
+## 2026-05-30 (later) — Pre-format awkward values at the data layer, not in the prompt
+
+Five prompt iterations in one night (extract-v10 → v11 → v12 → v13 → v14)
+each tried to fix prose-quality issues. The ones that survived were the
+ones that pushed the fix DOWN into the data layer — scorer code or
+enrichment activity. The ones that didn't survive were attempts to
+instruct the model to translate awkward strings inline. Codify this as
+a project-wide pattern.
+
+**The pattern.** When the model produces prose-quality output you don't
+like — snake_case leakage, jargon parentheticals, missing context, etc.
+— the structural fix is to pre-format the awkward value into prose-
+ready form at the scorer (or enrichment activity) and reference the
+new field in the prompt. NOT to add another translation rule to the
+prompt.
+
+**Concrete examples from tonight (extract-v10 → v14).**
+
+| Symptom in v10 prose | Wrong fix (band-aid) | Right fix (structural) |
+|---|---|---|
+| "moderately bursty (Fano 4.79)" reads as stats jargon | "tell the model to lead with the WORD and add a parenthetical for grounding" — but the very parenthetical is the leak | v12: prompt instructs "render the LABEL ALONE; omit burstiness_fano from key_numbers when burstiness_class is present"; the class IS the journalistic claim |
+| "halt began in pre-market to midday" reads as stitched fragments | "tell the model to use halt_start_phase_label + halt_end_phase_label and combine grammatically" | v7: scorer (`HaltScorer`) pre-builds `halt_phase_span_label` ("starting in pre-market trading and resuming around midday"); model uses verbatim |
+| "representing half_to_full_session duration bucket" leaks snake_case | "tell the model to translate underscores to prose" — inconsistent because the model decides case-by-case | v14: scorer adds `halt_duration_bucket_label` with prose phrases; raw bucket stays for drill-down |
+| "halted at 07:07:47.519 ET" leaks milliseconds | "tell the model to truncate to HH:MM" — but the model would still see the raw value in the breakdown | v14: `BreakdownFmt.toEtTime()` format changed `HH:mm:ss.SSS` → `HH:mm` universally; model sees only minute precision |
+| `withdrawal_side_class` value `"two_sided"` leaks underscore | "tell the model to render two_sided as two-sided" — caught most of the time, missed occasionally | v14: `EnrichAnalyticsActivityImpl` writes "two-sided" directly; nothing for the model to translate |
+| Per-symbol per-scorer count fabrication in synth | "inject a truth table in the prompt" (v8/v9) | v10: prompt forbids the entire count-claim pattern; AttributionVerifier survives as safety net but should have nothing to catch |
+| Co_occurring multi-sentence enumeration | "tell the model EXACTLY ONE sentence" — the model interprets this as "the rendering, which may span periods" | render-v11: schema `maxLength: 250` on co_occurring field; sampler physically refuses to emit a longer string |
+
+**Why prompt rules don't survive iteration**
+
+Each new analytical-field addition (the 2026-05-27 analytics suite,
+the 2026-05-28 class labels, etc.) drove a corresponding prompt rule.
+By v11 the universal `SYSTEM_PROMPT` had 200 lines of `FRAMING RULES`
+that sometimes contradicted each other ("include the parenthetical
+for grounding" vs "lead with the WORD alone"). Refactor A (v12) split
+this into per-scorer prompts which eliminated cross-scorer
+contradiction but didn't eliminate the underlying issue — the
+data was carrying jargon-format values that the model was being asked
+to translate, and the model was inconsistent.
+
+Pre-formatting at the data layer is the structural answer because:
+- The model can't render what isn't in the breakdown.
+- The translation is deterministic (Java code) instead of probabilistic (LLM judgment).
+- The class label IS the journalistic claim — no separate "narrative form" needed.
+- Drill-down still has the raw value if an analyst wants it.
+
+**The minimal pre-format protocol.**
+
+For any new categorical or formatted field a scorer emits:
+1. Choose the field VALUES to be the prose-ready form ("two-sided" not "two_sided", "highly bursty" not "highly_bursty").
+2. If the field has multiple intended audiences (prose narration vs analyst drill-down), emit BOTH forms with distinct names — `halt_duration_bucket` (raw, for drill-down) + `halt_duration_bucket_label` (prose-ready).
+3. Update the per-scorer extract prompt section to reference the prose-ready field name.
+4. The model's job is now "render the LABEL verbatim per the categorical rule" — no translation surface.
+
+**When NOT to pre-format.**
+
+Some values shouldn't be pre-formatted because their numeric form IS
+the journalistic claim:
+- Notional dollars: `$23,703,333.03` (BreakdownFmt.formatDollars).
+- Counts: "7,668 orders deleted" (formatCount).
+- Percentages: "23.8% of displayed depth" (numeric, model renders fine).
+- Durations: "5 minutes 20 seconds" (duration_humanized).
+
+The rule of thumb: if there's a NUMBER the journalist would naturally
+write, pass it pre-formatted. If there's a CATEGORICAL that has a
+short awkward identifier (snake_case, abbreviation, code), pre-format
+to a prose-ready phrase or rename the values to the prose form.
+
+**Apply this going forward.** New scorer or new analytical field → if
+it has a snake_case categorical or a unit that needs explanation,
+add the prose-ready label to the breakdown at score-time. Don't ask
+the prompt to translate.
+
+---
+
 ## 2026-05-30 — Refactor A: per-scorer extract prompts replace the 200-line universal `SYSTEM_PROMPT`
 
 The structural fix to a prompt-engineering iteration cycle that had
