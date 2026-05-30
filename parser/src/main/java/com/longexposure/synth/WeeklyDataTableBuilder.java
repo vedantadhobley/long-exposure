@@ -54,7 +54,7 @@ public final class WeeklyDataTableBuilder {
 
     private static final int HEADLINE_LIMIT = 10;
     private static final int TOP_SYMBOLS_LIMIT = 10;
-    private static final int EXEC_SUMMARY_MAX_BULLETS = 4;
+    private static final int EXEC_SUMMARY_MAX_BULLETS = 5;
 
     private WeeklyDataTableBuilder() {}
 

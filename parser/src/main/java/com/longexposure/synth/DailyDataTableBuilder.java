@@ -1,5 +1,6 @@
 package com.longexposure.synth;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -10,6 +11,8 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Builds the structured journalist-format data table that renders ABOVE the
@@ -63,6 +66,9 @@ public final class DailyDataTableBuilder {
     /** How many top symbols (by narrated event count) to include in day_summary. */
     private static final int TOP_SYMBOLS_LIMIT = 10;
 
+    /** Cap on executive_summary bullets — same as weekly. */
+    private static final int EXEC_SUMMARY_MAX_BULLETS = 5;
+
     private DailyDataTableBuilder() {}
 
     public static ObjectNode build(final Connection conn,
@@ -70,11 +76,146 @@ public final class DailyDataTableBuilder {
                                     final ObjectMapper json) throws SQLException {
         ObjectNode root = json.createObjectNode();
         root.put("trading_date", tradingDate.toString());
-        root.set("headline", buildHeadline(conn, tradingDate, json));
-        root.set("per_scorer_top", buildPerScorerTop(conn, tradingDate, json));
-        root.set("day_summary", buildDaySummary(conn, tradingDate, json));
-        root.set("notable_extremes", buildNotableExtremes(conn, tradingDate, json));
+        ObjectNode daySummary = buildDaySummary(conn, tradingDate, json);
+        ObjectNode extremes   = buildNotableExtremes(conn, tradingDate, json);
+
+        // Executive summary derived from day_summary + extremes —
+        // deterministic, no LLM. Renders ABOVE the synth prose for the
+        // 5-second skim before reading the paragraph.
+        root.set("executive_summary",
+                buildExecutiveSummary(daySummary, extremes, json));
+        root.set("headline",          buildHeadline(conn, tradingDate, json));
+        root.set("per_scorer_top",    buildPerScorerTop(conn, tradingDate, json));
+        root.set("day_summary",       daySummary);
+        root.set("notable_extremes",  extremes);
         return root;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Executive summary — up to 5 deterministic bullets for the 5-sec skim
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private static ArrayNode buildExecutiveSummary(final ObjectNode daySummary,
+                                                    final ObjectNode extremes,
+                                                    final ObjectMapper json) {
+        ArrayNode bullets = json.createArrayNode();
+        List<String> candidates = new ArrayList<>();
+
+        // Bullet 1 — most-active symbol with event count.
+        ArrayNode topSymbols = (ArrayNode) daySummary.path("top_symbols");
+        if (topSymbols != null && topSymbols.size() > 0) {
+            JsonNode top = topSymbols.get(0);
+            String sym = top.path("symbol").asText("");
+            long events = top.path("events").asLong(0);
+            if (!sym.isEmpty() && events > 0) {
+                candidates.add(sym + " led the day with " + events + " events");
+            }
+        }
+
+        // Bullet 2 — dominant scorer for the day.
+        ObjectNode byScorer = (ObjectNode) daySummary.path("by_scorer");
+        if (byScorer != null && !byScorer.isMissingNode()) {
+            String topScorer = null;
+            long topScorerCount = 0;
+            java.util.Iterator<String> sit = byScorer.fieldNames();
+            while (sit.hasNext()) {
+                String s = sit.next();
+                long c = byScorer.path(s).asLong(0);
+                if (c > topScorerCount) { topScorerCount = c; topScorer = s; }
+            }
+            if (topScorer != null && topScorerCount > 0) {
+                candidates.add(humanScorer(topScorer) + " dominated ("
+                        + topScorerCount + " events)");
+            }
+        }
+
+        // Bullet 3 — largest block trade.
+        JsonNode largestBlock = extremes.path("largest_notional_block");
+        if (largestBlock.isObject()) {
+            String sym   = largestBlock.path("symbol").asText("");
+            String value = largestBlock.path("value").asText("");
+            if (!sym.isEmpty() && !value.isEmpty()) {
+                candidates.add("Largest block: " + sym + " " + value);
+            }
+        }
+
+        // Bullet 4 — longest halt.
+        JsonNode longestHalt = extremes.path("longest_halt");
+        if (longestHalt.isObject()) {
+            String sym   = longestHalt.path("symbol").asText("");
+            String value = longestHalt.path("value").asText("");
+            if (!sym.isEmpty() && !value.isEmpty()) {
+                candidates.add("Longest halt: " + sym + " " + value);
+            }
+        }
+
+        // Bullet 5 — wildcard "wow" stat: pick from highest_volume_deviation,
+        // biggest_lifetime_drift, largest_pct_depth_removed, deepest_sweep
+        // (whichever fired with the most striking magnitude).
+        String wildcardBullet = wildcardExtremeBullet(extremes);
+        if (wildcardBullet != null) candidates.add(wildcardBullet);
+
+        for (int i = 0; i < Math.min(candidates.size(), EXEC_SUMMARY_MAX_BULLETS); i++) {
+            bullets.add(candidates.get(i));
+        }
+        return bullets;
+    }
+
+    /**
+     * Pick the most striking extreme that hasn't already been covered by
+     * bullets 3-4. Volume deviation typically reads strongest at multi-x
+     * magnitudes, then lifetime drift, then depth removal, then deepest sweep.
+     * Order is deterministic — picks the first one present in extremes.
+     */
+    private static String wildcardExtremeBullet(final ObjectNode extremes) {
+        JsonNode volDev = extremes.path("highest_volume_deviation");
+        if (volDev.isObject()) {
+            String sym = volDev.path("symbol").asText("");
+            String v   = volDev.path("value").asText("");
+            if (!sym.isEmpty() && !v.isEmpty()) {
+                return "Volume surge: " + sym + " " + v + "x baseline";
+            }
+        }
+        JsonNode drift = extremes.path("biggest_lifetime_drift");
+        if (drift.isObject()) {
+            String sym = drift.path("symbol").asText("");
+            String v   = drift.path("value").asText("");
+            if (!sym.isEmpty() && !v.isEmpty()) {
+                return "Order-lifetime shift: " + sym + " " + v + "x";
+            }
+        }
+        JsonNode depth = extremes.path("largest_pct_depth_removed");
+        if (depth.isObject()) {
+            String sym = depth.path("symbol").asText("");
+            String v   = depth.path("value").asText("");
+            if (!sym.isEmpty() && !v.isEmpty()) {
+                return "Deepest withdrawal: " + sym + " removed " + v + "% of book";
+            }
+        }
+        JsonNode sweep = extremes.path("deepest_sweep_levels");
+        if (sweep.isObject()) {
+            String sym = sweep.path("symbol").asText("");
+            String v   = sweep.path("value").asText("");
+            if (!sym.isEmpty() && !v.isEmpty()) {
+                return "Deepest sweep: " + sym + " across " + v + " levels";
+            }
+        }
+        return null;
+    }
+
+    private static String humanScorer(final String scorerId) {
+        return switch (scorerId) {
+            case "halt"                 -> "Trading halts";
+            case "large_trade"          -> "Large block trades";
+            case "sweep"                -> "Multi-level sweeps";
+            case "layering"             -> "Layering";
+            case "post_cancel_cluster"  -> "Rapid quote-cycling";
+            case "iceberg"              -> "Iceberg executions";
+            case "liquidity_withdrawal" -> "Liquidity withdrawals";
+            case "volume_deviation"     -> "Volume surges";
+            case "time_in_book_drift"   -> "Order-lifetime drift";
+            default                      -> scorerId;
+        };
     }
 
     // ═══════════════════════════════════════════════════════════════════════
