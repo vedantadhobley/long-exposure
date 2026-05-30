@@ -23,22 +23,46 @@ public final class SchemaManager {
 
     private static final String SCHEMA_RESOURCE = "/schema.sql";
 
+    /**
+     * Once-per-JVM guard. The schema is idempotent (every {@code CREATE TABLE},
+     * {@code ALTER TABLE}, {@code CREATE INDEX} uses {@code IF NOT EXISTS}),
+     * but even idempotent DDL acquires {@code ACCESS EXCLUSIVE} locks to
+     * check the catalog. When 5+ activities boot simultaneously (Score
+     * + Narrate + Interpret + ...) and all call {@code apply()}, those
+     * exclusive lock attempts queue behind long-running Score
+     * {@code SELECT} queries holding {@code ACCESS SHARE}, blocking everyone.
+     * Observed 2026-05-30 mid-overnight: 4 backends waiting on
+     * {@code Lock|relation} for ALTER TABLE / CREATE INDEX while a single
+     * Score SELECT held the table.
+     *
+     * <p>Schema is fully applied after the first successful call in this
+     * JVM; subsequent calls are a no-op. Worker restart re-applies (correct
+     * — schema.sql may have changed across deploys).
+     */
+    private static volatile boolean APPLIED = false;
+    private static final Object APPLY_LOCK = new Object();
+
     private SchemaManager() {}
 
     public static void apply(final Connection conn) throws SQLException, IOException {
-        String script = loadResource(SCHEMA_RESOURCE);
-        List<String> statements = splitStatements(script);
+        if (APPLIED) return;  // fast path — vast majority of calls
+        synchronized (APPLY_LOCK) {
+            if (APPLIED) return;  // double-checked locking
+            String script = loadResource(SCHEMA_RESOURCE);
+            List<String> statements = splitStatements(script);
 
-        conn.setAutoCommit(true);
-        try (Statement st = conn.createStatement()) {
-            int applied = 0;
-            for (String stmt : statements) {
-                String trimmed = stmt.trim();
-                if (trimmed.isEmpty()) continue;
-                st.execute(trimmed);
-                applied++;
+            conn.setAutoCommit(true);
+            try (Statement st = conn.createStatement()) {
+                int applied = 0;
+                for (String stmt : statements) {
+                    String trimmed = stmt.trim();
+                    if (trimmed.isEmpty()) continue;
+                    st.execute(trimmed);
+                    applied++;
+                }
+                System.out.println("schema: applied " + applied + " statements from " + SCHEMA_RESOURCE);
             }
-            System.out.println("schema: applied " + applied + " statements from " + SCHEMA_RESOURCE);
+            APPLIED = true;
         }
     }
 
