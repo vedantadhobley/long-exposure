@@ -241,6 +241,36 @@ public final class AttributionVerifier {
     /** Window size: tokens to look back/forward when attributing. */
     private static final int LOOKBACK_TOKENS = 12;
 
+    /**
+     * Subordinate conjunctions / adverbial connectors that introduce a new
+     * clause with a different subject. When walking backward from a scorer-
+     * noun to find its count, hitting one of these means we've crossed into
+     * an earlier clause whose subjects DON'T apply to the noun.
+     *
+     * <p>Observed 2026-05-30 (05-14 synth verify false positive):
+     * "TQQQ and QQQ, where repeated liquidity withdrawals removed nearly
+     * 35% of displayed depth while post-cancel clusters flashed across
+     * IWM and RSP" — the AttributionVerifier walked back from
+     * "post-cancel" past "while" and "where" and attributed (QQQ, 35,
+     * post-cancel). But "while" introduces a new clause with subjects
+     * IWM and RSP, and "where" introduces yet another clause attached
+     * to TQQQ/QQQ but about depth, not post-cancel.
+     *
+     * <p>The fix is structural at the verifier layer: abort backward walk
+     * at these boundaries. Subjects on the other side of a boundary belong
+     * to a different attribution scope.
+     */
+    private static final Set<String> CLAUSE_BOUNDARY_TOKENS = Set.of(
+            "while", "whereas", "where",
+            "though", "although",
+            "but", "however",
+            "as", "since", "because",
+            "yet", "still",
+            "meanwhile", "alongside",
+            "before", "after",
+            ";"
+    );
+
     /** Max tokens forward of a multi-symbol trigger to find count + noun. */
     private static final int MULTI_LOOKFORWARD_TOKENS = 20;
 
@@ -588,6 +618,9 @@ public final class AttributionVerifier {
 
         // Walk backward through tokens. Find the nearest non-consumed NUMBER
         // first; then the nearest TICKER before it. Bounded by LOOKBACK_TOKENS.
+        // ALSO abort at CLAUSE_BOUNDARY_TOKENS — those mark scope changes,
+        // and a count/ticker on the OTHER side of a boundary doesn't belong
+        // to this noun's attribution.
         int countIdx = -1;
         int countAbsPos = -1;
         String countWord = null;
@@ -595,6 +628,14 @@ public final class AttributionVerifier {
         int limit = Math.max(0, n - LOOKBACK_TOKENS);
         for (int i = n - 1; i >= limit; i--) {
             TokenAt t = tokens.get(i);
+            String word = stripPunct(t.word).toLowerCase();
+            if (CLAUSE_BOUNDARY_TOKENS.contains(word)) {
+                // Hit a clause boundary before finding a count — abort.
+                // E.g. "post-cancel" is the noun and we're walking back
+                // and hit "while" — counts/subjects beyond "while" belong
+                // to a different scope.
+                return null;
+            }
             Integer c = parseCount(stripPunct(t.word));
             if (c != null && !consumed.contains(t.absStart)) {
                 count = c;
@@ -609,8 +650,12 @@ public final class AttributionVerifier {
         // Now look for the nearest ticker BEFORE the count (subject-led)
         // OR immediately after the count toward the noun (rare; e.g.
         // "QQQ's six events" — possessive subject before count, handled
-        // by going backward from countIdx).
+        // by going backward from countIdx). Also abort at clause boundaries.
         for (int i = countIdx - 1; i >= limit; i--) {
+            String word = stripPunct(tokens.get(i).word).toLowerCase();
+            if (CLAUSE_BOUNDARY_TOKENS.contains(word)) {
+                return null;   // ticker would be in a different clause
+            }
             String t = stripPunctButKeepDot(tokens.get(i).word);
             if (isTicker(t)) {
                 return new CountAndSubject(t, count, countWord, countAbsPos);

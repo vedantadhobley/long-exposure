@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Hourly progress monitor for overnight-v14-20260530-042433.
+# Hourly progress monitor for overnight-v14b-053520.
 # Appends to scripts/_archive/v14-overnight-monitor.log every hour
 # until the workflow terminates.
 set -uo pipefail
 
-WORKFLOW_ID="overnight-v14-20260530-042433"
+WORKFLOW_ID="overnight-v14b-053520"
 LOG=/home/vedanta/workspace/dev/long-exposure/scripts/_archive/v14-overnight-monitor.log
 mkdir -p "$(dirname "$LOG")"
 
@@ -40,7 +40,7 @@ while true; do
   log "narrate progress (per day):"
   psql_q "SELECT trading_date::text || ' ' || COUNT(*) || ' narrated (' || COUNT(*) FILTER (WHERE verifier_passed) || ' pass)'
             FROM narratives WHERE trading_date BETWEEN '2026-05-11' AND '2026-05-22'
-                              AND created_at > '2026-05-30 08:24:00'
+                              AND created_at > '2026-05-30 09:35:00'
            GROUP BY trading_date ORDER BY trading_date;" | sed 's/^/  /' >> "$LOG"
 
   log "verifier failures since v14 kicked:"

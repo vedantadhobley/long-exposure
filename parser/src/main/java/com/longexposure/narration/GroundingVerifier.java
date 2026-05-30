@@ -347,7 +347,14 @@ public final class GroundingVerifier {
             "ltd", "limited", "plc", "llc", "lp", "lllp", "nv", "ag", "sa",
             "the", "and", "of",
             "common", "stock", "class", "series", "ordinary", "shares",
-            "trust", "fund", "etf", "etn", "adr"
+            "trust", "fund", "etf", "etn", "adr",
+            // ETF rebalance-schedule decorations (2026-05-30, post-v14b audit).
+            // Observed failure on MQQQ: breakdown "Tradr 2X Long Innovation
+            // 100 Monthly ETF" → model dropped "Monthly" because it's a
+            // redundant rebalance-cadence descriptor implied by the structure.
+            // Same category as "etf"/"trust"/"fund" — identifies how often
+            // the ETF rebalances, not the company's identity.
+            "daily", "monthly", "weekly", "quarterly", "annual", "annually"
     );
 
     private static Set<String> significantTokens(final String name) {
