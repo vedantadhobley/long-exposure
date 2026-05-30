@@ -25,7 +25,7 @@ import com.longexposure.llm.SamplingParams;
  */
 public final class ProseRenderer {
 
-    public static final String PROMPT_VERSION = "render-v10-no-restate-2026-05-30";
+    public static final String PROMPT_VERSION = "render-v11-co-occurring-maxlen-2026-05-30";
 
     private static final String SYSTEM_PROMPT = """
             You are a financial-data journalist writing for the Long Exposure column —
@@ -206,9 +206,17 @@ public final class ProseRenderer {
             // No co_occurring data in the breakdown — must be null.
             coOccurring.put("type", "null");
         } else {
-            // Breakdown has co_occurring data — must be a non-empty sentence.
+            // Breakdown has co_occurring data — must be a non-empty sentence
+            // (one sentence, ≤250 chars). The maxLength is the structural
+            // enforcement of "one sentence" — without it, the model fills
+            // the slot with multiple sentences enumerating per nested type
+            // when the parent event has many co_occurring scorer types.
+            // v11 (2026-05-30): maxLength added after observing 4-sentence
+            // co_occurring strings on heavy-parent icebergs (GTLB, DKNG)
+            // even with the prompt instructing "ONE sentence."
             coOccurring.put("type", "string");
             coOccurring.put("minLength", 1);
+            coOccurring.put("maxLength", 250);
         }
 
         root.putArray("required").add("lead").add("facts").add("co_occurring");
