@@ -277,9 +277,20 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
                         weekStart, attempt, MAX_LLM_ATTEMPTS, verify.mismatches(), claimedStreak, allowedStreak);
             }
 
+            hb.setStage("build_data_table");
+            ObjectNode dataTable;
+            try {
+                dataTable = com.longexposure.synth.WeeklyDataTableBuilder.build(conn, weekStart, weekEnd, json);
+            } catch (Exception e) {
+                LOG.warn("weekly data_table build failed (non-fatal)  week_start={} err={}", weekStart, e.getMessage());
+                dataTable = json.createObjectNode();
+                dataTable.put("week_start", weekStart.toString());
+                dataTable.put("build_error", e.getMessage());
+            }
+
             hb.setStage("upsert");
             upsert(conn, weekStart, weekEnd, aggregate, weekAggregates, days.size(),
-                    verify, streakOk, allowedStreak, contentHash, json);
+                    verify, streakOk, allowedStreak, contentHash, dataTable, json);
 
             LOG.info("aggregated  week_start={} week_end={} days={} llm_ms={} verifier_passed={} streak_ok={} mismatches={}",
                     weekStart, weekEnd, days.size(), llmElapsedMs,
@@ -414,7 +425,8 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
                         final String aggregate, final ObjectNode weekAggregates,
                         final int daysConsidered, final SynthesisVerifier.Result verify,
                         final boolean streakOk, final int allowedStreak,
-                        final byte[] contentHash, final ObjectMapper json) throws Exception {
+                        final byte[] contentHash, final ObjectNode dataTable,
+                        final ObjectMapper json) throws Exception {
         // verifier_passed reflects BOTH the number/ticker verifier and the
         // streak-bound check, so a fabricated streak is stored as a failure
         // (filterable, not served by the API) even though the number verifier
@@ -435,9 +447,9 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
                 INSERT INTO weekly_aggregate (
                     week_start, week_end, aggregate_text, days_considered,
                     week_aggregates, model_id, prompt_version,
-                    verifier_passed, verifier_notes, content_hash
+                    verifier_passed, verifier_notes, content_hash, data_table
                 )
-                VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?::jsonb, ?)
+                VALUES (?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?::jsonb, ?, ?::jsonb)
                 ON CONFLICT (week_start) DO UPDATE SET
                     week_end        = EXCLUDED.week_end,
                     aggregate_text  = EXCLUDED.aggregate_text,
@@ -448,6 +460,7 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
                     verifier_passed = EXCLUDED.verifier_passed,
                     verifier_notes  = EXCLUDED.verifier_notes,
                     content_hash    = EXCLUDED.content_hash,
+                    data_table      = EXCLUDED.data_table,
                     created_at      = NOW()
                 """;
         try (PreparedStatement st = conn.prepareStatement(sql)) {
@@ -461,6 +474,7 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             st.setBoolean(8, passed);
             st.setString(9, verifierNotes.toString());
             st.setBytes(10, contentHash);
+            st.setString(11, dataTable.toString());
             st.executeUpdate();
         }
     }

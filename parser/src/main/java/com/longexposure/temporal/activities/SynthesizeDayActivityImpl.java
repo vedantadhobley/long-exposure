@@ -209,10 +209,23 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
                         tradingDate, attempt, MAX_LLM_ATTEMPTS, verify.mismatches());
             }
 
+            hb.setStage("build_data_table");
+            // Build the structured data table — pure SQL, no LLM. Renders ABOVE
+            // the prose on the per-day view. See DailyDataTableBuilder.
+            ObjectNode dataTable;
+            try {
+                dataTable = com.longexposure.synth.DailyDataTableBuilder.build(conn, tradingDate, json);
+            } catch (Exception e) {
+                LOG.warn("data_table build failed (non-fatal)  date={} err={}", tradingDate, e.getMessage());
+                dataTable = json.createObjectNode();
+                dataTable.put("trading_date", tradingDate.toString());
+                dataTable.put("build_error", e.getMessage());
+            }
+
             hb.setStage("upsert");
             upsert(conn, tradingDate, synthesis, dayAggregates, events.size(),
                    countWithNarration(events), countWithInterpretation(events),
-                   verify, json);
+                   verify, dataTable, json);
 
             LOG.info("synthesized  date={} events={} llm_ms={} verifier_passed={} mismatches={}",
                     tradingDate, events.size(), llmElapsedMs,
@@ -422,6 +435,7 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
                         final int narrationsConsidered,
                         final int interpretationsConsidered,
                         final SynthesisVerifier.Result verify,
+                        final ObjectNode dataTable,
                         final ObjectMapper json) throws Exception {
         ObjectNode verifierNotes = json.createObjectNode();
         verifierNotes.put("tickers_checked", verify.tickersChecked());
@@ -433,9 +447,9 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
                     trading_date, synthesis_text, events_considered,
                     narrations_considered, interpretations_considered,
                     day_aggregates, model_id, prompt_version,
-                    verifier_passed, verifier_notes
+                    verifier_passed, verifier_notes, data_table
                 )
-                VALUES (?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?::jsonb)
+                VALUES (?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?::jsonb, ?::jsonb)
                 ON CONFLICT (trading_date) DO UPDATE SET
                     synthesis_text             = EXCLUDED.synthesis_text,
                     events_considered          = EXCLUDED.events_considered,
@@ -446,6 +460,7 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
                     prompt_version             = EXCLUDED.prompt_version,
                     verifier_passed            = EXCLUDED.verifier_passed,
                     verifier_notes             = EXCLUDED.verifier_notes,
+                    data_table                 = EXCLUDED.data_table,
                     created_at                 = NOW()
                 """;
         try (PreparedStatement st = conn.prepareStatement(sql)) {
@@ -459,6 +474,7 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
             st.setString(8, PROMPT_VERSION);
             st.setBoolean(9, verify.passed());
             st.setString(10, verifierNotes.toString());
+            st.setString(11, dataTable.toString());
             st.executeUpdate();
         }
     }

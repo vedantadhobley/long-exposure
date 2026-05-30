@@ -709,6 +709,13 @@ CREATE TABLE IF NOT EXISTS daily_synthesis (
     created_at                 TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Structured data table for journalist-format scannable reading. Computed
+-- alongside the synthesis text — same Postgres connection, no LLM calls,
+-- fully deterministic. The frontend renders this ABOVE the prose paragraph
+-- so a reader gets a 10-second-scannable view of the day's headline metrics
+-- before reading the narrative. See DailyDataTableBuilder for the JSON shape.
+ALTER TABLE daily_synthesis ADD COLUMN IF NOT EXISTS data_table JSONB;
+
 -- AGGREGATE stage: one LLM call per week reading that week's daily_synthesis
 -- paragraphs → a single "week of …" themes paragraph (cross-day patterns no
 -- single day can show: regimes building across the week, recurring symbols,
@@ -732,6 +739,13 @@ CREATE TABLE IF NOT EXISTS weekly_aggregate (
 );
 -- content_hash added 2026-05-26 for the recompute-daily skip; ALTER so existing DBs pick it up.
 ALTER TABLE weekly_aggregate ADD COLUMN IF NOT EXISTS content_hash BYTEA;
+
+-- Structured data table for weekly executive-summary view. Computed
+-- alongside the weekly aggregate text — pure SQL, no LLM. Renders ABOVE
+-- the prose paragraph for 10-second-scannable extraction. Includes top
+-- symbols by event count across the week, per-day breakdowns, scorer mix,
+-- notable extremes, cross-day patterns. See WeeklyDataTableBuilder.
+ALTER TABLE weekly_aggregate ADD COLUMN IF NOT EXISTS data_table JSONB;
 
 -- ─── Quarterly rollup (Tier B1, 2026-05-28) ──────────────────────────────────
 -- Same shape as weekly_aggregate, one level up: reads the quarter's ≤13 weekly
