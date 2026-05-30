@@ -53,7 +53,7 @@ public final class AggregateQuarterActivityImpl implements AggregateQuarterActiv
      * week tier (AggregateWeekActivityImpl v7). v2 added word-form numeral
      * grounding.
      */
-    private static final String PROMPT_VERSION = "aggregate-quarter-v3-attribution-verifier-2026-05-28";
+    private static final String PROMPT_VERSION = "aggregate-quarter-v4-qualitative-themes-2026-05-30";
 
     /**
      * Minimum weekly rollups in the quarter before the activity does an LLM
@@ -80,11 +80,18 @@ public final class AggregateQuarterActivityImpl implements AggregateQuarterActiv
             OUTPUT: 4-7 sentences, journalist register. Hard cap 900 chars.
             Acronyms (LULD, VWAP, HFT, NBBO) glossed on first use. No preamble.
 
+            QUALITATIVE-ONLY RULE. Do NOT enumerate events per symbol or per
+            scorer type at the quarter level. No "X had N events", no "32
+            halts this quarter", no cardinal-number-plus-scorer-type sentences.
+            Use qualitative magnitude language: "dominated", "recurring",
+            "persistent", "intensified mid-quarter then faded". Per-event and
+            per-week counts are not the quarter-level reader's need; trend and
+            regime are.
+
             GROUNDING — primary rule. Every ticker MUST appear in the inputs.
-            Every number MUST appear verbatim in either a weekly paragraph or
-            the metadata block. Do not compute, sum across weeks, or
-            approximate. If a number you want to mention is not in the inputs,
-            do not mention it.
+            Specific numbers are allowed ONLY when they appear verbatim in a
+            weekly paragraph (a single dollar value, duration, percentage from
+            a specific event). Do NOT sum or combine numbers across weeks.
 
             REGISTER. Describe what the data shows. Do NOT speculate about
             intent, name participants, or pull in news/causal hypotheses from

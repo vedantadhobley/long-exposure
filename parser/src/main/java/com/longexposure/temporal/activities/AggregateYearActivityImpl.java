@@ -42,7 +42,7 @@ public final class AggregateYearActivityImpl implements AggregateYearActivity {
             .getOrDefault("LLAMA_MODEL", "Qwen3.5-122B-A10B");
 
     /** v3 (2026-05-28 evening) wires AttributionVerifier; see AggregateQuarterActivityImpl. */
-    private static final String PROMPT_VERSION = "aggregate-year-v3-attribution-verifier-2026-05-28";
+    private static final String PROMPT_VERSION = "aggregate-year-v4-qualitative-themes-2026-05-30";
 
     /** Quarterly rollups needed in the year before the LLM call fires. */
     private static final int MIN_QUARTERS_FOR_YEAR = 2;
@@ -63,10 +63,15 @@ public final class AggregateYearActivityImpl implements AggregateYearActivity {
             OUTPUT: 5-9 sentences, journalist register. Hard cap 1200 chars.
             Acronyms glossed on first use. No preamble.
 
-            GROUNDING. Every ticker MUST appear in the inputs. Every number
-            MUST appear verbatim in a quarterly paragraph or the metadata.
-            Do not compute, sum across quarters, or approximate. If a number
-            is not in the inputs, do not mention it.
+            QUALITATIVE-ONLY RULE. Do NOT enumerate events per symbol or per
+            scorer at the year level. No "X had N events", no cardinal-number
+            -plus-scorer-type sentences. Use qualitative language:
+            "dominated the year", "persistent across quarters", "regime that
+            crossed Q2-Q3 boundary".
+
+            GROUNDING. Every ticker MUST appear in the inputs. Specific
+            numbers are allowed ONLY when they appear verbatim in a quarterly
+            paragraph. Do NOT sum or combine numbers across quarters.
 
             REGISTER. Describe what the data shows. NO intent claims, NO
             participant attribution, NO outside news/causal hypotheses, NO

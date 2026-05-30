@@ -69,7 +69,7 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
      * numerals; see {@link SynthesizeDayActivityImpl}'s PROMPT_VERSION
      * comment for the full rationale.
      */
-    private static final String PROMPT_VERSION = "aggregate-v7-attribution-verifier-2026-05-28";
+    private static final String PROMPT_VERSION = "aggregate-v8-qualitative-themes-2026-05-30";
 
     /**
      * Prior weekly rollups passed as week-over-week trend context. Set to 13 =
@@ -117,15 +117,33 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             day or event of the week worth surfacing by name. Synthesize across days
             — do NOT just restate one day's paragraph.
 
+            QUALITATIVE-ONLY RULE — read this carefully:
+
+            You may NOT enumerate events per symbol or per scorer type. Specifically:
+
+            DO NOT write phrasings like:
+              - "TQQQ had 47 liquidity withdrawals this week"
+              - "32 halts occurred across the five sessions"
+              - "QQQ and SPY accounted for 18 events"
+              - any sentence of shape (subject + cardinal number + scorer-type)
+
+            INSTEAD use qualitative magnitude language:
+              - "TQQQ saw heavy / sustained / recurring liquidity withdrawals all week"
+              - "halts intensified through midweek"
+              - "QQQ and SPY dominated the week's activity"
+
+            Per-day and per-week counts of events are not what the reader needs from
+            this paragraph — the daily syntheses below already convey them. The
+            week-level paragraph's job is TREND: which symbols/sectors recurred,
+            which regimes built or faded, which day stood out.
+
             GROUNDING — the primary rule:
 
             Every ticker you mention must appear in the per-day paragraphs above.
-            Every numeric claim must trace to either the week metadata or a specific
-            per-day paragraph — no introducing numbers from outside the inputs, no
-            approximation or rounding. Cite numbers VERBATIM as they appear; do NOT
-            sum, subtract, or otherwise combine two numbers into a new one (e.g. do
-            not add two symbols' event counts together — that derived total is not
-            in the data). The week's dates are in the metadata; do not invent or
+            Specific numeric claims are allowed ONLY when they appear verbatim in a
+            per-day paragraph (a single dollar value, a duration, a percentage from
+            a specific event). Do NOT sum, subtract, or combine two numbers from
+            different days. The week's dates are in the metadata; do not invent or
             restate them in a different format.
 
             REGISTER:

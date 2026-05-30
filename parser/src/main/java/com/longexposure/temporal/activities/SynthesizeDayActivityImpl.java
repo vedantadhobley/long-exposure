@@ -73,7 +73,7 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
      * misattribution slightly worse. This v7 supersedes it via the
      * structural verifier approach.
      */
-    private static final String PROMPT_VERSION = "synthesize-v9-counts-after-events-2026-05-29";
+    private static final String PROMPT_VERSION = "synthesize-v10-qualitative-themes-2026-05-30";
 
     /** Max LLM attempts per day — re-roll on verifier failure (temp 1.0 gives variance). */
     private static final int MAX_LLM_ATTEMPTS = 3;
@@ -87,12 +87,6 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
             INPUTS:
               - DAY METADATA: trading date, total events, count per scorer type,
                 top symbols by event count, distribution across session phases.
-              - PER-SYMBOL COUNTS: the EXACT count per (symbol, scorer_type) for
-                today. This is the TRUTH for any per-symbol count claim. When
-                you describe a symbol's activity with a count ("TQQQ had 8
-                liquidity withdrawals"), the number must match this table
-                exactly. If the count isn't in the table, do not claim one —
-                describe qualitatively instead.
               - PER-EVENT LIST: each event's per-event interpretation prose,
                 in chronological order with symbol, scorer type, and event time.
 
@@ -111,14 +105,36 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
             layering quieted to afternoon institutional blocks"), and notable
             individual events worth surfacing by name.
 
+            QUALITATIVE-ONLY RULE — read this carefully:
+
+            You may NOT enumerate events per symbol or per scorer type. Specifically:
+
+            DO NOT write phrasings like:
+              - "TQQQ had 8 liquidity withdrawals"
+              - "seven halts occurred"
+              - "QQQ and SPY accounted for 12 events"
+              - "the four large trades"
+              - any sentence of shape (subject + cardinal number + scorer-type)
+
+            INSTEAD use qualitative magnitude language:
+              - "TQQQ saw heavy / frequent / repeated / sustained liquidity withdrawals"
+              - "multiple halts clustered at the open"
+              - "QQQ and SPY dominated the day's activity"
+              - "the day's large-trade activity centered on semiconductors"
+
+            Counts of events are not what the reader needs from this paragraph —
+            the per-event prose below already exposes them. The paragraph's job is
+            CHARACTER: time-of-day shape, sector clustering, regime shifts,
+            individual standout events.
+
             GROUNDING — the primary rule:
 
             Every ticker you mention must appear in today's narrations. Every
-            numeric claim must trace to either the day metadata or a specific
-            per-event interpretation — no introducing numbers from outside the
-            inputs, no approximation or rounding. The trading date is provided
-            in the day metadata; do not invent or restate it in a different
-            format.
+            specific numeric claim must trace to a specific per-event interpretation
+            (e.g., a dollar value, a duration, a percentage that appears in the
+            per-event list). The trading date is provided in the day metadata;
+            do not invent or restate it in a different format. Do not introduce
+            numbers from outside the inputs.
 
             REGISTER:
 
@@ -332,22 +348,27 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
                                    final List<EventRow> events,
                                    final Map<String, Map<String, Integer>> bySymbolByScorer,
                                    final Map<String, Integer> bySymbolTotal) {
-        // Compact JSON for the day aggregates (toPrettyString adds whitespace
-        // that costs ~3-4× the token count). INTERP-only per-event entries to
-        // fit within the joi llama.cpp server's n_ctx=32768 budget; INTERP
-        // already restates the descriptive content plus adds sequential
-        // context, so DESC is redundant for synthesis. Falls back to DESC if
-        // INTERP is null (rare — 162/164 had INTERP on 2026-05-08).
+        // v10 (2026-05-30): the PER-SYMBOL COUNTS truth table that v8/v9
+        // attempted to inject is GONE. Qwen-122B was ignoring it ~33% of the
+        // time and fabricating counts anyway; the AttributionVerifier then
+        // caught the fabrications and the retry mechanism re-rolled fresh
+        // fabrications. Structural fix: remove count-claim language from the
+        // task by construction. The system prompt now forbids "X had N events"
+        // shape entirely; what's left is qualitative theme identification,
+        // which the model can do reliably. Truth maps still flow through to
+        // SynthesisVerifier so AttributionVerifier still catches any residual
+        // count claims that slip through — but for v10 the prompt should
+        // produce zero such claims.
+        //
+        // Compact JSON for day aggregates (toPrettyString adds whitespace that
+        // costs ~3-4× the token count). INTERP-only per-event entries to fit
+        // joi's n_ctx=32768 budget; INTERP restates the descriptive content +
+        // adds sequential context, so DESC is redundant. Falls back to DESC
+        // if INTERP is null (rare — < 2% on the 2-week dataset).
         StringBuilder sb = new StringBuilder(64 * 1024);
         sb.append("Trading date: ").append(tradingDate).append("\n\n");
         sb.append("DAY METADATA: ").append(dayAggregates.toString()).append("\n\n");
 
-        // PER-EVENT LIST first — provides context the model uses to identify
-        // themes, but its 150+ prose paragraphs would dominate attention if
-        // the truth table came after. v9 (2026-05-29) moves PER-SYMBOL COUNTS
-        // to AFTER this list, right before the closing instruction, so the
-        // model's recency bias works FOR us rather than against (v8 placed
-        // the table before; counts were ignored).
         sb.append("PER-EVENT LIST (chronological, ").append(events.size()).append(" events):\n\n");
         int idx = 0;
         for (EventRow e : events) {
@@ -362,50 +383,15 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
         }
         sb.append('\n');
 
-        // PER-SYMBOL COUNTS: the AUTHORITATIVE truth, placed immediately
-        // before the closing instruction so the model sees it most recently.
-        // The verifier checks count claims against the SAME maps used to
-        // build this table.
-        sb.append("════════════════════════════════════════════════════════════════════\n");
-        sb.append("PER-SYMBOL COUNTS — AUTHORITATIVE TRUTH FOR ALL COUNT CLAIMS\n");
-        sb.append("════════════════════════════════════════════════════════════════════\n");
-        sb.append("Every per-symbol count you cite MUST come from this table verbatim.\n");
-        sb.append("Do NOT count from the per-event list above — that produces errors.\n");
-        sb.append("Do NOT cite a symbol not in this table — it isn't in today's events.\n\n");
-        // Order by total descending, then alphabetically — model attention bias
-        // skews to top-of-list, so put the most-active symbols first.
-        List<Map.Entry<String, Integer>> sortedSymbols =
-                new ArrayList<>(bySymbolTotal.entrySet());
-        sortedSymbols.sort((a, b) -> {
-            int c = Integer.compare(b.getValue(), a.getValue());
-            return c != 0 ? c : a.getKey().compareTo(b.getKey());
-        });
-        for (Map.Entry<String, Integer> e : sortedSymbols) {
-            String symbol = e.getKey();
-            int total = e.getValue();
-            Map<String, Integer> byScorer = bySymbolByScorer.get(symbol);
-            sb.append("  ").append(symbol).append(": total=").append(total);
-            if (byScorer != null && !byScorer.isEmpty()) {
-                List<Map.Entry<String, Integer>> ss = new ArrayList<>(byScorer.entrySet());
-                ss.sort((a, b) -> Integer.compare(b.getValue(), a.getValue()));
-                sb.append(" — ");
-                boolean first = true;
-                for (Map.Entry<String, Integer> se : ss) {
-                    if (!first) sb.append(", ");
-                    sb.append(se.getKey()).append(":").append(se.getValue());
-                    first = false;
-                }
-            }
-            sb.append('\n');
-        }
-        sb.append("════════════════════════════════════════════════════════════════════\n\n");
-
         sb.append("Now write the day's themes paragraph (3-6 sentences, journalist register).\n");
-        sb.append("Constraints:\n");
-        sb.append("  - Every numeric count claim must match PER-SYMBOL COUNTS above verbatim.\n");
-        sb.append("  - Every ticker mentioned must appear in PER-SYMBOL COUNTS above.\n");
-        sb.append("  - Do not introduce numbers from outside the inputs (no inventing).\n");
-        sb.append("  - Do not use the word 'manipulation' or other intent claims.\n");
+        sb.append("Constraints (re-stating the SYSTEM prompt's rules — read carefully):\n");
+        sb.append("  - QUALITATIVE language about activity volume: 'heavy', 'multiple',\n");
+        sb.append("    'frequent', 'sustained', 'dominated', 'clustered'. NEVER specific counts.\n");
+        sb.append("  - Specific numbers are allowed ONLY if they appear in a per-event\n");
+        sb.append("    interpretation above (a dollar value, duration, percentage).\n");
+        sb.append("  - Every ticker mentioned must appear in today's per-event list.\n");
+        sb.append("  - No intent claims ('manipulation', 'spoofing'), no external news,\n");
+        sb.append("    no comparison to other days.\n");
         return sb.toString();
     }
 
