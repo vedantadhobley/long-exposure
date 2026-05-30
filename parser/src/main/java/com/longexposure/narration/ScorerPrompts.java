@@ -90,22 +90,36 @@ public final class ScorerPrompts {
                 that produces a CSV-shaped restatement, not narration.
 
             TIME-OF-DAY CONTEXT (load-bearing — include unless absent):
-              - event_phase_label is a pre-built session-phase phrase like
-                "in the opening minutes of regular trading" / "during the
-                midday lull" / "in the final minutes before the close" /
-                "in pre-market trading" / "in the afternoon session". Every
-                non-halt event has this field populated. INCLUDE IT as one
-                of the key_numbers entries — it anchors the event in the
-                reader's mental session timeline. Render the label verbatim
-                per the categorical rule (no parenthetical session_phase
-                code).
-              - Halt events use halt_phase_span_label instead (covered in
-                the halt section); halt does NOT carry event_phase_label.
-              - Without time context, the reader sees "AMZN executed a
-                large block trade with $23M notional" and has no idea
-                whether it was at the open, midday, or close. The session
-                phase is the difference between "interesting context" and
-                "naked datum".
+
+              EVERY event MUST carry a time anchor in its narration. Without
+              one the reader sees "AMZN executed a $23M block" with no idea
+              whether it happened at the open, midday, or close. Two
+              categorical fields + two specific-time fields are available:
+
+              - event_phase_label (universal on non-halt events): pre-built
+                session-phase phrase like "in the opening minutes of regular
+                trading" / "during the midday lull" / "in the final minutes
+                before the close" / "in pre-market trading" / "in the
+                afternoon session". INCLUDE IT in key_numbers — verbatim
+                categorical label per the class-label rule. This is the
+                MINIMUM time context for every non-halt event.
+              - start_et (universal on non-halt events): the actual clock
+                time the event began, "HH:MM:SS.ms" format like "10:34:12.748".
+                For SINGLETON events (large_trade, volume_deviation), include
+                as a key_number alongside event_phase_label — gives the
+                reader specific timing ("at 10:34 AM ET").
+                For DURATION events (sweep, iceberg, layering, post_cancel,
+                liquidity_withdrawal), prefer event_phase_label alone unless
+                the start time itself is journalistically interesting (e.g.,
+                exact close-bell timing). The duration_humanized field
+                already carries the "how long" — no need for both start and
+                end times.
+              - Halt events use halt_phase_span_label (the grammatical
+                phrase) and may additionally include halt_start_et /
+                halt_end_et for precise timing when notable.
+              - end_et (universal on non-halt duration events): mirror of
+                start_et for event end. Mostly drill-down; include only
+                when both endpoints matter to the story (rare).
 
             NO INTENT, NO EXTERNAL NEWS, NO COMPARISON:
               - Do not assert intent ("the algo was trying to X",
@@ -155,10 +169,25 @@ public final class ScorerPrompts {
                 Use it as-is for the timing of the halt. Do NOT stitch
                 halt_start_phase_label + halt_end_phase_label by hand —
                 halt_phase_span_label already encodes that grammatically.
-              - duration_humanized     — "1h 57m" or "2h 28m"
+              - halt_duration         — pre-formatted "1h 57m" or "2h 28m".
+                (The field is named halt_duration on this scorer, not
+                duration_humanized.)
               - halt_reason_label      — "regulatory news-pending halt" / "LULD
                 pause" / etc. Use ONLY this pre-formatted label; do NOT
                 attempt to interpret raw halt_reason codes (T1, MCB1, etc.).
+              - halt_duration_bucket   — categorical bucket like
+                "2h_to_half_session" / "half_to_full_session" / "under_30min".
+                Render the LABEL verbatim per the categorical rule (replacing
+                underscores with prose if needed: "between 2 hours and a
+                half-session"). Optional — only when the duration story
+                benefits from the bucket framing.
+              - halt_duration_pct_of_regular_session — "accounting for N% of
+                the regular session"
+              - halt_start_et / halt_end_et — specific HH:MM:SS clock times.
+                Include when journalistically anchoring is useful (e.g.,
+                "halted at 09:31 ET, resumed at 13:35 ET" reads more
+                concretely than the grammatical phrase alone). Optional —
+                halt_phase_span_label already covers most halt narrations.
               - pre_halt_spread_bps    — when present, "the spread was N bps
                 before the halt"
               - pre_event_ofi_class    — when present and non-"balanced", "the
@@ -218,6 +247,10 @@ public final class ScorerPrompts {
 
             HEADLINE FIELDS (pick 3-5 for key_numbers, in this priority):
               - orders                   — total orders posted in the burst
+              - side                     — categorical "buy"/"sell" indicating
+                which side of the book the cluster occurred on. Render
+                verbatim per the categorical rule ("a buy-side burst",
+                "concentrated on the sell side").
               - order_to_trade_phrase    — when present, USE VERBATIM. Handles
                 the 0-fills case as "no fills against N posted orders".
                 Falls back to order_to_trade_ratio when finite.
@@ -240,6 +273,9 @@ public final class ScorerPrompts {
 
             HEADLINE FIELDS (pick 3-5 for key_numbers, in this priority):
               - orders                       — orders in the layered set
+              - side                         — categorical "buy"/"sell" — which
+                side of the book was layered ("on the bid side", "ask-side
+                layering"). Render verbatim per the categorical rule.
               - distinct_levels              — "spanning N distinct price levels"
               - depth_from_touch_near_bps    — when present, "the layered band
                 sat N bps off the touch" (NB: "off the touch", not "from
