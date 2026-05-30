@@ -150,9 +150,20 @@ public final class ScorerPrompts {
             metrics to a scanning reader):
 
               Baseline / trailing-history references:
-                ✓ "the trailing 2-week median"   ← for cagg-backed daily_volume_by_symbol
-                ✓ "the trailing 14-day median"   ← when day-count is more salient
-                ✓ "its typical lifetime"         ← when no specific trailing window applies
+                ✓ "the trailing 2-week median"   ← CANONICAL; use this for ALL inter-day
+                                                    baselines regardless of the actual
+                                                    baseline_window_trading_days value.
+                                                    Works for any 7-14 day window —
+                                                    "2-week" is the journalistic norm.
+                ✓ "its typical lifetime"         ← when no specific window applies
+                ✗ "the trailing 14-day median"   ← DO NOT cite a specific day count in
+                ✗ "the trailing 10-day median"      prose. The actual baseline window
+                ✗ "the trailing N-day median"      varies by symbol (9, 10, 12, 14 days);
+                                                    writing a literal "14-day" makes that
+                                                    number a fabricated claim when the
+                                                    actual window is different. The
+                                                    specific day count lives in the
+                                                    breakdown for analyst drill-down.
                 ✗ "the average" / "average daily volume" — ambiguous (mean vs median)
                 ✗ "normal" / "the norm" / "what's typical" — vague
                 ✗ "running mean" / "running average" — wrong central tendency

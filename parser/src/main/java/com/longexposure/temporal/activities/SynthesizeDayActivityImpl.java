@@ -73,7 +73,7 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
      * misattribution slightly worse. This v7 supersedes it via the
      * structural verifier approach.
      */
-    private static final String PROMPT_VERSION = "synthesize-v11-canonical-vocabulary-2026-05-30";
+    private static final String PROMPT_VERSION = "synthesize-v12-no-literal-day-count-2026-05-30";
 
     /** Max LLM attempts per day — re-roll on verifier failure (temp 1.0 gives variance). */
     private static final int MAX_LLM_ATTEMPTS = 3;
@@ -149,9 +149,12 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
             — the same metric named different ways across paragraphs reads as
             different metrics):
 
-              - Baselines: "the trailing 2-week median" / "the trailing 14-day
-                median" / "its typical [METRIC]". NEVER "the average" / "normal" /
-                "running mean".
+              - Baselines: ALWAYS use "the trailing 2-week median" for any
+                inter-day baseline reference — works for the actual 7-14 day
+                baseline window. NEVER write a literal day count ("14-day",
+                "10-day", etc.) — the actual window varies by symbol and a
+                specific number becomes fabrication. NEVER "the average" /
+                "normal" / "running mean".
               - Multipliers: "22.2x the trailing median" (1-decimal value + "x").
                 NEVER "22 times" / "around 22x" / "more than 20x".
               - Slippage: "X basis points slippage" / "slipped X bps".

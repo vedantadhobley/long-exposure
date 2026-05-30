@@ -60,7 +60,7 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
      * <p>v10 added the pattern-name mislabel check; v9 added supporting
      * analytics (slippage, OFI, etc.).
      */
-    private static final String PROMPT_VERSION = "interpret-v13-canonical-vocabulary-2026-05-30";
+    private static final String PROMPT_VERSION = "interpret-v14-no-literal-day-count-2026-05-30";
 
     /** Half-window for the surrounding trade context. */
     private static final long WINDOW_SECONDS = 60L;
@@ -172,9 +172,12 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
             CANONICAL VOCABULARY (load-bearing — the same metric referenced
             different ways across narrations reads as different metrics):
 
-              - Baselines: "the trailing 2-week median" / "the trailing 14-day
-                median" / "its typical [METRIC]". NEVER "the average" / "normal" /
-                "running mean" / bare "the baseline".
+              - Baselines: ALWAYS use "the trailing 2-week median" — works for any
+                7-14 day baseline window regardless of the actual
+                baseline_window_trading_days value. NEVER write a literal day count
+                ("14-day", "10-day", "9-day") — the actual window varies by symbol
+                and a specific number becomes a fabricated claim. NEVER "the
+                average" / "normal" / "running mean" / bare "the baseline".
               - Multipliers: "22.2x the trailing median" (exact value, "x"
                 suffix). NEVER "22 times" / "around 22x" / "more than 20x" /
                 "approximately 22x".

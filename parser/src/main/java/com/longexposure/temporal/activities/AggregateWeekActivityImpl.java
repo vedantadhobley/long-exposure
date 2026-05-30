@@ -69,7 +69,7 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
      * numerals; see {@link SynthesizeDayActivityImpl}'s PROMPT_VERSION
      * comment for the full rationale.
      */
-    private static final String PROMPT_VERSION = "aggregate-v9-canonical-vocabulary-2026-05-30";
+    private static final String PROMPT_VERSION = "aggregate-v10-no-literal-day-count-2026-05-30";
 
     /**
      * Prior weekly rollups passed as week-over-week trend context. Set to 13 =
