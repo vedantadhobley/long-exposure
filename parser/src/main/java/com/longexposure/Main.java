@@ -107,6 +107,11 @@ public final class Main {
             com.longexposure.narration.InterpretSmokeTest.run(interpretSmoke);
             return;
         }
+        String backfillDataTables = System.getenv("IEX_BACKFILL_DATA_TABLES");
+        if (backfillDataTables != null && !backfillDataTables.isBlank()) {
+            com.longexposure.synth.DataTableBackfill.run(backfillDataTables);
+            return;
+        }
 
         String filePath = firstNonNull(
                 args.length > 0 ? args[0] : null,
