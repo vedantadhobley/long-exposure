@@ -236,7 +236,7 @@ docker exec long-exposure-dev-temporal temporal workflow start \
 
 ## Activities
 
-Twenty-two activity classes total, split across two task queues:
+Twenty-eight activity classes total, split across two task queues:
 
 - **Main queue** (`long-exposure-daily-pipeline`): every non-LLM activity. Default Temporal concurrency (200 slots) since none of these saturate a shared bottleneck.
 - **Narration queue** (`NARRATION_TASK_QUEUE`): the three LLM-bound activities (`NarrateEventActivity`, `InterpretEventActivity`, `SynthesizeDayActivity`). Worker configured with `setMaxConcurrentActivityExecutionSize(2)` to cap LLM-call concurrency at the GPU's safe parallelism on `llama-large.joi`. The JVM-wide `Semaphore(2, fair)` inside `LlamaClient` is the second-line defense.
@@ -476,6 +476,61 @@ parse + validate are real wins; retention is opportunistic).
 **Idempotency.** `drop_chunks()` silently skips already-dropped chunks.
 Running twice on the same `cutoffDate` is a no-op.
 
+### `PruneStaleNarrationsActivity`
+
+**What.** Collapses superseded narration / interpretation rows down to
+the latest verifier-passing row per content-key. Two-arg shape:
+{@code pruneDate(date)} (cheap, per-day cron path) or {@code pruneAll()}
+(backfill cleanup).
+
+**Keep rule.** Per content-key `(trading_date, symbol, event_type,
+event_ts)` keep rank 1 by `(verifier_passed DESC, created_at DESC)`.
+Latest passing row wins; if none passed, latest overall wins (never
+delete an event's only narration). Drop everything else.
+
+**Why reachability-free.** Does NOT join `selected_events` — so it
+preserves the narrative archive forever even after wire-data
+retention drops `selected_events` for old dates. The narrative
+tables are the product; this activity keeps them lean without
+risking the archive.
+
+**When called.** Last step of `FinalizeDayWorkflow`. Per the
+operations rule, only fires when FinalizeDay runs (Mode.FULL_PIPELINE
+in PipelineWorkflow). LLM_CHAIN and SCORE_AND_LLM modes skip
+FinalizeDay; operators kick a separate `stages=[FINALIZE]` pass for
+cleanup, or run `pruneAll()` directly.
+
+**Idempotency.** Window-function DELETE; running twice deletes
+nothing the second time. Steady-state cron days produce zero rows
+to delete (each event narrated once); meaningful work only when
+re-runs have accumulated multiple hashes per content-key.
+
+### `RetainRawFilesActivity`
+
+**What.** Wall-clock TTL on raw `.pcap.gz` files in
+`IEX_RAW_DIR` (default `/storage/raw`). Walks the directory,
+parses the `YYYYMMDD` stem from each filename matching
+`<date>_IEXTP1_<FEED><VERSION>.pcap.gz`, deletes anything older
+than `retainDays` (FinalizeDay calls with `RAW_FILE_RETAIN_DAYS=3`).
+
+**Why separate from `CleanupFilesActivity`.** Cleanup deletes the
+three files for the trading date that JUST finished, gated by
+`runRetentionSweep && status==ok`. Two foot-guns: ad-hoc re-runs
+(`runRetentionSweep=false`) accumulate files indefinitely, and the
+gate keys off run status rather than wall-clock age (a failed
+parse leaves the file behind forever). This activity decouples
+raw-file lifecycle from pipeline-status — wall-clock TTL,
+unconditional.
+
+**When called.** End of `FinalizeDayWorkflow`. Same Mode-gating
+caveat as the prune above.
+
+**Tuning.** IEX HIST is free + always available, ~10 min to
+re-download. 3 days covers "yesterday's pipeline failed, rerun
+today" without holding more. If a future use case wants longer
+local retention (e.g., re-validate after a parser change without
+re-downloading), bump `RAW_FILE_RETAIN_DAYS` in `FinalizeDayWorkflowImpl`.
+
 ### `PipelineRunRecorderActivity`
 
 **What.** DB-only lifecycle activity. Three methods:
@@ -631,6 +686,8 @@ pre-cleans normally before re-writing.
 | `CleanupFiles` | 5min | — | none (best-effort) |
 | `CompressChunks` | 60min | 10min | transient × 2 |
 | `RetentionSweep` | 15min | — | transient × 3 |
+| `PruneStaleNarrations` | 10min | — | transient × 2 |
+| `RetainRawFiles` | 5min | — | transient × 2 |
 | `PipelineRunRecorder` | 30s | — | default × 3 |
 
 `NotATradingDay` is in every activity's `setDoNotRetry` so it always
@@ -647,7 +704,7 @@ short-circuits the workflow regardless of which leg threw it.
 | `parser/src/main/java/com/longexposure/temporal/workflows/{Download,Parse,Validate,Materialize,Score,Select,Narrate,Cleanup}Workflow{,Impl}.java` | Phase workflows — each owns one phase. Called as child workflows from `DailyPipelineWorkflow` and as standalone entry points for ad-hoc developer invocation. |
 | `parser/src/main/java/com/longexposure/temporal/workflows/{DownloadResult,DailyPipelineWorkflowInput,DownloadWorkflow.Input,ParseWorkflow.Input,CleanupWorkflow.Input}.java` | Records used as phase-workflow inputs/outputs |
 | `parser/src/main/java/com/longexposure/temporal/workflows/RefreshSymbolsWorkflow{,Impl}.java` | Weekly symbols-refresh workflow (separate cron) |
-| `parser/src/main/java/com/longexposure/temporal/activities/*.java` | 22 activity interfaces + impls |
+| `parser/src/main/java/com/longexposure/temporal/activities/*.java` | 28 activity interfaces + impls |
 | `parser/src/main/resources/schema.sql` | `pipeline_runs` + `validation_runs` table DDL |
 | `docs/temporal-design.md` (this file) | What's running and why |
 

@@ -6,6 +6,256 @@ Append-only record of architectural and operational decisions, ordered by date. 
 
 ---
 
+## 2026-05-30 — Refactor A: per-scorer extract prompts replace the 200-line universal `SYSTEM_PROMPT`
+
+The structural fix to a prompt-engineering iteration cycle that had
+grown unmanageable. `BlueprintExtractor`'s `SYSTEM_PROMPT` went
+through 12 versions (extract-v1 → extract-v11) over the project's
+lifetime, each iteration weaving a new `FRAMING RULES` entry into one
+universal ~200-line block. Every analytical-field addition (the
+2026-05-22 derived-field enrichment, the 2026-05-27 analytics suite,
+the 2026-05-28 class labels, the 2026-05-30 stats-jargon strip) grew
+the universal prompt with a rule, regardless of how many scorers
+needed it. The halt extractor didn't need to know how to render
+iceberg refill cadence; the iceberg extractor didn't need the halt
+phase-span rule. By v11 the prompt contained contradictory
+instructions — earlier rules said "include the parenthetical value
+for grounding," later rules said "lead with the WORD only" — and the
+model was being asked to resolve the contradiction on every call.
+
+**Decided.** Per-scorer prompts assembled at call time:
+
+```java
+String systemPrompt =
+    ScorerPrompts.COMMON_PREAMBLE                    // ~80 lines, universal
+    + "\n\n"
+    + ScorerPrompts.forScorer(scorerId).scorerSection();  // ~15-25 lines, focused
+```
+
+`COMMON_PREAMBLE` holds rules that genuinely apply to every event:
+JSON output format, grounding discipline ("don't invent numbers,
+don't round"), categorical class-label convention (when a field
+ends in `_class` or is a free-standing categorical like
+`drift_direction`/`slippage_direction`, render the label verbatim
+and do NOT include the underlying numeric value as a parenthetical),
+the co_occurring entry limit (at most 3 entries across nested types,
+summarized into ONE holistic sentence), no intent / no external
+news / no comparison, no restatement.
+
+Per-scorer sections — one per `EventScorer` (`halt`, `large_trade`,
+`sweep`, `post_cancel_cluster`, `layering`, `iceberg`,
+`liquidity_withdrawal`, `volume_deviation`, `time_in_book_drift`)
+— hold ONLY:
+- The event noun phrase (`"trading halt"`, `"iceberg execution"`,
+  `"volume surge"`, …) — used by `what_happened` in the output JSON.
+- Headline fields in priority order for `key_numbers`.
+- Supporting analytics specific to this scorer.
+- Per-field framing rules — only for fields this scorer emits.
+
+**Why this is the right shape.**
+
+1. *New analytical field touches exactly the scorer(s) that emit it.*
+   Adding `recovery_seconds` to `liquidity_withdrawal` updates one
+   25-line block, not a 200-line block. The blast radius of
+   prompt changes shrinks to the affected scorer.
+2. *No contradiction surface across scorers.* Each per-scorer prompt
+   is self-contained. Earlier in the project a rule like "include
+   the parenthetical for grounding" applied universally because the
+   prompt was universal — later rules contradicted it but had to
+   coexist. Per-scorer prompts mean a rule's scope is explicit at
+   declaration time.
+3. *The model's attention fits the task.* On every extract call the
+   model now sees ~100 lines of common discipline + ~20 lines of
+   the scorer it's actually extracting. Previously it saw 200 lines
+   of mixed-relevance rules. Empirically (the 05-11 in-flight audit)
+   the model was leaking jargon variables verbatim because the
+   universal prompt explicitly *instructed* parenthetical inclusion.
+   The structural fix removes the instruction at the source.
+4. *Testable independently.* `ScorerPromptsTest` verifies every
+   registered scorer resolves, event nouns are distinct, the
+   structural rules (class-label parenthetical ban, co_occurring
+   entry limit, halt phase-span VERBATIM, iceberg CV-strip,
+   volume_deviation no-sigma) survive. 8 unit tests, full suite
+   green.
+
+**Alternatives considered + rejected.**
+
+| Alternative | Why rejected |
+|---|---|
+| **Another v12 framing rule** | Doesn't address the root cause — just adds rule #N+1 to a contradictory block. The iteration cycle continues. |
+| **Code-side templated rendering for high-stats scorers (iceberg/layering/post_cancel)** | Tempting (would eliminate the LLM call for these scorers entirely). But loses prose variety + cuts against the project's stated direction ("the LLM is for prose flow"). Reserved as a later option if per-scorer prompts don't hold. |
+| **Sealed enum per scorer with type-safe prompt declaration** | Java records or sealed interfaces would be more compile-time safe. But the `String scorerId` mapping is established throughout the codebase; a refactor to type-safe enums would touch every scorer + activity. Cost > benefit for now. |
+| **Code generation from per-scorer YAML** | Externalizing prompts to YAML reads great for non-engineers but makes the prompt no longer compile-checked. We have no non-engineer prompt editors; the cost > benefit. |
+
+**Validation path.** v12 first deployed via a 1-day re-narrate of
+05-11. Sample audit of the v12 prose to verify the jargon-strip + co_occurring summarization holds across scorer types; if good,
+extend to the full 2-week LLM_CHAIN.
+
+**What's open.** The render prompt (`ProseRenderer`) is still universal
+(v10 holistic). It's tight enough at ~50 lines — render's job is
+narrower (turn blueprint → JSON {lead, facts, co_occurring}, schema-
+enforced). No per-scorer render variants planned.
+
+---
+
+## 2026-05-30 — Synthesis + aggregation become qualitative-only (drops per-symbol count claims)
+
+**Context.** At synth-v9 (2026-05-29), ~33% of daily synthesis
+attempts failed `SynthesisVerifier.AttributionVerifier` on
+count-fabrication: the model would write "TQQQ had eight liquidity
+withdrawals" when the truth-map said 18. v8 placed a PER-SYMBOL
+COUNTS truth table in the prompt to ground the model; v9 moved it
+AFTER the per-event list for recency bias. v8 raised pass rate
+33% → 67%; v9 kept it at 67%. The 3× verifier-driven retry
+mechanism didn't help because all 3 rolls produced the same
+fabrication pattern — not sampling variance, model-capability
+ceiling. Qwen-122B cannot reliably enumerate events per
+(symbol, scorer) when the corpus is large enough (~150 events).
+
+**Decided.** Synth prompt forbids per-symbol per-scorer count claims
+**by construction**. PROMPT_VERSION `synthesize-v10-qualitative-themes-2026-05-30`.
+The "QUALITATIVE-ONLY RULE" section explicitly enumerates forbidden
+phrasings ("TQQQ had 8 liquidity withdrawals") and approved
+substitutes ("TQQQ saw heavy / sustained / recurring liquidity
+withdrawals"). The PER-SYMBOL COUNTS truth table is removed from
+the user prompt — no temptation to fabricate against it. Same
+treatment applied to `aggregate-v8`, `aggregate-quarter-v4`,
+`aggregate-year-v4`.
+
+Specific numeric claims are still allowed when grounded in a
+per-event interpretation (a dollar value, a duration, a percentage
+that appears in the per-event list). Tickers are still verified
+(must appear in narrated symbols). Intent denylist still enforced.
+AttributionVerifier survives unchanged as a safety net — but should
+now have nothing to catch because the prompt produces no
+count-attribution prose.
+
+**Tradeoff accepted.** The themes paragraph becomes less
+quantitatively specific. A reader sees "TQQQ saw heavy liquidity
+withdrawals" instead of "TQQQ had 18 liquidity withdrawals." The
+numbers live in per-event prose (DESCRIBE/INTERPRET) where they
+remain at 100% verifier-pass. Synth's job is *cross-event
+character* (time-of-day shape, sector clustering, regime), not
+enumeration — qualitative language fits the job better anyway.
+
+**Why this is structural, not band-aid.** Three earlier responses
+to the same failure were *additive* — each added a prompt
+mechanism to push the model toward grounded counts:
+- v8 added the truth table
+- v9 added recency-bias placement
+- The retry mechanism added re-rolls
+
+Each made the failure mode *less likely* but didn't *eliminate* it,
+because the underlying task (accurately count events per symbol
+across a corpus) is beyond Qwen-122B's reliable capability. v10
+removes the task from the prompt — no count claims to verify
+because none are asked for. The model is asked to do what it can
+do well (qualitative theme identification) and not what it can't
+(quantitative enumeration).
+
+**Validated on 05-11** (2026-05-30 first run). Synth prose:
+
+> "Pre-market regulatory pauses set a somber tone for early
+> trading, as multiple halts on symbols including ASBPW and BOT
+> isolated equity names for hours before the opening bell. The
+> session's initial minutes quickly devolved into a corridor of
+> fragmented liquidity, where sustained withdrawals repeatedly
+> stripped depth from major indices like QQQ and TQQQ while
+> layering patterns clogged the books of leveraged products such
+> as DGP and SDS without executing trades…"
+
+Verifier: PASS. `numbers_checked=1`, `tickers_checked=12`,
+`mismatches=[]`. No per-symbol counts. Themes coherent
+(pre-market halts → opening fragmented liquidity → midday icebergs
+→ closing sweeps). Both weekly aggregates (v8) also pass on 05-11
++ 05-18 with 0 and 1 numbers respectively, fully qualitative
+including week-over-week trend phrasing ("a second consecutive
+week where rapid quote cycling dominated").
+
+**What this enables.** The launch-readiness ceiling I'd been
+documenting as "accept the synth count failures" is dissolved. The
+weekly rollup, the quarterly + yearly tiers (dormant gated), and
+the daily synthesis are all on a structurally sound prompt design.
+Future model upgrades that can count reliably can re-introduce
+counts via a v11 if useful — but the product surface doesn't
+require it.
+
+---
+
+## 2026-05-30 — Lifecycle activities: reachability-free prune + wall-clock raw-file TTL
+
+**Context.** Two operational hygiene gaps surfaced 2026-05-30:
+
+1. **Re-run narrative accumulation.** Every re-narrate (after a
+   prompt-version bump, breakdown-shape change, or verifier-driven
+   retry that changes inputs) inserted a new row per changed
+   `event_hash` and left the prior version behind. Steady-state
+   daily operation produces zero orphans, but the project has
+   re-run heavily during prompt iteration — accumulated ~1290
+   superseded narrative rows + ~1266 superseded interpretation
+   rows across the 2-week dataset. The earlier ad-hoc SQL prune
+   (`docs/sql/prune-stale-narrations.sql`) keyed reachability off
+   `selected_events`, which destroys the archive once retention
+   drops `selected_events` for old dates.
+
+2. **Raw .pcap.gz disk creep.** `CleanupFilesActivity` deletes
+   the 3 files for the day that JUST finished ONLY when
+   `runRetentionSweep && status==ok`. Two foot-guns: ad-hoc
+   re-runs pass `runRetentionSweep=false` (no cleanup), and the
+   decision keys off run status rather than wall-clock age (so a
+   failed parse leaves files behind forever). Observed: 432 GB
+   parked in `/storage/raw/`, 14 days of files at ~32 GB/day.
+
+**Decided.**
+
+- **`PruneStaleNarrationsActivity`** — window-function DELETE per
+  content-key `(trading_date, symbol, event_type, event_ts)` keeping
+  rank 1 by `(verifier_passed DESC, created_at DESC)`. Latest
+  passing row wins; if none passed, latest overall wins (never
+  delete an event's only narration). Reachability-free: does NOT
+  join `selected_events`, so it preserves the narrative archive
+  forever even after wire-data retention drops `selected_events`.
+  Two-arg shape: `pruneDate(date)` for the cron path (cheap, no-op
+  on steady-state days), `pruneAll()` for backfill catch-up.
+
+- **`RetainRawFilesActivity`** — walks `/storage/raw/`, parses the
+  `YYYYMMDD` stem from each `*.pcap.gz` filename, deletes anything
+  older than `RAW_RETENTION_DAYS` (default 3). Wall-clock TTL, no
+  pipeline_run dependency. IEX HIST is free + always available,
+  ~10 min to re-download, so 3-day retention covers "yesterday's
+  pipeline failed, rerun today" without holding more.
+
+Both wired into `FinalizeDayWorkflow` so every successful per-day
+pipeline auto-prunes its own re-narration churn + auto-cleans
+older raw files. Decoupled from `runRetentionSweep` — fire on
+every FinalizeDay run regardless of mode (only Mode.FULL_PIPELINE
+runs FinalizeDay; Mode.LLM_CHAIN and Mode.SCORE_AND_LLM skip it
+by design, since those modes are explicit re-runs that shouldn't
+compress chunks or delete files).
+
+**Why reachability-free prune is the right shape.** Two
+alternatives were on the table:
+
+| Alternative | Why rejected |
+|---|---|
+| **Reachability-driven prune (the earlier SQL).** Joins `selected_events` to determine which content-keys are "current." Anything not reachable gets deleted. | Once retention drops `selected_events` for old dates, ALL their narratives become "unreachable" and get destroyed. The narrative archive is the product; losing it is unacceptable. |
+| **No prune, just let rows accumulate.** | Tables grow unboundedly through prompt iteration. Eventually `narratives` for a single trading_date may have 5-10 rows per content-key. API queries dedupe at read time but the storage cost grows. |
+
+Reachability-free prune deduplicates per content-key without
+caring about whether the upstream substrate still exists.
+
+**Validated on 05-11** (2026-05-30 03:55 EDT, manual fire of
+`pruneAll()`). 1289 narrative rows + 1266 interpretation rows
+collapsed. Raw `find -mtime +3 -delete` freed 319 GB (432 → 113 GB).
+Both operations idempotent — re-running deletes nothing further.
+
+**What's open.** The raw-file TTL is wired into FinalizeDay but only
+runs for Mode.FULL_PIPELINE. A separately scheduled daily activity
+(independent of any pipeline run) would catch the edge case where
+no full pipeline runs for several days. Post-launch consideration.
+
+---
+
 ## 2026-05-29 (later) — Stages 1–6: `PipelineWorkflow` becomes the universal project entry point + cron migration
 
 `PipelineWorkflow` shipped in Phase 8 (1352dcb) as the orchestrator
