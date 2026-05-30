@@ -110,31 +110,57 @@ public final class DailyDataTableBuilder {
         ArrayNode bullets = json.createArrayNode();
         List<String> candidates = new ArrayList<>();
 
-        // Bullet 1 — most-active symbol with event count.
+        // Bullet 1 — most-active symbol(s). When multiple symbols tie at the
+        // max event count, list them together — "a broad-based session"
+        // reads better than picking one arbitrary leader.
         ArrayNode topSymbols = (ArrayNode) daySummary.path("top_symbols");
         if (topSymbols != null && topSymbols.size() > 0) {
-            JsonNode top = topSymbols.get(0);
-            String sym = top.path("symbol").asText("");
-            long events = top.path("events").asLong(0);
-            if (!sym.isEmpty() && events > 0) {
-                candidates.add(sym + " led the day with " + events + " events");
+            long maxEvents = topSymbols.get(0).path("events").asLong(0);
+            List<String> tied = new ArrayList<>();
+            for (JsonNode row : topSymbols) {
+                if (row.path("events").asLong(0) == maxEvents) {
+                    String s = row.path("symbol").asText("");
+                    if (!s.isEmpty()) tied.add(s);
+                }
+            }
+            if (maxEvents > 0 && !tied.isEmpty()) {
+                if (tied.size() == 1) {
+                    candidates.add(tied.get(0) + " led the day with " + maxEvents + " events");
+                } else {
+                    candidates.add(joinList(tied) + " each led with " + maxEvents + " events");
+                }
             }
         }
 
-        // Bullet 2 — dominant scorer for the day.
+        // Bullet 2 — dominant scorer(s) for the day. Same tie-aware pattern.
+        // The per-scorer ceiling=30 means several scorers often tie at the
+        // ceiling — list them together rather than picking the alphabetic-
+        // first as if it "dominated" by 1 event.
         ObjectNode byScorer = (ObjectNode) daySummary.path("by_scorer");
         if (byScorer != null && !byScorer.isMissingNode()) {
-            String topScorer = null;
-            long topScorerCount = 0;
+            long maxCount = 0;
             java.util.Iterator<String> sit = byScorer.fieldNames();
             while (sit.hasNext()) {
-                String s = sit.next();
-                long c = byScorer.path(s).asLong(0);
-                if (c > topScorerCount) { topScorerCount = c; topScorer = s; }
+                long c = byScorer.path(sit.next()).asLong(0);
+                if (c > maxCount) maxCount = c;
             }
-            if (topScorer != null && topScorerCount > 0) {
-                candidates.add(humanScorer(topScorer) + " dominated ("
-                        + topScorerCount + " events)");
+            List<String> tiedScorers = new ArrayList<>();
+            sit = byScorer.fieldNames();
+            while (sit.hasNext()) {
+                String s = sit.next();
+                if (byScorer.path(s).asLong(0) == maxCount) tiedScorers.add(s);
+            }
+            // Deterministic order: scorer_id ASC (matches SQL secondary sort).
+            java.util.Collections.sort(tiedScorers);
+            if (maxCount > 0 && !tiedScorers.isEmpty()) {
+                if (tiedScorers.size() == 1) {
+                    candidates.add(humanScorer(tiedScorers.get(0)) + " dominated ("
+                            + maxCount + " events)");
+                } else {
+                    List<String> labels = new ArrayList<>();
+                    for (String s : tiedScorers) labels.add(humanScorer(s));
+                    candidates.add(joinList(labels) + " each saw " + maxCount + " events");
+                }
             }
         }
 
@@ -194,6 +220,31 @@ public final class DailyDataTableBuilder {
                     + " consecutive session");
         }
         return out;
+    }
+
+    /**
+     * Join a list as journalistic prose: ["A"] → "A"; ["A","B"] → "A and B";
+     * ["A","B","C"] → "A, B, and C"; ["A","B","C","D"] → "A, B, C, and D".
+     * Caps at 4 with overflow indicator: ["A","B","C","D","E"] → "A, B, C,
+     * and 2 others".
+     */
+    private static String joinList(final List<String> items) {
+        if (items == null || items.isEmpty()) return "";
+        int n = items.size();
+        if (n == 1) return items.get(0);
+        if (n == 2) return items.get(0) + " and " + items.get(1);
+        if (n <= 4) {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < n - 1; i++) {
+                sb.append(items.get(i));
+                sb.append(", ");
+            }
+            sb.append("and ").append(items.get(n - 1));
+            return sb.toString();
+        }
+        // 5+: show first 3 + "and N others"
+        return items.get(0) + ", " + items.get(1) + ", " + items.get(2)
+                + ", and " + (n - 3) + " others";
     }
 
     private static String ordinal(final int n) {
@@ -693,7 +744,7 @@ public final class DailyDataTableBuilder {
     private static String topScorerForDay(final Connection conn, final LocalDate date) throws SQLException {
         try (PreparedStatement st = conn.prepareStatement(
                 "SELECT scorer_id FROM selected_events WHERE trading_date=? "
-                  + "GROUP BY scorer_id ORDER BY COUNT(*) DESC LIMIT 1")) {
+                  + "GROUP BY scorer_id ORDER BY COUNT(*) DESC, scorer_id ASC LIMIT 1")) {
             st.setObject(1, date);
             try (ResultSet rs = st.executeQuery()) { return rs.next() ? rs.getString(1) : null; }
         }
@@ -702,7 +753,7 @@ public final class DailyDataTableBuilder {
     private static String topSymbolForDay(final Connection conn, final LocalDate date) throws SQLException {
         try (PreparedStatement st = conn.prepareStatement(
                 "SELECT symbol FROM selected_events WHERE trading_date=? "
-                  + "GROUP BY symbol ORDER BY COUNT(*) DESC LIMIT 1")) {
+                  + "GROUP BY symbol ORDER BY COUNT(*) DESC, symbol ASC LIMIT 1")) {
             st.setObject(1, date);
             try (ResultSet rs = st.executeQuery()) { return rs.next() ? rs.getString(1) : null; }
         }
@@ -805,15 +856,15 @@ public final class DailyDataTableBuilder {
                 "x");
         addExtreme(out, conn, tradingDate, json,
                 "most_orders_in_layering", "layering",
-                "(breakdown->>'orders')::float", "orders",
+                "REPLACE(breakdown->>'orders', ',', '')::float", "orders",
                 "orders");
         addExtreme(out, conn, tradingDate, json,
                 "most_orders_in_post_cancel", "post_cancel_cluster",
-                "(breakdown->>'orders')::float", "orders",
+                "REPLACE(breakdown->>'orders', ',', '')::float", "orders",
                 "orders");
         addExtreme(out, conn, tradingDate, json,
                 "most_fills_iceberg", "iceberg",
-                "(breakdown->>'fills')::float", "fills",
+                "REPLACE(breakdown->>'fills', ',', '')::float", "fills",
                 "fills");
         addExtreme(out, conn, tradingDate, json,
                 "deepest_sweep_levels", "sweep",

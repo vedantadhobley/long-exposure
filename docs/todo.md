@@ -247,6 +247,24 @@ These don't materially affect the relaunch outcome (dormant until enough data ac
 
 > **Tiered baselines + rollup hierarchy — full design in [`tiered-baselines-design.md`](tiered-baselines-design.md).** Items 17–19 SHIPPED in Phase 2/3 (2026-05-26/27); the live post-launch work is the **calendar rollup hierarchy + cascade** (§8, decided 2026-05-27) and the drift-prevention items.
 
+**Cross-symbol context expansion — Round 8 candidate** (decided 2026-05-30, deferred from launch). Goal: INTERPRET prose can reference correlated symbols' activity within a ±5 min window (e.g. "AMD layering at 14:23 while NVDA and INTC saw sweeps in the same window — semiconductor sector"). The architecture today has a hard "single-symbol grounding" model that this would dissolve. **Reference this gap in the whitepaper.** Build path:
+
+  - **(a) Sector classification on `symbols` table.** Source options: SEC EDGAR `sicCode` (free, coarse 4-digit; "5812 Eating Places" lacks "fast food vs fine dining" granularity); GICS sector + sub-industry (industry standard, paid licensing); hand-curated CSV for top 500 names + SIC fallback for long-tail. Storage: `symbols.sector TEXT` + `symbols.gics_sub_industry TEXT`. Estimated effort: 2-3 hr.
+  - **(b) Correlated-symbol resolver.** Static buddy list derived from top-10 holdings of sector ETFs (XLK, SOXX, XBI, XLF, XLV, XLE, etc.). Hand-build a `symbol_correlations` table once; rebuild monthly. Effort: 3-4 hr. *Misses thematic correlations* (e.g., regional bank stress correlates all small-caps); dynamic intraday-return correlation is v2 enhancement.
+  - **(c) Cross-symbol event-window query.** New `TradeWindow.crossSymbol(symbol, ts, windowSec)` returns events from correlated symbols within ±N min. SQL JOIN against `selected_events`. Effort: 2 hr.
+  - **(d) INTERPRET prompt extension.** New `CORRELATED-SYMBOL ACTIVITY` input block with grounding rules (every additional symbol must (i) appear in the correlations table and (ii) have a real `selected_events` row in the window). Effort: 1 hr.
+  - **(e) Verifier extension — symbol-aware grounding** *(the architectural change)*. Currently the verifier asserts "event symbol must appear in prose." Cross-symbol opens two new fabrication classes: (i) symbol mentioned that isn't a real correlated ticker, (ii) symbol mentioned that IS correlated but had no activity in the window. AttributionVerifier needs symbol-aware extension; track per-mention grounding paths. Effort: 2-3 hr.
+  - **(f) Re-interpret all loaded days + audit + iterate.** Expected 1-2 iteration cycles on phrasing. Joi cost: ~90 min/iteration. Audit: 2-4 hr.
+
+  **Total: 16-20 hr code + joi time.**
+
+  **Risks (significant):**
+  - Dissolves single-symbol grounding moat — the architectural invariant the rest of the system rests on
+  - Expands inference surface: comparison claims often slide into causal claims ("X while Y" → "X causing Y"); strong prompt rules + verifier expansion needed to prevent slide
+  - Restarts the prompt-iteration cycle Refactor A escaped — every cross-symbol prompt I've seen at any company starts with hallucination because models know correlation patterns from training and invent activity that fits the pattern
+
+  **Why deferred:** post-launch lets us validate sector classification against real user reactions, see whether readers actually ask for cross-symbol context vs being satisfied with day-level synthesis, take time on the GICS data sourcing question, and properly design the verifier expansion without rushing.
+
 17. ✅ **Daily cagg retention/refresh window 30 d → 400 d** — done 2026-05-26 (`afd9b25`). Exact ~1-year baselines that outlive the 2-week wire retention; `RetentionSweepActivity` provably never drops it.
 18. ✅ **`BaselineProvider`/`CaggBaselineProvider` + `VolumeDeviationScorer` refactor** — done 2026-05-26 (`e531d26`). Decoupled scoring from cagg SQL; behavior-preserving (42-symbol set reproduced exactly). + `RefreshBaselinesActivity` (first Score-phase step).
 19. ✅ **Weekly rollup recompute-daily + prior-week window** — done 2026-05-26 (`b06da2b`). Now extends to the full hierarchy ↓.

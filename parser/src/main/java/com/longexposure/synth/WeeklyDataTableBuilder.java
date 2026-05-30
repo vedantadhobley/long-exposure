@@ -102,32 +102,60 @@ public final class WeeklyDataTableBuilder {
         ArrayNode bullets = json.createArrayNode();
         List<String> candidates = new ArrayList<>();
 
-        // Bullet 1 — most-active symbol with day-presence framing.
+        // Bullet 1 — most-active symbol(s) with day-presence framing.
+        // Tie-aware: when multiple symbols tie at max event count, list them
+        // together. Days-present from the first tied symbol (all tied symbols
+        // should have similar but not necessarily identical days_present).
         if (topSymbols.size() > 0) {
-            JsonNode top = topSymbols.get(0);
-            String sym = top.path("symbol").asText("");
-            int events = top.path("total_events").asInt(0);
-            int days = top.path("days_present").asInt(0);
-            if (!sym.isEmpty()) {
-                String dayFrame = (days >= 5) ? "every session"
-                                : (days >= 4) ? "in " + days + " of 5 sessions"
-                                : "across " + days + " sessions";
-                candidates.add(sym + " led activity with " + events + " events " + dayFrame);
+            int maxEvents = topSymbols.get(0).path("total_events").asInt(0);
+            List<String> tied = new ArrayList<>();
+            int daysFirst = 0;
+            for (JsonNode row : topSymbols) {
+                if (row.path("total_events").asInt(0) == maxEvents) {
+                    String s = row.path("symbol").asText("");
+                    if (!s.isEmpty()) {
+                        if (tied.isEmpty()) daysFirst = row.path("days_present").asInt(0);
+                        tied.add(s);
+                    }
+                }
+            }
+            if (maxEvents > 0 && !tied.isEmpty()) {
+                String dayFrame = (daysFirst >= 5) ? "every session"
+                                : (daysFirst >= 4) ? "in " + daysFirst + " of 5 sessions"
+                                : "across " + daysFirst + " sessions";
+                if (tied.size() == 1) {
+                    candidates.add(tied.get(0) + " led activity with " + maxEvents
+                            + " events " + dayFrame);
+                } else {
+                    candidates.add(joinList(tied) + " each led with " + maxEvents
+                            + " events " + dayFrame);
+                }
             }
         }
 
-        // Bullet 2 — dominant scorer type for the week.
-        String topScorer = null;
-        long topScorerCount = 0;
+        // Bullet 2 — dominant scorer type(s) for the week. Tie-aware as well.
+        long maxScorerCount = 0;
         java.util.Iterator<String> sit = scorerMix.fieldNames();
         while (sit.hasNext()) {
-            String s = sit.next();
-            long c = scorerMix.path(s).asLong(0);
-            if (c > topScorerCount) { topScorerCount = c; topScorer = s; }
+            long c = scorerMix.path(sit.next()).asLong(0);
+            if (c > maxScorerCount) maxScorerCount = c;
         }
-        if (topScorer != null && topScorerCount > 0) {
-            candidates.add(humanScorer(topScorer) + " dominated the week ("
-                    + topScorerCount + " events)");
+        List<String> tiedScorers = new ArrayList<>();
+        sit = scorerMix.fieldNames();
+        while (sit.hasNext()) {
+            String s = sit.next();
+            if (scorerMix.path(s).asLong(0) == maxScorerCount) tiedScorers.add(s);
+        }
+        java.util.Collections.sort(tiedScorers);
+        if (maxScorerCount > 0 && !tiedScorers.isEmpty()) {
+            if (tiedScorers.size() == 1) {
+                candidates.add(humanScorer(tiedScorers.get(0)) + " dominated the week ("
+                        + maxScorerCount + " events)");
+            } else {
+                List<String> labels = new ArrayList<>();
+                for (String s : tiedScorers) labels.add(humanScorer(s));
+                candidates.add(joinList(labels) + " each saw " + maxScorerCount + " events");
+            }
         }
 
         // Bullet 3 — largest block (or longest halt if no block stood out).
@@ -203,6 +231,24 @@ public final class WeeklyDataTableBuilder {
                     + " consecutive week");
         }
         return out;
+    }
+
+    /** Same shape as {@link DailyDataTableBuilder#joinList}. */
+    private static String joinList(final List<String> items) {
+        if (items == null || items.isEmpty()) return "";
+        int n = items.size();
+        if (n == 1) return items.get(0);
+        if (n == 2) return items.get(0) + " and " + items.get(1);
+        if (n <= 4) {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < n - 1; i++) {
+                sb.append(items.get(i)).append(", ");
+            }
+            sb.append("and ").append(items.get(n - 1));
+            return sb.toString();
+        }
+        return items.get(0) + ", " + items.get(1) + ", " + items.get(2)
+                + ", and " + (n - 3) + " others";
     }
 
     private static String ordinal(final int n) {
@@ -297,7 +343,7 @@ public final class WeeklyDataTableBuilder {
                                               final LocalDate from, final LocalDate to) throws SQLException {
         try (PreparedStatement st = conn.prepareStatement(
                 "SELECT scorer_id FROM selected_events WHERE trading_date BETWEEN ? AND ? "
-                  + "GROUP BY scorer_id ORDER BY COUNT(*) DESC LIMIT 1")) {
+                  + "GROUP BY scorer_id ORDER BY COUNT(*) DESC, scorer_id ASC LIMIT 1")) {
             st.setObject(1, from);
             st.setObject(2, to);
             try (ResultSet rs = st.executeQuery()) { return rs.next() ? rs.getString(1) : null; }
@@ -308,7 +354,7 @@ public final class WeeklyDataTableBuilder {
                                               final LocalDate from, final LocalDate to) throws SQLException {
         try (PreparedStatement st = conn.prepareStatement(
                 "SELECT symbol FROM selected_events WHERE trading_date BETWEEN ? AND ? "
-                  + "GROUP BY symbol ORDER BY COUNT(*) DESC LIMIT 1")) {
+                  + "GROUP BY symbol ORDER BY COUNT(*) DESC, symbol ASC LIMIT 1")) {
             st.setObject(1, from);
             st.setObject(2, to);
             try (ResultSet rs = st.executeQuery()) { return rs.next() ? rs.getString(1) : null; }
@@ -546,10 +592,10 @@ public final class WeeklyDataTableBuilder {
                        COUNT(*) AS total,
                        (SELECT scorer_id FROM selected_events s2
                          WHERE s2.trading_date = s1.trading_date
-                         GROUP BY scorer_id ORDER BY COUNT(*) DESC LIMIT 1) AS dominant_scorer,
+                         GROUP BY scorer_id ORDER BY COUNT(*) DESC, scorer_id ASC LIMIT 1) AS dominant_scorer,
                        (SELECT symbol FROM selected_events s3
                          WHERE s3.trading_date = s1.trading_date
-                         GROUP BY symbol ORDER BY COUNT(*) DESC LIMIT 1) AS notable_symbol
+                         GROUP BY symbol ORDER BY COUNT(*) DESC, symbol ASC LIMIT 1) AS notable_symbol
                   FROM selected_events s1
                  WHERE trading_date BETWEEN ? AND ?
                  GROUP BY trading_date
