@@ -70,6 +70,15 @@ final class ProseCharCheck {
             case 0x00B1:  // plus-minus ±
             case 0x00B2:  // superscript 2
             case 0x00B3:  // superscript 3
+            case 0x00B5:  // MICRO SIGN µ — used in "µs" (microseconds);
+                          // post_cancel + layering scorers emit
+                          // median_lifetime_microseconds with µs suffix.
+                          // CRITICAL: this is the canonical microseconds
+                          // notation; rejecting it would cause every
+                          // sub-ms event narrative to fail verifier.
+            case 0x03BC:  // GREEK SMALL LETTER MU μ — models sometimes
+                          // emit this variant instead of U+00B5.
+                          // Visually identical to most readers; allow both.
             case 0x00BC:  // ¼
             case 0x00BD:  // ½
             case 0x00BE:  // ¾
