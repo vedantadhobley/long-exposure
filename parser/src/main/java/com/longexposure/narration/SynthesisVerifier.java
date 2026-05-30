@@ -165,6 +165,14 @@ public final class SynthesisVerifier {
                          final Map<String, Integer> bySymbolTotal) {
         List<String> mismatches = new ArrayList<>();
 
+        // ─── Layer 0: non-English / non-journalism char check ───────────────
+        // Multilingual model leakage rejection. See ProseCharCheck.
+        String nonAscii = ProseCharCheck.firstNonAllowedChar(prose);
+        if (nonAscii != null) {
+            mismatches.add("prose contains non-English / non-journalism character: " + nonAscii);
+            return new Result(false, mismatches, 0, 0);
+        }
+
         // ─── Ticker fabrication check ───────────────────────────────────────
         // Build a normalized day-symbols set that includes BOTH the raw form
         // ("OTAI=", "BRK.B") AND the punctuation-stripped form ("OTAI", "BRK").

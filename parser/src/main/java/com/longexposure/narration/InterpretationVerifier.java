@@ -91,6 +91,15 @@ public final class InterpretationVerifier {
                          final String scorerId) {
         List<String> mismatches = new ArrayList<>();
 
+        // Layer 0: non-English / non-journalism char check. Qwen multilingual-
+        // leakage rejection — see ProseCharCheck javadoc + GroundingVerifier
+        // Layer 0 for full rationale.
+        String nonAscii = ProseCharCheck.firstNonAllowedChar(prose);
+        if (nonAscii != null) {
+            mismatches.add("prose contains non-English / non-journalism character: " + nonAscii);
+            return new Result(false, mismatches, 0);
+        }
+
         // Number check: every numeric token in prose must canonicalize
         // to something present in the breakdown OR pre-window OR
         // post-window summary.

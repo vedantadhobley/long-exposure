@@ -153,6 +153,17 @@ public final class GroundingVerifier {
                          final String scorerId) {
         List<String> mismatches = new ArrayList<>();
 
+        // Layer 0: ASCII + journalism-punctuation only. Qwen is multilingual
+        // and occasionally emits a non-English token mid-clause under sampling
+        // pressure (Chinese char, Cyrillic, etc.). Any such leak fails the
+        // verifier here so the retry loop re-rolls with sampling variance —
+        // a different roll almost never reproduces the same encoding artifact.
+        String nonAscii = ProseCharCheck.firstNonAllowedChar(prose);
+        if (nonAscii != null) {
+            mismatches.add("prose contains non-English / non-journalism character: " + nonAscii);
+            return new Result(false, mismatches, 0);  // fail fast — don't bother checking the rest
+        }
+
         // Layer 1: every key_number.source_field must exist in breakdown.
         // Supports dotted paths (e.g. "co_occurring.during_event.post_cancel_cluster.sum_total_shares")
         // so enrichment-derived numbers can be cited by their nested location.
