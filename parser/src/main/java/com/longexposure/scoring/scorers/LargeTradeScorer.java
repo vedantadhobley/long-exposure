@@ -144,6 +144,11 @@ public final class LargeTradeScorer implements EventScorer {
         breakdown.put("size_thousand_shares",     BreakdownFmt.round(size / 1_000.0, 1));
         breakdown.put("event_session_phase",      BreakdownFmt.sessionPhase(ts));
         breakdown.put("event_phase_label",        BreakdownFmt.sessionPhaseLabel(ts));
+        // v14 (2026-05-30): ts_et anchors the singleton in clock time
+        // ("at 09:32 ET"). Was missing — large_trade is a point-in-time
+        // event without start/end, but the prompt told the model to use
+        // start_et which doesn't exist on this scorer.
+        breakdown.put("ts_et",                    BreakdownFmt.toEtTime(ts));
 
         ArrayNode sourceRefs = json.createArrayNode();
         ObjectNode ref = json.createObjectNode();

@@ -143,7 +143,13 @@ public final class HaltScorer implements EventScorer {
             breakdown.put("halt_duration_seconds", durationS);
             breakdown.put("halt_duration_pct_of_regular_session",
                           BreakdownFmt.round(durationS * 100.0 / BreakdownFmt.REGULAR_SESSION_SECONDS, 1));
-            breakdown.put("halt_duration_bucket", durationBucket(durationS));
+            String bucket = durationBucket(durationS);
+            breakdown.put("halt_duration_bucket", bucket);
+            // v14 (2026-05-30): prose-ready bucket label. The raw bucket
+            // ("half_to_full_session") leaks into prose with underscores when
+            // the model fails to translate it. Pre-formatted label removes
+            // that failure mode by construction.
+            breakdown.put("halt_duration_bucket_label", durationBucketLabel(bucket));
         }
         breakdown.put("halt_start_session_phase",  BreakdownFmt.sessionPhase(haltStart));
         breakdown.put("halt_start_phase_label",    BreakdownFmt.sessionPhaseLabel(haltStart));
@@ -210,6 +216,26 @@ public final class HaltScorer implements EventScorer {
         if (seconds < BreakdownFmt.REGULAR_SESSION_SECONDS / 2) return "2h_to_half_session";
         if (seconds < BreakdownFmt.REGULAR_SESSION_SECONDS)    return "half_to_full_session";
         return "exceeds_full_session";
+    }
+
+    /**
+     * Prose-friendly translation of the {@code halt_duration_bucket}
+     * categorical. v14 (2026-05-30) — the raw bucket value
+     * ("half_to_full_session") leaks into prose with underscores when
+     * the model fails to translate it. This pre-formatted label is
+     * what the LLM should reference; the raw bucket stays in the
+     * breakdown for analyst drill-down.
+     */
+    private static String durationBucketLabel(final String bucket) {
+        return switch (bucket) {
+            case "under_5min"             -> "a sub-5-minute pause";
+            case "5_to_30min"             -> "lasting between 5 and 30 minutes";
+            case "30min_to_2h"            -> "running between 30 minutes and 2 hours";
+            case "2h_to_half_session"     -> "between 2 hours and half a session";
+            case "half_to_full_session"   -> "between half and a full trading session";
+            case "exceeds_full_session"   -> "exceeding a full trading session";
+            default                        -> bucket;
+        };
     }
 
     /**

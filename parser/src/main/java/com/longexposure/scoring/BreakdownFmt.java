@@ -24,9 +24,16 @@ public final class BreakdownFmt {
 
     private static final ZoneId ET = ZoneId.of("America/New_York");
 
-    /** Time-of-day in ET with millisecond precision, e.g. {@code "07:08:14.994"}. */
+    /**
+     * Time-of-day in ET at journalist-standard MINUTE precision, e.g.
+     * {@code "07:08"}. v14 (2026-05-30) dropped seconds + milliseconds —
+     * the millisecond precision (was {@code "HH:mm:ss.SSS"}) was leaking
+     * into prose as "halted at 07:07:47.519 ET" which reads as machine
+     * output, not journalism. Sub-minute event timing lives in
+     * {@code source_refs.ts_nanos} for analyst drill-down.
+     */
     private static final DateTimeFormatter ET_TIME_FMT =
-            DateTimeFormatter.ofPattern("HH:mm:ss.SSS").withZone(ET);
+            DateTimeFormatter.ofPattern("HH:mm").withZone(ET);
 
     private BreakdownFmt() {}
 

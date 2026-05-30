@@ -89,37 +89,48 @@ public final class ScorerPrompts {
                 renderer. Do NOT include every metric of every nested type —
                 that produces a CSV-shaped restatement, not narration.
 
-            TIME-OF-DAY CONTEXT (load-bearing — include unless absent):
+            TIME-OF-DAY CONTEXT (load-bearing for intraday events):
 
-              EVERY event MUST carry a time anchor in its narration. Without
-              one the reader sees "AMZN executed a $23M block" with no idea
-              whether it happened at the open, midday, or close. Two
-              categorical fields + two specific-time fields are available:
+              EVERY intraday event MUST carry a time anchor in its narration.
+              Without one the reader sees "AMZN executed a $23M block" with
+              no idea whether it happened at the open, midday, or close.
 
-              - event_phase_label (universal on non-halt events): pre-built
-                session-phase phrase like "in the opening minutes of regular
-                trading" / "during the midday lull" / "in the final minutes
-                before the close" / "in pre-market trading" / "in the
-                afternoon session". INCLUDE IT in key_numbers — verbatim
-                categorical label per the class-label rule. This is the
-                MINIMUM time context for every non-halt event.
-              - start_et (universal on non-halt events): the actual clock
-                time the event began, "HH:MM:SS.ms" format like "10:34:12.748".
-                For SINGLETON events (large_trade, volume_deviation), include
-                as a key_number alongside event_phase_label — gives the
-                reader specific timing ("at 10:34 AM ET").
-                For DURATION events (sweep, iceberg, layering, post_cancel,
-                liquidity_withdrawal), prefer event_phase_label alone unless
-                the start time itself is journalistically interesting (e.g.,
-                exact close-bell timing). The duration_humanized field
-                already carries the "how long" — no need for both start and
-                end times.
-              - Halt events use halt_phase_span_label (the grammatical
-                phrase) and may additionally include halt_start_et /
-                halt_end_et for precise timing when notable.
-              - end_et (universal on non-halt duration events): mirror of
-                start_et for event end. Mostly drill-down; include only
-                when both endpoints matter to the story (rare).
+              Inter-day scorers (volume_deviation, time_in_book_drift) are
+              day-level signals and DO NOT carry per-event time anchors —
+              skip this section for those.
+
+              Available fields (v14 — all clock times are HH:MM ET minute
+              precision):
+
+              - event_phase_label (universal on non-halt intraday events):
+                pre-built session-phase phrase like "in the opening minutes
+                of regular trading" / "during the midday lull" / "in the
+                final minutes before the close" / "in pre-market trading" /
+                "in the afternoon session". INCLUDE IT in key_numbers —
+                verbatim categorical label per the class-label rule. This
+                is the MINIMUM time context for every non-halt intraday
+                event.
+              - ts_et (SINGLETON events — large_trade only): point-in-time
+                clock anchor "HH:MM" format like "09:32". For a singleton,
+                include as a key_number alongside event_phase_label —
+                "at 09:32 ET" reads cleaner than just "in the opening
+                minutes". Render verbatim then append " ET" in prose.
+              - start_et / end_et (DURATION events: sweep, iceberg, layering,
+                post_cancel, liquidity_withdrawal): "HH:MM" clock anchors
+                for event begin/end. Prefer event_phase_label alone unless
+                the start time itself is journalistically interesting
+                (e.g., exact opening-bell or close-bell timing). The
+                duration_humanized field already carries "how long" — no
+                need to surface both start and end times for most
+                narrations.
+              - Halt events use halt_phase_span_label (grammatical phrase)
+                + halt_start_et / halt_end_et (HH:MM clock times). For halts,
+                clock times are highly informative — "halted at 07:07 ET,
+                resumed at 10:00 ET" anchors the suspension precisely.
+
+              NEVER append a date or year to ET times. NEVER fabricate
+              seconds beyond the HH:MM provided. The breakdown only carries
+              minute precision; do not invent ":00" or "30 seconds in".
 
             NO INTENT, NO EXTERNAL NEWS, NO COMPARISON:
               - Do not assert intent ("the algo was trying to X",
@@ -175,12 +186,13 @@ public final class ScorerPrompts {
               - halt_reason_label      — "regulatory news-pending halt" / "LULD
                 pause" / etc. Use ONLY this pre-formatted label; do NOT
                 attempt to interpret raw halt_reason codes (T1, MCB1, etc.).
-              - halt_duration_bucket   — categorical bucket like
-                "2h_to_half_session" / "half_to_full_session" / "under_30min".
-                Render the LABEL verbatim per the categorical rule (replacing
-                underscores with prose if needed: "between 2 hours and a
-                half-session"). Optional — only when the duration story
-                benefits from the bucket framing.
+              - halt_duration_bucket_label — pre-formatted prose phrase
+                ("between 2 hours and half a session" / "exceeding a full
+                trading session" / "a sub-5-minute pause" / etc.). USE
+                VERBATIM. Do NOT use the raw halt_duration_bucket field
+                (which has snake_case values) — that's drill-down only.
+                Optional — include when the duration story benefits from
+                the bucket framing alongside halt_duration.
               - halt_duration_pct_of_regular_session — "accounting for N% of
                 the regular session"
               - halt_start_et / halt_end_et — specific HH:MM:SS clock times.
@@ -203,8 +215,17 @@ public final class ScorerPrompts {
             """
             SCORER: large_trade — "large block trade".
 
-            HEADLINE FIELDS (pick 3-4 for key_numbers, in this priority):
+            HEADLINE FIELDS (pick 3-5 for key_numbers, in this priority):
               - notional_dollars         — the defining stat ($N,NNN,NNN.NN)
+              - ts_et                    — clock time at HH:MM precision
+                ("at 09:32 ET"). Singletons need an exact moment anchor;
+                event_phase_label alone is too vague for a one-time print.
+                Render verbatim and append " ET" in the prose value.
+              - event_phase_label        — session-phase categorical
+                ("in the opening minutes of regular trading"). Pair with
+                ts_et for both the moment and the surrounding context, or
+                use phase alone if the exact second isn't journalistically
+                interesting.
               - pct_of_baseline_volume   — fraction of the symbol's typical
                 daily IEX volume the print represents ("N% of baseline volume")
               - pre_event_ofi_class      — when non-"balanced", the book's
