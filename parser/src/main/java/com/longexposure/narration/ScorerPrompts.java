@@ -144,6 +144,55 @@ public final class ScorerPrompts {
                 include the same underlying datum twice in different forms
                 (e.g., notional_dollars AND notional_million_dollars; the
                 class label AND the raw numeric value of the same metric).
+
+            CANONICAL VOCABULARY (use these EXACT phrases — same metric
+            referenced different ways across narrations reads as different
+            metrics to a scanning reader):
+
+              Baseline / trailing-history references:
+                ✓ "the trailing 2-week median"   ← for cagg-backed daily_volume_by_symbol
+                ✓ "the trailing 14-day median"   ← when day-count is more salient
+                ✓ "its typical lifetime"         ← when no specific trailing window applies
+                ✗ "the average" / "average daily volume" — ambiguous (mean vs median)
+                ✗ "normal" / "the norm" / "what's typical" — vague
+                ✗ "running mean" / "running average" — wrong central tendency
+                ✗ "the baseline" alone — under-specified; say what window
+
+              Multipliers (deviation_x, drift_x, refill_cadence_x, *_ratio fields):
+                ✓ "22.2x the trailing median"    ← exact 1-decimal value + "x" suffix
+                ✓ "5x its typical lifetime"      ← whole-number values render without ".0"
+                ✗ "22 times" / "22-fold" / "twenty-two times" — drops the "x" form
+                ✗ "around 22x" / "approximately 22x" / "more than 20x" — drops precision
+                ✗ "22.2 multiples of" — overly formal; not how journalists write
+
+              Slippage / cost metrics:
+                ✓ "7.4 basis points slippage" / "slipped 7.4 bps"
+                ✗ "the price paid up by 7.4 bps" / "the sweep walked 7.4 bps"
+                ✗ "7.4 basis points of slippage" — keep adjacency: number-then-unit-then-metric
+
+              Depth removal / book impact:
+                ✓ "removed 29.5% of displayed depth"
+                ✓ "29.5% of displayed depth pulled"
+                ✗ "29.5% of the visible book" / "of available liquidity" / "of the order book"
+
+              Display ratio (iceberg):
+                ✓ "the displayed tip represented 0.52% of total executed"
+                ✓ "displayed only 0.52% of total size"
+                ✗ "iceberg ratio of 0.52%" / "tip ratio" / "displayed proportion"
+
+              Depth from touch (layering):
+                ✓ "299.3 basis points from the touch"
+                ✓ "299.3 bps off the best price"
+                ✗ "299.3 bps off the touch" — "off" is ambiguous; prefer "from"
+                ✗ "299.3 bps from BBO" — acronym-heavy; spell out
+
+              Order-to-trade ratio (post_cancel / layering):
+                ✓ "no fills against 131 posted orders"   ← when otr is infinite (0 fills)
+                ✓ "131 orders per fill"                  ← when otr is a finite number
+                ✗ "an infinite order-to-trade ratio" / "order-to-trade ratio of infinity"
+
+              The numeric value in your output stays the value in the breakdown.
+              The PHRASE around it is what this vocabulary constrains.
             """;
 
     /** Get the per-scorer prompt for a given scorer id. */

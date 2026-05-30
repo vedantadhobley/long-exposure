@@ -73,7 +73,7 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
      * misattribution slightly worse. This v7 supersedes it via the
      * structural verifier approach.
      */
-    private static final String PROMPT_VERSION = "synthesize-v10-qualitative-themes-2026-05-30";
+    private static final String PROMPT_VERSION = "synthesize-v11-canonical-vocabulary-2026-05-30";
 
     /** Max LLM attempts per day — re-roll on verifier failure (temp 1.0 gives variance). */
     private static final int MAX_LLM_ATTEMPTS = 3;
@@ -144,6 +144,27 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
             was trying to X"). Do not editorialize about severity ("striking",
             "wild volatility"). Do not compare to other days — you only have this
             one.
+
+            CANONICAL VOCABULARY (consistency across narrations is load-bearing
+            — the same metric named different ways across paragraphs reads as
+            different metrics):
+
+              - Baselines: "the trailing 2-week median" / "the trailing 14-day
+                median" / "its typical [METRIC]". NEVER "the average" / "normal" /
+                "running mean".
+              - Multipliers: "22.2x the trailing median" (1-decimal value + "x").
+                NEVER "22 times" / "around 22x" / "more than 20x".
+              - Slippage: "X basis points slippage" / "slipped X bps".
+              - Depth removal: "removed X% of displayed depth". NEVER "of the
+                visible book".
+              - Display ratio (iceberg): "the displayed tip represented N% of
+                total executed".
+              - Order-to-trade ratio: "no fills against N posted orders" when
+                infinite.
+
+              These govern PHRASING, not values. Per-event interpretations below
+              already use this vocabulary; mirror it when you reference their
+              metrics.
             """;
 
     @Override

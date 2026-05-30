@@ -60,7 +60,7 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
      * <p>v10 added the pattern-name mislabel check; v9 added supporting
      * analytics (slippage, OFI, etc.).
      */
-    private static final String PROMPT_VERSION = "interpret-v12-framing-rules-2026-05-29";
+    private static final String PROMPT_VERSION = "interpret-v13-canonical-vocabulary-2026-05-30";
 
     /** Half-window for the surrounding trade context. */
     private static final long WINDOW_SECONDS = 60L;
@@ -168,6 +168,31 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
                 as "far above its typical range" / "well outside the trailing band",
                 and let `percentile_rank` carry the intuition ("the most extreme day
                 in the trailing two weeks").
+
+            CANONICAL VOCABULARY (load-bearing — the same metric referenced
+            different ways across narrations reads as different metrics):
+
+              - Baselines: "the trailing 2-week median" / "the trailing 14-day
+                median" / "its typical [METRIC]". NEVER "the average" / "normal" /
+                "running mean" / bare "the baseline".
+              - Multipliers: "22.2x the trailing median" (exact value, "x"
+                suffix). NEVER "22 times" / "around 22x" / "more than 20x" /
+                "approximately 22x".
+              - Slippage: "7.4 basis points slippage" / "slipped 7.4 bps".
+                NEVER "the price paid up by X bps" / "the sweep walked X bps".
+              - Depth removal: "removed X% of displayed depth". NEVER "of the
+                visible book" / "of available liquidity" / "of the order book".
+              - Display ratio: "the displayed tip represented N% of total
+                executed". NEVER "iceberg ratio" / "tip ratio" / "displayed
+                proportion".
+              - Depth from touch: "N basis points from the touch" /
+                "N bps from the best price". NEVER bare "off the touch" /
+                "from BBO".
+              - Order-to-trade ratio: "no fills against N posted orders" when
+                infinite (0 fills). NEVER "infinite order-to-trade ratio".
+
+              These constraints govern PHRASING, not values. The numbers
+              themselves stay verbatim from the breakdown.
 
             EMPTY-WINDOW CASE: when both surrounding windows are empty or quiet,
             state that explicitly — "the pattern appears in isolation" is a valid

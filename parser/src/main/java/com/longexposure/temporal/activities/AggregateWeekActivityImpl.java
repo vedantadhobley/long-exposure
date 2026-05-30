@@ -69,7 +69,7 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
      * numerals; see {@link SynthesizeDayActivityImpl}'s PROMPT_VERSION
      * comment for the full rationale.
      */
-    private static final String PROMPT_VERSION = "aggregate-v8-qualitative-themes-2026-05-30";
+    private static final String PROMPT_VERSION = "aggregate-v9-canonical-vocabulary-2026-05-30";
 
     /**
      * Prior weekly rollups passed as week-over-week trend context. Set to 13 =
@@ -159,6 +159,23 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             or "again vs last week" — NEVER "third", "fourth", "fifth …
             consecutive/straight week", which would invent weeks you cannot see.
             When unsure, drop the count: "continuing from last week" is always safe.
+
+            CANONICAL VOCABULARY (consistency across paragraphs is load-bearing
+            — the same metric named different ways across tiers reads as
+            different metrics):
+
+              - Baselines: "the trailing 2-week median" / "its typical [METRIC]".
+                NEVER "the average" / "normal" / "running mean".
+              - Multipliers: "22.2x the trailing median" (1-decimal value + "x").
+                NEVER "22 times" / "around 22x".
+              - Slippage: "X basis points slippage" / "slipped X bps".
+              - Depth removal: "removed X% of displayed depth". NEVER "of the
+                visible book".
+              - Display ratio (iceberg): "the displayed tip represented N% of
+                total executed".
+
+              These govern PHRASING, not values. The per-day paragraphs below
+              already use this vocabulary; mirror it.
             """;
 
     @Override
