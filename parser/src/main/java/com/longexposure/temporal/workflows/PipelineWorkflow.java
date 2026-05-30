@@ -126,9 +126,40 @@ public interface PipelineWorkflow {
      */
     record DateRange(LocalDate from, LocalDate to) {}
 
+    /**
+     * Canonical input.
+     *
+     * <p><b>Target shapes</b> (any combination; all unioned into one scope):
+     * <ul>
+     *   <li>{@code dates} — individual trading days.
+     *   <li>{@code dateRanges} — inclusive {@code [from, to]} day ranges (weekday-filtered).
+     *   <li>{@code weekAnchors} — any date in a week; normalized to that week's Monday.
+     *       Use this to re-aggregate weeks without re-running their days.
+     *   <li>{@code quarterAnchors} — any date in a quarter; normalized to {@code Jan/Apr/Jul/Oct 1}.
+     *       Use to re-aggregate quarters directly.
+     *   <li>{@code yearAnchors} — any date in a year; normalized to {@code Jan 1}.
+     *   <li>{@code cascadeFrom} — horizontal ripple anchor. Expands to every weekly,
+     *       quarterly, and yearly period from this date forward through today (ET).
+     *       Use when a historical change ripples through subsequent period prior-windows
+     *       (e.g., re-synthesizing day 05-13 invalidates every weekly rollup whose
+     *       prior-window includes week-of-05-11).
+     * </ul>
+     *
+     * <p><b>Cascade ordering</b>: within one workflow call, period work runs strictly
+     * chronological at each tier (weeks left-to-right, then quarters, then years).
+     * Each period waits on its day-level inputs (if any are in scope) AND on the
+     * previous-period rollup at the same tier (so prior-window reads see fresh
+     * output). Same-tier periods serialize on the joi LLM mutex anyway, so this
+     * doesn't lose wall-clock — it just guarantees causal ordering across the
+     * prior-window read pattern.
+     */
     record PipelineInput(
             List<LocalDate> dates,
             List<DateRange> dateRanges,
+            List<LocalDate> weekAnchors,
+            List<LocalDate> quarterAnchors,
+            List<LocalDate> yearAnchors,
+            LocalDate       cascadeFrom,
             boolean         pollUntilReady,
             boolean         forceReingest,
             boolean         runRetentionSweep,
@@ -136,26 +167,30 @@ public interface PipelineWorkflow {
             Mode            mode,
             Set<Stage>      stages) {
 
-        /** Back-compat constructor — defaults mode to FULL_PIPELINE, no ranges, no stage filter. */
+        /** Back-compat constructor — defaults mode to FULL_PIPELINE, no ranges, no anchors, no stage filter. */
         public PipelineInput(List<LocalDate> dates,
                               boolean pollUntilReady,
                               boolean forceReingest,
                               boolean runRetentionSweep,
                               boolean cascadeRollups) {
-            this(dates, null, pollUntilReady, forceReingest, runRetentionSweep, cascadeRollups, Mode.FULL_PIPELINE, null);
+            this(dates, null, null, null, null, null,
+                 pollUntilReady, forceReingest, runRetentionSweep, cascadeRollups,
+                 Mode.FULL_PIPELINE, null);
         }
 
-        /** Back-compat constructor with mode, no ranges, no stage filter. */
+        /** Back-compat constructor with mode. */
         public PipelineInput(List<LocalDate> dates,
                               boolean pollUntilReady,
                               boolean forceReingest,
                               boolean runRetentionSweep,
                               boolean cascadeRollups,
                               Mode mode) {
-            this(dates, null, pollUntilReady, forceReingest, runRetentionSweep, cascadeRollups, mode, null);
+            this(dates, null, null, null, null, null,
+                 pollUntilReady, forceReingest, runRetentionSweep, cascadeRollups,
+                 mode, null);
         }
 
-        /** Back-compat constructor with date ranges + mode, no stage filter. */
+        /** Back-compat constructor with date ranges + mode. */
         public PipelineInput(List<LocalDate> dates,
                               List<DateRange> dateRanges,
                               boolean pollUntilReady,
@@ -163,7 +198,23 @@ public interface PipelineWorkflow {
                               boolean runRetentionSweep,
                               boolean cascadeRollups,
                               Mode mode) {
-            this(dates, dateRanges, pollUntilReady, forceReingest, runRetentionSweep, cascadeRollups, mode, null);
+            this(dates, dateRanges, null, null, null, null,
+                 pollUntilReady, forceReingest, runRetentionSweep, cascadeRollups,
+                 mode, null);
+        }
+
+        /** Back-compat constructor with date ranges + mode + stages (pre-anchors shape). */
+        public PipelineInput(List<LocalDate> dates,
+                              List<DateRange> dateRanges,
+                              boolean pollUntilReady,
+                              boolean forceReingest,
+                              boolean runRetentionSweep,
+                              boolean cascadeRollups,
+                              Mode mode,
+                              Set<Stage> stages) {
+            this(dates, dateRanges, null, null, null, null,
+                 pollUntilReady, forceReingest, runRetentionSweep, cascadeRollups,
+                 mode, stages);
         }
     }
 

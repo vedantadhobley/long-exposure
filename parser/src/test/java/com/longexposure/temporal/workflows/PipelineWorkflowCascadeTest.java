@@ -184,6 +184,120 @@ class PipelineWorkflowCascadeTest {
         assertTrue(out.isEmpty());
     }
 
+    // ─── Period-anchor normalization ────────────────────────────────────────
+
+    @Test
+    void weekStartOf_normalizesToMonday() {
+        // Wed → preceding Mon
+        assertEquals(LocalDate.of(2026, 5, 11),
+                PipelineWorkflowImpl.weekStartOf(LocalDate.of(2026, 5, 13)));
+        // Mon → same day
+        assertEquals(LocalDate.of(2026, 5, 11),
+                PipelineWorkflowImpl.weekStartOf(LocalDate.of(2026, 5, 11)));
+        // Sun → preceding Mon (the week BEFORE — Sun ends the prior ISO week)
+        assertEquals(LocalDate.of(2026, 5, 11),
+                PipelineWorkflowImpl.weekStartOf(LocalDate.of(2026, 5, 17)));
+    }
+
+    @Test
+    void quarterStartOf_normalizesToQuarterStart() {
+        assertEquals(LocalDate.of(2026, 1, 1),
+                PipelineWorkflowImpl.quarterStartOf(LocalDate.of(2026, 2, 15)));   // Q1
+        assertEquals(LocalDate.of(2026, 4, 1),
+                PipelineWorkflowImpl.quarterStartOf(LocalDate.of(2026, 5, 13)));   // Q2
+        assertEquals(LocalDate.of(2026, 7, 1),
+                PipelineWorkflowImpl.quarterStartOf(LocalDate.of(2026, 9, 30)));   // Q3
+        assertEquals(LocalDate.of(2026, 10, 1),
+                PipelineWorkflowImpl.quarterStartOf(LocalDate.of(2026, 12, 1)));   // Q4
+    }
+
+    @Test
+    void yearStartOf_normalizesToJan1() {
+        assertEquals(LocalDate.of(2026, 1, 1),
+                PipelineWorkflowImpl.yearStartOf(LocalDate.of(2026, 5, 13)));
+        assertEquals(LocalDate.of(2027, 1, 1),
+                PipelineWorkflowImpl.yearStartOf(LocalDate.of(2027, 12, 31)));
+    }
+
+    @Test
+    void expandAnchors_dedupesAndChronologicallyOrders() {
+        // Three dates in same week → one Monday entry.
+        java.util.Set<LocalDate> weeks = PipelineWorkflowImpl.expandAnchors(
+                List.of(LocalDate.of(2026, 5, 12),
+                        LocalDate.of(2026, 5, 13),
+                        LocalDate.of(2026, 5, 15)),
+                PipelineWorkflowImpl::weekStartOf);
+        assertEquals(1, weeks.size());
+        assertEquals(LocalDate.of(2026, 5, 11), weeks.iterator().next());
+    }
+
+    @Test
+    void expandAnchors_emptyOnNullOrEmpty() {
+        assertTrue(PipelineWorkflowImpl.expandAnchors(null,
+                PipelineWorkflowImpl::weekStartOf).isEmpty());
+        assertTrue(PipelineWorkflowImpl.expandAnchors(List.of(),
+                PipelineWorkflowImpl::weekStartOf).isEmpty());
+    }
+
+    // ─── Horizontal ripple (cascadeFrom expansion) ──────────────────────────
+
+    @Test
+    void addWeeksRangeForward_walksMondayToMonday() {
+        java.util.TreeSet<LocalDate> out = new java.util.TreeSet<>();
+        // 2026-05-13 (Wed) through 2026-05-29 (Fri) — should cover weeks of
+        // 05-11, 05-18, 05-25 (3 Mondays inclusive).
+        PipelineWorkflowImpl.addWeeksRangeForward(out,
+                LocalDate.of(2026, 5, 13), LocalDate.of(2026, 5, 29));
+        assertEquals(3, out.size());
+        assertTrue(out.contains(LocalDate.of(2026, 5, 11)));
+        assertTrue(out.contains(LocalDate.of(2026, 5, 18)));
+        assertTrue(out.contains(LocalDate.of(2026, 5, 25)));
+    }
+
+    @Test
+    void addWeeksRangeForward_singleWeek() {
+        java.util.TreeSet<LocalDate> out = new java.util.TreeSet<>();
+        PipelineWorkflowImpl.addWeeksRangeForward(out,
+                LocalDate.of(2026, 5, 13), LocalDate.of(2026, 5, 14));
+        assertEquals(1, out.size());
+        assertEquals(LocalDate.of(2026, 5, 11), out.iterator().next());
+    }
+
+    @Test
+    void addQuartersRangeForward_walksQuarterToQuarter() {
+        java.util.TreeSet<LocalDate> out = new java.util.TreeSet<>();
+        // From Q2 2026 through Q4 2026 → 3 quarters.
+        PipelineWorkflowImpl.addQuartersRangeForward(out,
+                LocalDate.of(2026, 5, 13), LocalDate.of(2026, 11, 1));
+        assertEquals(3, out.size());
+        assertTrue(out.contains(LocalDate.of(2026, 4, 1)));
+        assertTrue(out.contains(LocalDate.of(2026, 7, 1)));
+        assertTrue(out.contains(LocalDate.of(2026, 10, 1)));
+    }
+
+    @Test
+    void addQuartersRangeForward_acrossYearBoundary() {
+        java.util.TreeSet<LocalDate> out = new java.util.TreeSet<>();
+        // Q4 2026 through Q2 2027 → 3 quarters across the year boundary.
+        PipelineWorkflowImpl.addQuartersRangeForward(out,
+                LocalDate.of(2026, 12, 1), LocalDate.of(2027, 5, 13));
+        assertEquals(3, out.size());
+        assertTrue(out.contains(LocalDate.of(2026, 10, 1)));
+        assertTrue(out.contains(LocalDate.of(2027, 1, 1)));
+        assertTrue(out.contains(LocalDate.of(2027, 4, 1)));
+    }
+
+    @Test
+    void addYearsRangeForward_walksYearToYear() {
+        java.util.TreeSet<LocalDate> out = new java.util.TreeSet<>();
+        PipelineWorkflowImpl.addYearsRangeForward(out,
+                LocalDate.of(2026, 5, 13), LocalDate.of(2028, 2, 1));
+        assertEquals(3, out.size());
+        assertTrue(out.contains(LocalDate.of(2026, 1, 1)));
+        assertTrue(out.contains(LocalDate.of(2027, 1, 1)));
+        assertTrue(out.contains(LocalDate.of(2028, 1, 1)));
+    }
+
     /** Chronological ordering preserved (TreeSet → LinkedHashSet). */
     @Test
     void chronologicalOrder() {

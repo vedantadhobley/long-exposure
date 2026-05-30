@@ -6,6 +6,169 @@ Append-only record of architectural and operational decisions, ordered by date. 
 
 ---
 
+## 2026-05-29 (later) — Stages 1–6: `PipelineWorkflow` becomes the universal project entry point + cron migration
+
+`PipelineWorkflow` shipped in Phase 8 (1352dcb) as the orchestrator
+that replaces the shell-driver class. Today's six-stage refactor
+turns it into something larger: **the universal way to invoke this
+project**. Cron, ad-hoc, backfill, rescore, LLM-only re-runs,
+single-stage re-runs — all one workflow call. The shape of the input
+record changed: arbitrary unions of date ranges + individual dates, an
+explicit `Mode`, and an optional fine-grained `Stage` filter.
+
+**1. Stage 1 — `DateRange` + `expandDates` (commits d0f4215, a9dc569).** New
+`record DateRange(LocalDate from, LocalDate to)` plus a pure-fn
+`expandDates(List<LocalDate> dates, List<DateRange> dateRanges)` that
+unions the explicit list with each range expansion, filters out
+weekends, deduplicates, and returns a chronologically-ordered list.
+Reversed ranges (swap `from`/`to`) handled. Empty inputs return empty
+list. Holidays not pre-filtered — `ResolveUrlActivity` throws
+`NotATradingDay` and the per-day workflow short-circuits to
+`skipped_no_data`. 8 unit tests covering: explicit only, range
+expansion with weekend filter, union+dedup, weekend-in-explicit-list,
+reversed range, multiple ranges + individual date (the use case the
+user explicitly asked for), overlapping ranges dedup, empty.
+
+**Why a single `dates` list isn't sufficient.** The user's real
+workload looks like "re-run weeks 05-11→15 and 05-18→22 plus
+05-27 specifically." Forcing that through a flat `List<LocalDate>`
+either burdens the caller with the expansion (and then they get to
+re-implement the weekday filter) or requires N separate workflow
+calls (which defeats the cascade — each call's cascade scope is
+its own date set, so the weekly rollup runs once per call instead
+of once total). A `dates` + `dateRanges` shape lets the caller
+express intent directly; the expansion logic lives in one tested
+place.
+
+**2. Stages 2–3 — three per-day sub-workflows (commits 320e982,
+e932575).** `DailyPipelineWorkflowImpl` was a 400-line monolith
+with inline Download / Parse / Validate / Score / Narrate /
+Interpret / Synthesize / Aggregate-week/quarter/year / Compress /
+Cleanup wiring. Decomposed into three sub-workflows on the same
+task queue:
+
+  - `IngestDayWorkflow`: idempotency check → Download → Parse +
+    Validate (parallel) → RecordValidation → completeRun → Score.
+    Returns the status string (`ok` / `unverified` / `parse_failed` /
+    `skipped_*`). All the "what status do we report back" branching
+    lives here.
+  - `LlmDayWorkflow`: Narrate → Interpret → SynthesizeDay,
+    sequential per the one-LLM-workflow-at-a-time rule. Returns the
+    INTERPRET count for telemetry.
+  - `FinalizeDayWorkflow`: CompressChunksActivity → CleanupWorkflow.
+    Takes `{deleteFiles, runRetentionSweep}` so the caller controls
+    whether files are deleted (cron yes, ad-hoc rerun no).
+
+**Why three workflows, not one big one with conditionals.** Each
+sub-workflow has a distinct *resource profile*: Ingest is luv-side
+(CPU + Postgres, no joi), LLM is joi-bound (the GPU mutex), Finalize
+is luv-side (Postgres + disk). Separate workflows let
+`PipelineWorkflow` sliding-window them at the resource boundary
+(Stage 5). Inline conditionals would have made the parallelization
+impossible — `Workflow.async(...)` needs a stub that returns a
+`Promise`, which means a workflow stub, not a code branch.
+
+**3. Stage 4 — `DailyPipelineWorkflowImpl` becomes a composer
+(commit 4b29e3e).** Same external `String run(input)` contract; same
+status strings; same callers (Temporal schedule, ad-hoc CLI). But
+now 110 lines that compose IngestDay → LlmDay → AggregateWeek/Quarter/
+Year → FinalizeDay. Short-circuits on `skipped_*` and `parse_failed`
+preserved. The legacy entry point keeps working — no caller in the
+repo changes.
+
+**4. Stage 5 — Phase A/B sliding window in `PipelineWorkflow`
+(commit f0c95c0).** `runSlidingWindow(dates)` chains:
+
+```
+ingestPromise[0] = Async.function(ingestDay, dates[0])
+  .thenApply(... → llmPromise[0])
+ingestPromise[1] = ingestPromise[0]
+  .thenApply(... → Async.function(ingestDay, dates[1]))
+  .thenApply(... → llmPromise[1])
+...
+```
+
+The result: `IngestDay[N+1]` runs in parallel with `LlmDay[N]`. They
+don't compete for resources — Ingest is luv-side, LLM is on joi —
+so the wall-clock for an N-day backfill drops from N×(ingest+llm) to
+~ ingest[0] + N×max(ingest, llm) + llm[N-1]. Empirically ~30 % faster
+on a 12-day rerun. The one-LLM-workflow-at-a-time rule is preserved
+naturally by the chain shape (each LLM workflow waits on its
+predecessor's completion via the chained `Promise`).
+
+**5. Stage 6 — `Mode.SCORE_AND_LLM` + `Stage` filter (commits
+563c932, 0756a9c).** Two pieces:
+
+  - `Mode.SCORE_AND_LLM` — re-Score (via `ScoreWorkflow`) then run
+    LlmDay per date with the same sliding-window shape. Replaces
+    `scripts/rescore-rerun-*.sh`. Use when a scorer change requires
+    fresh `scored_events` + `selected_events` but the parsed wire
+    data is already loaded.
+  - `enum Stage {INGEST, LLM, FINALIZE}` + optional `Set<Stage>
+    stages` field on `PipelineInput`. When `stages=null`, `Mode`
+    picks the phases (back-compat). When non-empty, runs ONLY those
+    stages. Examples: `stages=[INGEST]` for parse-only,
+    `stages=[FINALIZE]` for compress + cleanup of an already-done
+    day, `stages=[LLM, FINALIZE]` for LLM chain + post-LLM cleanup.
+    `LLM_CHAIN` and `SCORE_AND_LLM` modes ignore `stages` (they're
+    fixed-shape presets). Implemented as `runIngest`/`runLlm`/
+    `runFinalize` boolean guards in `runSlidingWindow`; skipped INGEST
+    returns synthetic `"ok"` status (so downstream LLM stage proceeds);
+    skipped LLM returns `0L`; skipped FINALIZE no-ops.
+
+**Why `Stage` is layered on top of `Mode`, not folded into it.**
+`Mode` is *which preset of the per-day chain*; `Stage` is *which
+phases of the per-day chain to run*. They compose: a future
+`Mode.LLM_CHAIN` user might want `stages=[LLM]` to assert no
+finalize happens. Folding into Mode would explode the enum
+combinatorially. Two orthogonal axes is cleaner.
+
+**6. Cron migration (commit 0756a9c).** `WorkerMain.registerSchedule()`
+now configures the daily cron with `PipelineWorkflow` + a
+`PipelineInput` literal:
+
+```java
+new PipelineInput(
+    List.of(placeholder),  // dates  — yesterday-ET resolved at fire
+    null,                  // dateRanges
+    true,                  // pollUntilReady
+    false,                 // forceReingest
+    true,                  // runRetentionSweep
+    true,                  // cascadeRollups
+    Mode.FULL_PIPELINE)
+```
+
+Same fire-time semantics (midnight ET Tue–Sat, paused by default).
+Same `placeholder=1970-01-01` → "yesterday in ET" resolution. The
+result is operational uniformity: cron and ad-hoc rerun now both
+call `PipelineWorkflow.run(PipelineInput)` with `dates=[…]`. No two
+code paths for "the same thing."
+
+Caveat: `createSchedule` short-circuits when the schedule already
+exists. The existing `daily-pipeline-cron` (registered as paused
+with `DailyPipelineWorkflow` as the type) won't auto-update on
+worker restart. Switching to the new shape needs an explicit
+`temporal schedule delete --schedule-id daily-pipeline-cron` then
+worker restart. Not urgent — schedule is paused; the old
+`DailyPipelineWorkflow` form still works for any operator action
+needed before launch.
+
+**Smoke test** (verified post-a9dc569). `PipelineWorkflow.run`
+with `dates=[2026-05-27] + dateRanges=[(05-11..05-15), (05-18..05-22)]`
+correctly expanded to 11 weekdays, processed each via FULL_PIPELINE
+with `cascadeRollups=true`, cascade fired for week-of-05-11 +
+week-of-05-18 + week-of-05-25 + quarter Q2 + year 2026, total runtime
+~3 m 33 s (most days no-op via content_hash). Mixed-input shape
+verified at runtime.
+
+**What's open / deferred.** Phase A/B in `Mode.LLM_CHAIN` (currently
+sequential; could parallelize since LLM-only workflows have no Ingest
+to overlap with). The `Mode.SCORE_AND_LLM` path doesn't yet do
+Phase A/B (re-score is fast; the win is small). Schedule delete +
+re-register is a manual one-time operator step, not automated.
+
+---
+
 ## 2026-05-29 — Phase 8 / 9-A / 7b: orchestration moved into Temporal, inter-day INTERPRET wired, BackgroundHeartbeat replaces band-aid
 
 Three structural fixes shipped during a long evening session 2026-05-28

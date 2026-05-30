@@ -9,12 +9,16 @@ responsible for. Reflects what's actually running in `parser/src/main/java/com/l
 
 ## Workflows
 
-Thirteen workflows registered on task queue `long-exposure-daily-pipeline`. The orchestrator (`DailyPipelineWorkflow`) only calls child workflows + metadata bookkeeping activities — every phase is its own child workflow.
+Nineteen workflows registered on task queue `long-exposure-daily-pipeline`. As of Stages 1–6 (2026-05-29 evening, see `decisions.md`), `PipelineWorkflow` is the **universal entry point** for the project — cron, ad-hoc single-day, multi-day backfill, rescore, LLM-only re-runs, and single-stage re-runs all hit the same workflow call. It slides three per-day sub-workflows (`IngestDayWorkflow` → `LlmDayWorkflow` → `FinalizeDayWorkflow`) through a Phase A/B overlap, with rollup cascade after all per-day work completes. `DailyPipelineWorkflow` was previously a 400-line monolith with inline phase wiring; it's now a 110-line composer that calls the same three sub-workflows sequentially (preserving its external `String run(input)` contract — same status strings, same callers untouched).
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `DailyPipelineWorkflow` | cron (midnight ET, paused) + ad-hoc | Top-level orchestrator. Calls **only** child workflows + `PipelineRunRecorderActivity` for metadata. ~30 lines of orchestration logic. |
-| `DownloadWorkflow` | child of DailyPipeline + ad-hoc | Resolves 3 IEX HIST URLs + downloads 3 `.pcap.gz` files (all 6 ops in parallel). Throws `NotATradingDay` for weekends/holidays so the parent short-circuits. |
+| `PipelineWorkflow` | cron (midnight ET, paused) + ad-hoc | **Universal entry point.** Accepts `dates` + `dateRanges` (multi-range union, weekday-filtered), `Mode` (FULL_PIPELINE / LLM_CHAIN / SCORE_AND_LLM), optional `Set<Stage>` filter (INGEST / LLM / FINALIZE). Slides per-day work through Phase A/B overlap (IngestDay[N+1] in parallel with LlmDay[N]) then fires the rollup cascade. Replaces all `scripts/rerun-dataset-*.sh` and `scripts/rescore-rerun-*.sh` shell drivers. |
+| `DailyPipelineWorkflow` | child of `PipelineWorkflow` (FULL_PIPELINE) + legacy ad-hoc | Per-day orchestrator. Composes `IngestDayWorkflow` → `LlmDayWorkflow` → rollup cascade → `FinalizeDayWorkflow` sequentially. Preserved as a separately-callable workflow for back-compat with operator scripts and the old cron path. |
+| `IngestDayWorkflow` | child of `PipelineWorkflow` + `DailyPipelineWorkflow` | Per-day ingest phase. Idempotency check + Download + Parse + Validate (parallel) + RecordValidation + completeRun + Score. Returns status string (`ok` / `unverified` / `parse_failed` / `skipped_*`). luv-side (no joi). |
+| `LlmDayWorkflow` | child of `PipelineWorkflow` + `DailyPipelineWorkflow` | Per-day LLM phase. Narrate → Interpret → SynthesizeDay sequentially per the one-LLM-workflow-at-a-time rule. Returns INTERPRET count. joi-bound. |
+| `FinalizeDayWorkflow` | child of `PipelineWorkflow` + `DailyPipelineWorkflow` | Per-day finalize phase. CompressChunksActivity + CleanupWorkflow. Takes `{deleteFiles, runRetentionSweep}` so the caller controls file deletion. luv-side. |
+| `DownloadWorkflow` | child of IngestDay + ad-hoc | Resolves 3 IEX HIST URLs + downloads 3 `.pcap.gz` files (all 6 ops in parallel). Throws `NotATradingDay` for weekends/holidays so the parent short-circuits. |
 | `ParseWorkflow` | child of DailyPipeline + ad-hoc | Parses the DPLS feed into 13 hypertables via JDBC COPY. Idempotent (pre-cleans by trading_date). |
 | `ValidateWorkflow` | child of DailyPipeline + ad-hoc | Runs the 3 validators in parallel and upserts `validation_runs`. Returns the per-leg result for the parent to record. |
 | `MaterializeWorkflow` | ad-hoc only | Builds the `order_lifecycle` table for a date whose DPLS data is already in Postgres. (DailyPipeline invokes the materialize step via `ScoreWorkflow`, not this workflow, but this exists for ad-hoc backfilling.) |
