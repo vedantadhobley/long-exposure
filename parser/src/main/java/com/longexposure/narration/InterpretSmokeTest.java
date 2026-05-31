@@ -241,10 +241,12 @@ public final class InterpretSmokeTest {
                                           final Catalog.Entry entry,
                                           final TradeWindow pre,
                                           final TradeWindow post) {
+        StringBuilder drivers = new StringBuilder();
+        for (String d : entry.documentedDrivers()) drivers.append("  - ").append(d).append('\n');
         return  "Scorer: " + s.scorerId + "\n\n"
-              + "Catalog entry for this scorer:\n"
-              + "  mechanism: " + entry.mechanism() + "\n"
-              + "  canonical_interpretation: " + entry.canonicalInterpretation() + "\n\n"
+              + "Pattern at the wire level:\n  " + entry.mechanism() + "\n\n"
+              + "Documented drivers (multiple legitimate causes — never a single intent claim):\n"
+              + drivers + "\n"
               + "Layer-2 narration (the description, for context — do not paraphrase):\n  "
               + s.narrative + "\n\n"
               + "Breakdown JSON (the event's own measurements):\n"

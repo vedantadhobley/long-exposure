@@ -73,101 +73,68 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
      * misattribution slightly worse. This v7 supersedes it via the
      * structural verifier approach.
      */
-    private static final String PROMPT_VERSION = "synthesize-v12-no-literal-day-count-2026-05-30";
+    private static final String PROMPT_VERSION = "synthesize-v13-holistic-refactor-2026-05-31";
 
     /** Max LLM attempts per day — re-roll on verifier failure (temp 1.0 gives variance). */
     private static final int MAX_LLM_ATTEMPTS = 3;
 
     private static final String SYSTEM_PROMPT = """
-            You are a financial-data journalist writing one paragraph identifying
-            the recurring themes of a single US-equity trading day on IEX. Your
-            output is the top-of-page summary for that date's market-microstructure
-            feed.
+            You are a financial-data journalist (FT / Bloomberg register) writing
+            ONE paragraph identifying the recurring themes of a single US-equity
+            trading day on IEX. Your paragraph is the top-of-page summary for
+            that date.
 
-            INPUTS:
-              - DAY METADATA: trading date, total events, count per scorer type,
-                top symbols by event count, distribution across session phases.
-              - PER-EVENT LIST: each event's per-event interpretation prose,
-                in chronological order with symbol, scorer type, and event time.
+            OUTPUT: one paragraph, 3-6 sentences, ~400-700 chars. Lead with the
+            most notable theme of the regular session (09:30-16:00 ET) — that's
+            where the day's actual story lives. Gloss acronyms (LULD, NBBO,
+            MCB, VWAP, HFT) on first use.
 
-            OUTPUT: one paragraph (3-6 sentences, ~400-700 chars). Financial-journalist
-            register (FT / Bloomberg). Acronyms (LULD, NBBO, MCB, VWAP, HFT) glossed
-            on first use. No preamble — lead with the most notable theme.
+            INPUTS (in the user prompt):
+              - SESSION SHAPE: per-phase event counts (pre-market through close)
+              - SCORER COUNTS: how many events of each detected type
+              - DAY-LEVEL SIGNALS: inter-day metrics (volume_deviation,
+                time_in_book_drift) — these are whole-day measurements with
+                no clock anchor, NOT temporal events
+              - INTRADAY EVENTS: grouped by session phase, score-ordered within
+                each phase, with the per-event INTERPRET prose
 
-            WHAT THIS PARAGRAPH IS FOR:
+            WHAT THE PARAGRAPH IDENTIFIES:
+              - cross-event patterns no per-event view can surface
+              - time-of-day character (where activity concentrated)
+              - cross-symbol coherence (sector clustering, ETF-family flow)
+              - scorer-type clustering on individual symbols
+              - notable individual events worth surfacing by name
 
-            Identify cross-event patterns that no per-event view can surface:
-            time-of-day concentration ("the open saw heavy activity in 3x
-            leveraged ETFs"), cross-symbol coherence ("semiconductors had paired
-            large blocks throughout the session"), scorer-type clustering on
-            individual symbols ("INTC saw layering, post-cancel bursts, and
-            sweeps"), regime shifts across the session ("the morning's active
-            layering quieted to afternoon institutional blocks"), and notable
-            individual events worth surfacing by name.
+            QUALITATIVE-ONLY RULE: do NOT enumerate counts per symbol or scorer
+            type ("TQQQ had 8 X events", "seven halts occurred"). Use qualitative
+            magnitude language ("heavy", "sustained", "dominated", "clustered").
+            The per-event prose in the user prompt already exposes the counts;
+            your paragraph's job is CHARACTER.
 
-            QUALITATIVE-ONLY RULE — read this carefully:
+            GROUNDING:
+              - Every ticker must appear in the user prompt's events.
+              - Every specific number must trace to a specific per-event entry
+                (a dollar value, duration, percentage that appears below).
+              - No external causes (news, FOMC, earnings, geopolitics).
+              - No intent claims ("the algorithm was X-ing", "spoofing").
+              - No comparison to other days — you only have this one.
+              - No editorializing severity ("striking", "wild").
 
-            You may NOT enumerate events per symbol or per scorer type. Specifically:
+            CANONICAL VOCABULARY (consistency across narrations is load-bearing):
+              - Baselines: "the trailing 2-week median". NEVER literal day
+                counts ("14-day", "10-day") — the window varies by symbol.
+              - Multipliers: "22.2x the trailing median" (1-decimal + "x").
+              - Slippage: "X bps slippage" / "slipped X bps".
+              - Depth removal: "removed X% of displayed depth".
+              - Iceberg ratio: "the displayed tip represented N% of total executed".
+              - Order-to-trade when infinite: "no fills against N posted orders".
 
-            DO NOT write phrasings like:
-              - "TQQQ had 8 liquidity withdrawals"
-              - "seven halts occurred"
-              - "QQQ and SPY accounted for 12 events"
-              - "the four large trades"
-              - any sentence of shape (subject + cardinal number + scorer-type)
+            These govern PHRASING, not values. The per-event prose already uses
+            this vocabulary; mirror it when referencing their metrics.
 
-            INSTEAD use qualitative magnitude language:
-              - "TQQQ saw heavy / frequent / repeated / sustained liquidity withdrawals"
-              - "multiple halts clustered at the open"
-              - "QQQ and SPY dominated the day's activity"
-              - "the day's large-trade activity centered on semiconductors"
-
-            Counts of events are not what the reader needs from this paragraph —
-            the per-event prose below already exposes them. The paragraph's job is
-            CHARACTER: time-of-day shape, sector clustering, regime shifts,
-            individual standout events.
-
-            GROUNDING — the primary rule:
-
-            Every ticker you mention must appear in today's narrations. Every
-            specific numeric claim must trace to a specific per-event interpretation
-            (e.g., a dollar value, a duration, a percentage that appears in the
-            per-event list). The trading date is provided in the day metadata;
-            do not invent or restate it in a different format. Do not introduce
-            numbers from outside the inputs.
-
-            REGISTER:
-
-            You have no news source: the data shows wire activity, not its cause.
-            Do not claim external events ("the FOMC announced", "earnings beats",
-            "geopolitical tension"). Do not speculate about intent ("the algorithm
-            was trying to X"). Do not editorialize about severity ("striking",
-            "wild volatility"). Do not compare to other days — you only have this
-            one.
-
-            CANONICAL VOCABULARY (consistency across narrations is load-bearing
-            — the same metric named different ways across paragraphs reads as
-            different metrics):
-
-              - Baselines: ALWAYS use "the trailing 2-week median" for any
-                inter-day baseline reference — works for the actual 7-14 day
-                baseline window. NEVER write a literal day count ("14-day",
-                "10-day", etc.) — the actual window varies by symbol and a
-                specific number becomes fabrication. NEVER "the average" /
-                "normal" / "running mean".
-              - Multipliers: "22.2x the trailing median" (1-decimal value + "x").
-                NEVER "22 times" / "around 22x" / "more than 20x".
-              - Slippage: "X basis points slippage" / "slipped X bps".
-              - Depth removal: "removed X% of displayed depth". NEVER "of the
-                visible book".
-              - Display ratio (iceberg): "the displayed tip represented N% of
-                total executed".
-              - Order-to-trade ratio: "no fills against N posted orders" when
-                infinite.
-
-              These govern PHRASING, not values. Per-event interpretations below
-              already use this vocabulary; mirror it when you reference their
-              metrics.
+            STYLE: vary your lede. The model has good journalist instincts —
+            use them. Do not reuse the same opening framing or vocabulary across
+            successive days' paragraphs.
             """;
 
     @Override
@@ -271,7 +238,7 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
      */
     private List<EventRow> loadEventsForDay(final Connection conn, final LocalDate tradingDate) throws Exception {
         String sql = """
-                SELECT se.selected_id, se.scorer_id, se.symbol, se.ts,
+                SELECT se.selected_id, se.scorer_id, se.symbol, se.ts, se.score,
                        n.narrative, i.interpretation
                 FROM selected_events se
                 LEFT JOIN (
@@ -303,6 +270,7 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
                     r.scorerId   = rs.getString("scorer_id");
                     r.symbol     = rs.getString("symbol");
                     r.ts         = rs.getTimestamp("ts");
+                    r.score      = rs.getDouble("score");
                     r.narration  = rs.getString("narrative");
                     r.interpretation = rs.getString("interpretation");
                     out.add(r);
@@ -404,32 +372,116 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
         // if INTERP is null (rare — < 2% on the 2-week dataset).
         StringBuilder sb = new StringBuilder(64 * 1024);
         sb.append("Trading date: ").append(tradingDate).append("\n\n");
-        sb.append("DAY METADATA: ").append(dayAggregates.toString()).append("\n\n");
 
-        sb.append("PER-EVENT LIST (chronological, ").append(events.size()).append(" events):\n\n");
-        int idx = 0;
-        for (EventRow e : events) {
-            idx++;
-            String body = (e.interpretation != null && !e.interpretation.isBlank())
-                          ? e.interpretation.trim()
-                          : (e.narration != null ? e.narration.trim() : "(no narration)");
-            sb.append("[").append(idx).append("] ").append(e.scorerId)
-              .append(" · ").append(e.symbol == null ? "—" : e.symbol)
-              .append(" · ").append(com.longexposure.scoring.BreakdownFmt.toEtTime(e.ts.toInstant()))
-              .append(" ET — ").append(body).append("\n");
+        // SESSION SHAPE — phase distribution so model sees proportions before events.
+        sb.append("SESSION SHAPE (event counts by phase):\n");
+        com.fasterxml.jackson.databind.JsonNode byPhase = dayAggregates.path("by_session_phase");
+        // Render in chronological phase order for readability.
+        String[] phaseOrder = {"overnight", "pre_market", "opening_5min", "early_session",
+                                "midday", "late_session", "closing_5min"};
+        for (String phase : phaseOrder) {
+            int n = byPhase.path(phase).asInt(0);
+            if (n > 0) {
+                sb.append("  ").append(phaseLabel(phase)).append(": ").append(n).append('\n');
+            }
         }
         sb.append('\n');
 
-        sb.append("Now write the day's themes paragraph (3-6 sentences, journalist register).\n");
-        sb.append("Constraints (re-stating the SYSTEM prompt's rules — read carefully):\n");
-        sb.append("  - QUALITATIVE language about activity volume: 'heavy', 'multiple',\n");
-        sb.append("    'frequent', 'sustained', 'dominated', 'clustered'. NEVER specific counts.\n");
-        sb.append("  - Specific numbers are allowed ONLY if they appear in a per-event\n");
-        sb.append("    interpretation above (a dollar value, duration, percentage).\n");
-        sb.append("  - Every ticker mentioned must appear in today's per-event list.\n");
-        sb.append("  - No intent claims ('manipulation', 'spoofing'), no external news,\n");
-        sb.append("    no comparison to other days.\n");
+        // SCORER COUNTS for the whole day.
+        sb.append("SCORER COUNTS (whole day):\n");
+        com.fasterxml.jackson.databind.JsonNode byScorer = dayAggregates.path("by_scorer");
+        java.util.Iterator<String> scorerNames = byScorer.fieldNames();
+        java.util.List<String> sortedScorers = new java.util.ArrayList<>();
+        while (scorerNames.hasNext()) sortedScorers.add(scorerNames.next());
+        java.util.Collections.sort(sortedScorers);
+        for (String s : sortedScorers) {
+            sb.append("  ").append(s).append(": ").append(byScorer.path(s).asInt(0)).append('\n');
+        }
+        sb.append('\n');
+
+        // TOP SYMBOLS by event count.
+        com.fasterxml.jackson.databind.JsonNode topSymbols = dayAggregates.path("top_symbols_by_event_count");
+        if (topSymbols.isArray() && topSymbols.size() > 0) {
+            sb.append("TOP SYMBOLS BY EVENT COUNT:\n");
+            for (com.fasterxml.jackson.databind.JsonNode sym : topSymbols) {
+                sb.append("  ").append(sym.path("symbol").asText()).append(": ")
+                  .append(sym.path("count").asInt()).append('\n');
+            }
+            sb.append('\n');
+        }
+
+        // Split events into day-level (inter-day signals) and intraday (event-shaped).
+        java.util.List<EventRow> dayLevel = new java.util.ArrayList<>();
+        java.util.List<EventRow> intraday = new java.util.ArrayList<>();
+        for (EventRow e : events) {
+            if (INTER_DAY_SCORERS_FOR_SYNTH.contains(e.scorerId)) {
+                dayLevel.add(e);
+            } else {
+                intraday.add(e);
+            }
+        }
+
+        // DAY-LEVEL SIGNALS (inter-day metrics — no clock anchor).
+        if (!dayLevel.isEmpty()) {
+            sb.append("DAY-LEVEL SIGNALS (inter-day measurements, no clock anchor — ")
+              .append(dayLevel.size()).append(" symbols):\n");
+            for (EventRow e : dayLevel) {
+                String body = (e.interpretation != null && !e.interpretation.isBlank())
+                              ? e.interpretation.trim()
+                              : (e.narration != null ? e.narration.trim() : "(no narration)");
+                sb.append("  [").append(e.scorerId).append("] ")
+                  .append(e.symbol == null ? "—" : e.symbol).append(" — ")
+                  .append(body).append('\n');
+            }
+            sb.append('\n');
+        }
+
+        // INTRADAY EVENTS grouped by session phase, score-ordered within each phase.
+        sb.append("INTRADAY EVENTS (regular-session story — grouped by phase, ")
+          .append(intraday.size()).append(" events):\n\n");
+        for (String phase : phaseOrder) {
+            // Filter events in this phase + sort by score descending.
+            java.util.List<EventRow> phaseEvents = new java.util.ArrayList<>();
+            for (EventRow e : intraday) {
+                String evtPhase = com.longexposure.scoring.BreakdownFmt.sessionPhase(e.ts.toInstant());
+                if (phase.equals(evtPhase)) phaseEvents.add(e);
+            }
+            if (phaseEvents.isEmpty()) continue;
+            phaseEvents.sort((a, b) -> Double.compare(b.score, a.score));
+            sb.append("  ").append(phaseLabel(phase)).append(" (").append(phaseEvents.size())
+              .append("):\n");
+            for (EventRow e : phaseEvents) {
+                String body = (e.interpretation != null && !e.interpretation.isBlank())
+                              ? e.interpretation.trim()
+                              : (e.narration != null ? e.narration.trim() : "(no narration)");
+                sb.append("    [").append(e.scorerId).append("] ")
+                  .append(e.symbol == null ? "—" : e.symbol).append(" · ")
+                  .append(com.longexposure.scoring.BreakdownFmt.toEtTime(e.ts.toInstant()))
+                  .append(" ET — ").append(body).append('\n');
+            }
+            sb.append('\n');
+        }
+
+        // Closing instruction. Trust the system prompt for rules; no Constraints
+        // duplication block here.
+        sb.append("Write the day's themes paragraph now.\n");
         return sb.toString();
+    }
+
+    private static final java.util.Set<String> INTER_DAY_SCORERS_FOR_SYNTH =
+            java.util.Set.of("volume_deviation", "time_in_book_drift");
+
+    private static String phaseLabel(final String phase) {
+        return switch (phase) {
+            case "overnight"     -> "Overnight (16:00 prior day - 04:00 ET)";
+            case "pre_market"    -> "Pre-market (04:00 - 09:30 ET)";
+            case "opening_5min"  -> "Opening 5 min (09:30 - 09:35 ET)";
+            case "early_session" -> "Early session (09:35 - 11:30 ET)";
+            case "midday"        -> "Midday (11:30 - 15:00 ET)";
+            case "late_session"  -> "Late session (15:00 - 15:55 ET)";
+            case "closing_5min"  -> "Close (15:55 - 16:00 ET)";
+            default              -> phase;
+        };
     }
 
     /**
@@ -525,6 +577,7 @@ public final class SynthesizeDayActivityImpl implements SynthesizeDayActivity {
         String scorerId;
         String symbol;
         Timestamp ts;
+        double score;
         String narration;
         String interpretation;
     }

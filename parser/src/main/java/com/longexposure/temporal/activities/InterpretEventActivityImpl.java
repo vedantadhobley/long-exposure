@@ -60,7 +60,7 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
      * <p>v10 added the pattern-name mislabel check; v9 added supporting
      * analytics (slippage, OFI, etc.).
      */
-    private static final String PROMPT_VERSION = "interpret-v14-no-literal-day-count-2026-05-30";
+    private static final String PROMPT_VERSION = "interpret-v15-drivers-list-2026-05-31";
 
     /** Half-window for the surrounding trade context. */
     private static final long WINDOW_SECONDS = 60L;
@@ -352,34 +352,43 @@ public final class InterpretEventActivityImpl implements InterpretEventActivity 
         // sequential context that doesn't exist.
         if (INTER_DAY_SCORERS.contains(row.scorerId)) {
             return  "Scorer: " + row.scorerId + " (DAY-LEVEL inter-day signal)\n\n"
-                  + "Catalog entry for this scorer:\n"
-                  + "  mechanism: " + catalog.mechanism() + "\n"
-                  + "  canonical_interpretation: " + catalog.canonicalInterpretation() + "\n\n"
+                  + "Pattern at the wire level:\n"
+                  + "  " + catalog.mechanism() + "\n\n"
+                  + "Documented drivers (multiple legitimate causes — never a single intent claim):\n"
+                  + driversList(catalog) + "\n"
                   + "Breakdown JSON (the day-level measurement):\n"
                   + row.breakdown.toString() + "\n\n"
-                  + "Now write 1-2 sentences interpreting what the magnitude means for "
-                  + "this symbol today. Frame it using the catalog's documented drivers "
-                  + "(multiple legitimate causes — never a single intent claim). The "
-                  + "drift / deviation is a regime signal, not a temporally-anchored "
-                  + "event, so do NOT reference 'pre-event' or 'post-event' windows, "
-                  + "and do NOT invent sequential context. Stay grounded — every "
-                  + "number must come from the breakdown.";
+                  + "Write 1-2 sentences interpreting what today's magnitude means for "
+                  + "this symbol, drawing on the drivers above. The drift / deviation is a "
+                  + "day-level signal, not a temporally-anchored event — do NOT reference "
+                  + "'pre-event' or 'post-event' windows. Use your own framing; the model "
+                  + "knows journalist register. Stay grounded — every number must come "
+                  + "from the breakdown.";
         }
         return  "Scorer: " + row.scorerId + "\n\n"
-              + "Catalog entry for this scorer:\n"
-              + "  mechanism: " + catalog.mechanism() + "\n"
-              + "  canonical_interpretation: " + catalog.canonicalInterpretation() + "\n\n"
+              + "Pattern at the wire level:\n"
+              + "  " + catalog.mechanism() + "\n\n"
+              + "Documented drivers (multiple legitimate causes — never a single intent claim):\n"
+              + driversList(catalog) + "\n"
               + "Breakdown JSON (the event's own measurements):\n"
               + row.breakdown.toString() + "\n\n"
               + "Surrounding wire context (same symbol, DPLS feed):\n"
               + "  PRE-EVENT window  (immediately preceding the event): " + pre.toPromptLine() + "\n"
               + "  POST-EVENT window (immediately following the event): " + post.toPromptLine() + "\n"
               + "  DERIVED cross-window metrics: " + derivedLine(derived) + "\n\n"
-              + "Now write 1-2 sentences identifying the sequential / causal context "
-              + "the surrounding data reveals. If both windows are empty / quiet, say "
-              + "so — isolation is a valid observation. Stay grounded — every number "
-              + "must come from the breakdown or the surrounding context, and do not "
-              + "mention the window size.";
+              + "Write 1-2 sentences identifying the sequential / causal context the "
+              + "surrounding data reveals. If both windows are empty / quiet, say so — "
+              + "isolation is a valid observation. Use your own framing. Stay grounded — "
+              + "every number must come from the breakdown or the surrounding context, "
+              + "and do not mention the window size.";
+    }
+
+    private static String driversList(final Catalog.Entry catalog) {
+        StringBuilder sb = new StringBuilder();
+        for (String driver : catalog.documentedDrivers()) {
+            sb.append("  - ").append(driver).append('\n');
+        }
+        return sb.toString();
     }
 
     /**
