@@ -53,7 +53,7 @@ public final class AggregateQuarterActivityImpl implements AggregateQuarterActiv
      * week tier (AggregateWeekActivityImpl v7). v2 added word-form numeral
      * grounding.
      */
-    private static final String PROMPT_VERSION = "aggregate-quarter-v4-qualitative-themes-2026-05-30";
+    private static final String PROMPT_VERSION = "aggregate-quarter-v5-allowed-streak-whitelist-2026-05-31";
 
     /**
      * Minimum weekly rollups in the quarter before the activity does an LLM
@@ -100,12 +100,12 @@ public final class AggregateQuarterActivityImpl implements AggregateQuarterActiv
             iceberg, liquidity withdrawal, halt, volume surge, time-in-book
             drift) is the pattern-name surface; use it.
 
-            STREAK CLAIMS. When you have N prior quarterly rollups available,
-            the longest honest streak you can claim is N+1 quarters. With 0
-            prior quarters, do NOT make any quarter-over-quarter comparison.
-            With 1 prior quarter, the strongest claim is "a second consecutive
-            quarter" — never "third / fourth / fifth …" which would invent
-            quarters you cannot see.
+            STREAK CLAIMS. The user prompt's "ALLOWED STREAK PHRASING" section
+            is the COMPLETE whitelist of streak phrasings you may use. Any
+            "Nth consecutive quarter" / "Nth straight quarter" must exactly
+            match an entry there. If the whitelist says NONE, omit streak
+            phrasing entirely. There is no shortcut — the whitelist is
+            exhaustive.
 
             FOCUS. A QUARTER is a long horizon. Prefer themes that are
             QUARTER-shaped: persistent regimes (e.g., "leveraged-ETF dominance
@@ -316,7 +316,6 @@ public final class AggregateQuarterActivityImpl implements AggregateQuarterActiv
             int n = priors.size();
             sb.append("PRIOR QUARTERS (").append(n).append(" quarter").append(n == 1 ? "" : "s")
               .append(" of trend context — the ONLY earlier quarters you know about; ")
-              .append("the longest honest streak is ").append(n + 1).append(" quarters; ")
               .append("do NOT present these as this quarter's activity):\n\n");
             for (int i = priors.size() - 1; i >= 0; i--) {
                 PriorQuarter p = priors.get(i);
@@ -325,6 +324,8 @@ public final class AggregateQuarterActivityImpl implements AggregateQuarterActiv
                   .append("\n\n");
             }
         }
+        sb.append(com.longexposure.synth.StreakPhrasings.allowedStreakPhrasings(priors.size(), "quarter"))
+          .append("\n\n");
 
         sb.append("THIS QUARTER — PER-WEEK THEMES (chronological, ").append(weeks.size()).append(" weeks):\n\n");
         for (WeekRow w : weeks) {

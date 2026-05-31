@@ -42,7 +42,7 @@ public final class AggregateYearActivityImpl implements AggregateYearActivity {
             .getOrDefault("LLAMA_MODEL", "Qwen3.5-122B-A10B");
 
     /** v3 (2026-05-28 evening) wires AttributionVerifier; see AggregateQuarterActivityImpl. */
-    private static final String PROMPT_VERSION = "aggregate-year-v4-qualitative-themes-2026-05-30";
+    private static final String PROMPT_VERSION = "aggregate-year-v5-allowed-streak-whitelist-2026-05-31";
 
     /** Quarterly rollups needed in the year before the LLM call fires. */
     private static final int MIN_QUARTERS_FOR_YEAR = 2;
@@ -77,8 +77,11 @@ public final class AggregateYearActivityImpl implements AggregateYearActivity {
             participant attribution, NO outside news/causal hypotheses, NO
             editorializing.
 
-            STREAK CLAIMS. Bound any streak claim to the prior-yearly count
-            + 1. With 0 prior years, do not make year-over-year comparisons.
+            STREAK CLAIMS. The user prompt's "ALLOWED STREAK PHRASING" section
+            is the COMPLETE whitelist of streak phrasings you may use. Any
+            "Nth consecutive year" / "Nth straight year" claim must exactly
+            match an entry there. If the whitelist says NONE, omit streak
+            phrasing entirely.
 
             FOCUS. A YEAR is the longest horizon — prefer themes that play
             out across multiple quarters: regime shifts that crossed quarter
@@ -274,7 +277,7 @@ public final class AggregateYearActivityImpl implements AggregateYearActivity {
         } else {
             int n = priors.size();
             sb.append("PRIOR YEARS (").append(n).append(" year").append(n == 1 ? "" : "s")
-              .append(" of trend context; longest honest streak is ").append(n + 1).append(" years):\n\n");
+              .append(" of trend context):\n\n");
             for (int i = priors.size() - 1; i >= 0; i--) {
                 PriorYear p = priors.get(i);
                 sb.append("[year ").append(p.yearStart.getYear()).append("] ")
@@ -282,6 +285,8 @@ public final class AggregateYearActivityImpl implements AggregateYearActivity {
                   .append("\n\n");
             }
         }
+        sb.append(com.longexposure.synth.StreakPhrasings.allowedStreakPhrasings(priors.size(), "year"))
+          .append("\n\n");
 
         sb.append("THIS YEAR — PER-QUARTER THEMES (chronological, ").append(quarters.size()).append(" quarters):\n\n");
         for (QuarterRow q : quarters) {

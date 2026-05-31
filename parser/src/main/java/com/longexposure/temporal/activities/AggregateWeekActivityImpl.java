@@ -69,7 +69,7 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
      * numerals; see {@link SynthesizeDayActivityImpl}'s PROMPT_VERSION
      * comment for the full rationale.
      */
-    private static final String PROMPT_VERSION = "aggregate-v10-no-literal-day-count-2026-05-30";
+    private static final String PROMPT_VERSION = "aggregate-v11-allowed-streak-whitelist-2026-05-31";
 
     /**
      * Prior weekly rollups passed as week-over-week trend context. Set to 13 =
@@ -152,13 +152,15 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
             Do not claim external events ("the Fed", "earnings", "geopolitics"). Do
             not speculate about intent. Do not editorialize about severity.
             Week-over-week comparison IS welcome when grounded in the PRIOR WEEKS
-            block — but a STREAK claim must not exceed the number of prior weeks
-            provided, plus this week. The prompt tells you how many prior weeks
-            you have: with N prior weeks the longest honest streak is N+1 weeks.
-            With 1 prior week, the strongest claim is "a second consecutive week"
-            or "again vs last week" — NEVER "third", "fourth", "fifth …
-            consecutive/straight week", which would invent weeks you cannot see.
-            When unsure, drop the count: "continuing from last week" is always safe.
+            block. STREAK claims are CONSTRAINED to the exact phrasings listed
+            in the user prompt's "ALLOWED STREAK PHRASING" section — that
+            section is the COMPLETE whitelist. If you write any "Nth consecutive
+            week" / "Nth straight week" phrasing, it MUST exactly match an entry
+            in that whitelist. If the whitelist says NONE, omit streak phrasing
+            entirely. There is no shortcut, no judgment call, no "the data feels
+            like a streak" — the whitelist is exhaustive. When the whitelist has
+            no entry that fits what you want to say, prefer "continuing from
+            last week" (always safe; asserts no specific count).
 
             CANONICAL VOCABULARY (consistency across paragraphs is load-bearing
             — the same metric named different ways across tiers reads as
@@ -409,13 +411,9 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
                     + "Do NOT make any week-over-week comparison or reference earlier weeks, "
                     + "streaks, or trends; describe only THIS week.\n\n");
         } else {
-            // State the COUNT explicitly so the model can bound any streak claim
-            // to (priors + 1) weeks — without it, the model invents streak lengths
-            // ("fifth consecutive week" off a single prior week).
             int n = priors.size();
             sb.append("PRIOR WEEKS (").append(n).append(" week").append(n == 1 ? "" : "s")
               .append(" of trend context — the ONLY earlier weeks you know about; ")
-              .append("the longest honest streak is ").append(n + 1).append(" weeks; ")
               .append("do NOT present these as this week's activity):\n\n");
             // Chronological (oldest-first) reads more naturally as a trend run-up.
             for (int i = priors.size() - 1; i >= 0; i--) {
@@ -425,6 +423,11 @@ public final class AggregateWeekActivityImpl implements AggregateWeekActivity {
                   .append("\n\n");
             }
         }
+        // Whitelist-based streak constraint — replaces the older "longest honest
+        // streak is N+1" arithmetic-trust language. Model picks a verbatim form
+        // from this whitelist or omits streak phrasing entirely.
+        sb.append(com.longexposure.synth.StreakPhrasings.allowedStreakPhrasings(priors.size(), "week"))
+          .append("\n\n");
 
         sb.append("THIS WEEK — PER-DAY THEMES (chronological, ").append(days.size()).append(" days):\n\n");
         for (DayRow d : days) {
