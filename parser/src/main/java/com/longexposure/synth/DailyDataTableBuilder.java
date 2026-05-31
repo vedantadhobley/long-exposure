@@ -356,30 +356,93 @@ public final class DailyDataTableBuilder {
      * The "one-line headline" for an event — the metric a journalist would
      * lead with for this scorer type. Drawn from pre-formatted breakdown
      * fields. Pure data layer; no inference.
+     *
+     * <p>Defensive on optional fields: clauses whose underlying value is
+     * null/missing/empty are OMITTED rather than rendered with a "?" or
+     * "0" placeholder. The book-replay-derived pct_of_book_removed in
+     * particular is null on liquidity_withdrawal events whose enrichment
+     * step didn't populate it; rendering "?% of book" reads as broken UI.
      */
     private static String headlineMetricFor(final String scorerId, final ObjectNode bd) {
         return switch (scorerId) {
-            case "halt"                 -> textOr(bd, "halt_duration", "")
-                                            + " halt ("
-                                            + textOr(bd, "halt_reason_label", "trading halt")
-                                            + ")";
-            case "large_trade"          -> textOr(bd, "notional_dollars", "$?") + " block";
-            case "sweep"                -> textOr(bd, "notional_dollars", "$?")
-                                            + " sweep, "
-                                            + intOr(bd, "distinct_levels", 0) + " levels";
-            case "iceberg"              -> intOr(bd, "fills", 0) + " fills, "
-                                            + textOr(bd, "total_shares", "?") + " shares";
-            case "layering"             -> intOr(bd, "orders", 0) + " orders, "
-                                            + intOr(bd, "distinct_levels", 0) + " levels";
-            case "post_cancel_cluster"  -> intOr(bd, "orders", 0) + " orders, "
-                                            + textOr(bd, "median_lifetime_ms", "?") + "ms median";
-            case "liquidity_withdrawal" -> textOr(bd, "deletes", "?") + " deletes, "
-                                            + textOr(bd, "pct_of_book_removed", "?") + "% of book";
-            case "volume_deviation"     -> textOr(bd, "deviation_x", "?") + "x trailing median";
-            case "time_in_book_drift"   -> textOr(bd, "drift_x", "?") + "x "
-                                            + textOr(bd, "drift_direction", "") + " lifetime";
+            case "halt"                 -> joinNonEmpty(" ",
+                                            textOrNull(bd, "halt_duration"),
+                                            "halt",
+                                            parenIfPresent(textOrNull(bd, "halt_reason_label")));
+            case "large_trade"          -> joinNonEmpty(" ",
+                                            textOrNull(bd, "notional_dollars"),
+                                            "block");
+            case "sweep"                -> joinNonEmpty(", ",
+                                            joinNonEmpty(" ", textOrNull(bd, "notional_dollars"), "sweep"),
+                                            intClauseOrNull(bd, "distinct_levels", "levels"));
+            case "iceberg"              -> joinNonEmpty(", ",
+                                            intClauseOrNull(bd, "fills", "fills"),
+                                            textClauseOrNull(bd, "total_shares", "shares"));
+            case "layering"             -> joinNonEmpty(", ",
+                                            intClauseOrNull(bd, "orders", "orders"),
+                                            intClauseOrNull(bd, "distinct_levels", "levels"));
+            case "post_cancel_cluster"  -> joinNonEmpty(", ",
+                                            intClauseOrNull(bd, "orders", "orders"),
+                                            suffixClauseOrNull(bd, "median_lifetime_ms", "ms median"));
+            case "liquidity_withdrawal" -> joinNonEmpty(", ",
+                                            textClauseOrNull(bd, "deletes", "deletes"),
+                                            suffixClauseOrNull(bd, "pct_of_book_removed", "% of book"));
+            case "volume_deviation"     -> suffixClauseOr(bd, "deviation_x", "x trailing median", scorerId);
+            case "time_in_book_drift"   -> joinNonEmpty(" ",
+                                            suffixClauseOrNull(bd, "drift_x", "x"),
+                                            textOrNull(bd, "drift_direction"),
+                                            "lifetime");
             default                      -> scorerId;
         };
+    }
+
+    /** Returns the string value at {@code key} or null if absent / empty / "null". */
+    private static String textOrNull(final ObjectNode bd, final String key) {
+        if (!bd.has(key) || bd.get(key).isNull()) return null;
+        String s = bd.get(key).asText();
+        return (s == null || s.isEmpty()) ? null : s;
+    }
+
+    /** "{value} {label}" or null if value missing. */
+    private static String textClauseOrNull(final ObjectNode bd, final String key, final String label) {
+        String v = textOrNull(bd, key);
+        return v == null ? null : v + " " + label;
+    }
+
+    /** "{intValue} {label}" or null if integer-shape field is absent or 0. */
+    private static String intClauseOrNull(final ObjectNode bd, final String key, final String label) {
+        if (!bd.has(key) || bd.get(key).isNull()) return null;
+        int v = bd.get(key).asInt(0);
+        return v == 0 ? null : v + " " + label;
+    }
+
+    /** "{value}{suffix}" with no space (suffix already starts with unit) or null. */
+    private static String suffixClauseOrNull(final ObjectNode bd, final String key, final String suffix) {
+        String v = textOrNull(bd, key);
+        return v == null ? null : v + suffix;
+    }
+
+    /** Same as suffixClauseOrNull but falls back to the scorer id when both are missing. */
+    private static String suffixClauseOr(final ObjectNode bd, final String key, final String suffix,
+                                          final String fallback) {
+        String v = textOrNull(bd, key);
+        return v == null ? fallback : v + suffix;
+    }
+
+    /** "({inner})" or null if inner missing. */
+    private static String parenIfPresent(final String inner) {
+        return inner == null ? null : "(" + inner + ")";
+    }
+
+    /** Join non-null / non-empty parts with the separator. Skips null/empty entries. */
+    private static String joinNonEmpty(final String sep, final String... parts) {
+        StringBuilder sb = new StringBuilder();
+        for (String p : parts) {
+            if (p == null || p.isEmpty()) continue;
+            if (sb.length() > 0) sb.append(sep);
+            sb.append(p);
+        }
+        return sb.length() == 0 ? "—" : sb.toString();
     }
 
     /** The "when" column for the headline row. */
