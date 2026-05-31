@@ -6,6 +6,138 @@ Append-only record of architectural and operational decisions, ordered by date. 
 
 ---
 
+## 2026-05-31 — v15 holistic prompt refactor: examples become templates; trust the model with data, not rules
+
+The deepest prompt-engineering insight of the project, surfaced by direct user
+push-back on prose quality after eleven days of "100% verifier pass" had been
+documented as the launch-readiness ceiling.
+
+**The discovery.** The user noticed that 6 of 11 daily syntheses opened with
+"regime shift" framing centered on overnight / pre-market activity, even
+though pre-market is only ~5% of each day's event count. Audit confirmed: 19
+of 19 `time_in_book_drift` INTERPRET prose outputs on 2026-05-22 contained
+"regime shift". When SYNTHESIZE read 19 events all containing that phrase, it
+elevated "regime shift" to the day's theme. The cascade ran four layers deep.
+
+**The root cause.** `Catalog.Entry.canonicalInterpretation` for
+`time_in_book_drift` was a prose string starting **"Time-in-book drift
+describes a regime shift in how long orders rest on a symbol's book…"**.
+`InterpretEventActivityImpl` injected this string verbatim into every
+drift event's prompt as the documented driver reference. The 122B model
+treated it as a TEMPLATE — copying the dramatic vocabulary into every output.
+
+Three additional layers reinforced it:
+
+  1. **SYNTHESIZE system prompt** contained the example "regime shifts across
+     the session ('the morning's active layering quieted to afternoon
+     institutional blocks')" — listed as a POSITIVE thing the paragraph could
+     identify. Direct invitation to use the phrase.
+  2. **The per-event list was sorted chronologically.** `time_in_book_drift`
+     events have `event_ts = 20:00 UTC = 16:00 ET` (end of prior trading day).
+     They sorted BEFORE every regular-session event. The model leads with
+     what it reads first — and what it read first was 19 "regime shift"
+     interpretations.
+  3. **User prompt re-stated system prompt rules at the bottom**
+     ("Constraints: re-stating the SYSTEM prompt's rules…"). Band-aid duplication
+     hoping the model would honor rules twice.
+
+**The decision.** Treat the 122B/A10B model as the smart system it is. Replace
+prose-template injection with structured-data injection. Trim heavy DO/DON'T
+rules. Trust the model's journalist instincts.
+
+  - `Catalog.Entry.canonicalInterpretation` (prose string) replaced with
+    `Catalog.Entry.documentedDrivers` (`List<String>` of factual driver
+    descriptions). No prose for the model to copy; the prompt assembles
+    the drivers as a bulleted list of options.
+
+  - **INTERPRET** system+user prompts trimmed; for inter-day events,
+    inject drivers list with "Use your own framing" closing instruction.
+    `PROMPT_VERSION` bumped `v14 → v15`.
+
+  - **SYNTHESIZE** system prompt trimmed `~4900 → ~2000 chars`. Removed:
+    the "regime shifts across the session" example (the exact failure
+    mode), the lengthy DO/DON'T QUALITATIVE-ONLY block, duplicate canonical
+    vocabulary, the Constraints re-statement at the user-prompt bottom.
+    Added: `STYLE: vary your lede` — one structural sentence.
+
+  - **SYNTHESIZE** user prompt restructured. Was: chronological per-event
+    list. Now:
+      - `SESSION SHAPE` line (phase counts so model sees proportions)
+      - `SCORER COUNTS` for the whole day
+      - `TOP SYMBOLS BY EVENT COUNT`
+      - `DAY-LEVEL SIGNALS` — inter-day metrics in a separate section,
+        NOT mixed with temporal events (because they aren't temporal)
+      - `INTRADAY EVENTS` grouped by session phase, **score-ordered**
+        within each phase. The model sees the highest-scoring regular-
+        session events first instead of the chronologically-first inter-day
+        signals. `PROMPT_VERSION` bumped `v12 → v13`.
+
+  - **AGGREGATE-week** mirrored: trim system prompt, keep load-bearing
+    streak whitelist, add STYLE note. `PROMPT_VERSION` `v11 → v12`.
+
+**Empirical result.** Single-day re-run on 2026-05-20 (a heavily formulaic
+day under v12) under v13/v15:
+
+  - Inter-day `regime shift` rate: `100% (19/19)` → `39% (13/33)`. Not zero,
+    but a 61-point drop. The model still reaches for the phrase as
+    journalistic connective tissue (it's a stock financial term in training),
+    but no longer in every single output.
+
+  - **SYNTHESIZE lede** changed structurally:
+    - **v12**: "Overnight and pre-market activity on May 20 was dominated
+      by a regime shift toward rapid quote cycling…"
+    - **v13**: "A day defined by structural liquidity vacuums saw rapid
+      quote cycling dominate across diverse ETFs…"
+    - Lede framing is now the model's own ("structural liquidity vacuums"),
+      not the catalog's. Inter-day signals appear as supporting detail
+      mid-paragraph, not as the opener.
+
+  - 179/179 INTERPRETs verifier-passed at v15. Synth verifier-passed at v13.
+
+**The transferable insight (this is what the whitepaper will cite).**
+
+Every example a prompt provides becomes a template the model copies. This
+applies even for smart models — especially for smart models, because
+following examples precisely is one of the things they're trained to do.
+
+So when a prompt contains positive examples like "regime shifts across the
+session ('layering quieted to afternoon blocks')", the model treats the
+example phrasing as canonical. When a catalog field is a labeled `prose
+description` paragraph, the model treats it as a template to echo.
+
+The structural fix isn't "add a DON'T rule". It's: REMOVE the example.
+Replace prose strings with structured data the model assembles. Trust the
+model's journalism training to write its own framing.
+
+Companion observations:
+
+  - Heavy `DO/DON'T` lists are bloat for a 122B model. One concise rule
+    + structured data + a "use your own framing" closing beats fifty lines
+    of examples. Examples in prompts are seductive — they FEEL clarifying
+    but they ARE templates.
+  - Chronological sort is a default, not a deliberate choice. Score-ordering
+    within phase-groupings biases the model toward leading with the
+    biggest events of the regular session, not the first events of the day.
+    Pre-market low-volume hours stop dominating just because they come
+    chronologically first.
+  - Catalog `canonicalInterpretation` was useful in v0 when nothing else
+    fit. By v15 it had become the single biggest source of formulaic
+    prose. The "use a safe canonical phrase" instinct from early
+    development became the failure mode in mature operation.
+
+**What's open / deferred.**
+
+  - The 39% residual inter-day "regime shift" is acceptable for launch —
+    the SYNTHESIZE lede no longer cascades it, and the per-event prose
+    is the secondary surface (~3-min read). Post-launch hardening could
+    add a "vary connective vocabulary" hint or a soft denylist if the
+    rate doesn't fall further as the dataset grows.
+  - DESCRIBE prompts (`ScorerPrompts.COMMON_PREAMBLE`) intentionally NOT
+    trimmed. Empirical evidence: DESCRIBE prose is genuinely varied
+    across all scorers; the heavy structural rules there do real work
+    preventing field-name leakage / wrong-noun / time-anchor failures.
+    Different layers warrant different prompt density.
+
 ## 2026-05-30 (later) — Pre-format awkward values at the data layer, not in the prompt
 
 Five prompt iterations in one night (extract-v10 → v11 → v12 → v13 → v14)
