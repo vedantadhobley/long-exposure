@@ -27,7 +27,7 @@ import java.util.Map;
 public final class BlueprintExtractor {
 
     /** Bump this string when the prompt or output shape changes. Used in the event_hash. */
-    public static final String PROMPT_VERSION = "extract-v16-no-literal-day-count-2026-05-30";
+    public static final String PROMPT_VERSION = "extract-v17-fix-per-scorer-canonical-contradictions-2026-05-31";
 
     /*
      * v12 (2026-05-30) — Refactor A. Replaces the v10/v11 universal 200-line

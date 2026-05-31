@@ -307,10 +307,12 @@ public final class ScorerPrompts {
               - notional_dollars         — the size of the sweep
               - distinct_levels          — "walked N price levels"
               - slippage_bps             — paired with slippage_direction
-                ("11.0 bps up" / "5.6 bps down"). Render as "walked N bps
-                up across L levels" or "slippage of N bps up". slippage_bps
-                and slippage_direction are TWO key_numbers entries (the
-                direction is a categorical class label per the preamble).
+                ("11.0 bps up" / "5.6 bps down"). Render per the preamble's
+                canonical form: "slipped N bps" or "N bps slippage" (number-
+                then-unit-then-metric). slippage_bps and slippage_direction
+                are TWO key_numbers entries (the direction is a categorical
+                class label per the preamble). The direction word ("up" /
+                "down") composes naturally: "slipped 11.0 bps up".
               - effective_spread_bps     — "effective spread of N bps"
               - pre_event_ofi_class      — when non-"balanced", buyer/seller
                 lean before
@@ -358,9 +360,10 @@ public final class ScorerPrompts {
                 side of the book was layered ("on the bid side", "ask-side
                 layering"). Render verbatim per the categorical rule.
               - distinct_levels              — "spanning N distinct price levels"
-              - depth_from_touch_near_bps    — when present, "the layered band
-                sat N bps off the touch" (NB: "off the touch", not "from
-                the BBO")
+              - depth_from_touch_near_bps    — render per the preamble's canonical
+                form: "N basis points from the touch" or "N bps from the best
+                price". NEVER "off the touch" ("off" is ambiguous) or "from BBO"
+                (acronym-heavy).
               - order_to_trade_phrase / order_to_trade_ratio — per preamble
               - burstiness_class             — label alone, no Fano
 
@@ -384,8 +387,10 @@ public final class ScorerPrompts {
             HEADLINE FIELDS (pick 3-5 for key_numbers, in this priority):
               - fills                    — "N fills" / "N executions"
               - total_shares             — "N,NNN total shares"
-              - display_ratio_pct        — "with a display ratio of N%" /
-                "N% display ratio"
+              - display_ratio_pct        — render per the preamble's canonical
+                form: "the displayed tip represented N% of total executed" or
+                "displayed only N% of total size". NEVER "display ratio of N%"
+                or "N% display ratio" — those are field-name leaks.
               - refill_cadence_class     — "metronomic refills" / "regular
                 cadence" / "irregular cadence" / "erratic refills".
                 Render the LABEL ALONE per the preamble. Do NOT include
@@ -410,7 +415,9 @@ public final class ScorerPrompts {
                 bid and ask pulled), "bid-side" / "ask-side" (concentrated
                 on one side). Per preamble, render the label verbatim — do
                 NOT include withdrawal_sidedness_ratio as a parenthetical.
-              - pct_of_book_removed      — "removed N% of the displayed book"
+              - pct_of_book_removed      — render per the preamble's canonical
+                form: "removed N% of displayed depth". NEVER "of the visible
+                book" / "of the displayed book" / "of available liquidity".
               - recovery_seconds         — when present and meaningful, "the
                 book recovered within N seconds" (or "had not recovered by
                 end-of-window" if recovery_seconds is null/large)
